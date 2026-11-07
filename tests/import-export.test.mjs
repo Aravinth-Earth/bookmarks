@@ -104,6 +104,10 @@ test('a duplicate inside one import is counted, not added twice', () => {
   assert.equal(statistics.duplicates, 1);
   assert.equal(document.bookmarks.length, 1);
   assert.equal(document.bookmarks[0].name, 'One');
+
+  /* The dialog names the offender, so the count alone is not enough: the second row of the file
+     is the one that was dropped, and it has to be identifiable. */
+  assert.deepEqual(statistics.repeats, [{ url: 'https://example.com', name: 'Two' }]);
 });
 
 test('a malformed payload is refused rather than half-read', () => {

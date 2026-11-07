@@ -1671,6 +1671,16 @@ async function handleImport() {
     return;
   }
 
+  /* Two different collisions, counted apart: the file repeating itself, and the file meeting
+     what this vault already holds. Saying "duplicates 1" for either one is what made the dialog
+     unreadable. */
+  const incoming = parsed.document.bookmarks;
+  const existingUrls = new Set(state.document.bookmarks.map((bookmark) => bookmark.url));
+  const alreadyHere = incoming.filter((bookmark) => existingUrls.has(bookmark.url)).length;
+  const fresh = incoming.length - alreadyHere;
+  const repeats = parsed.statistics.repeats ?? [];
+  const unreadable = parsed.statistics.skipped ?? 0;
+
   const choice = await new Promise((resolve) => {
     let settled = false;
 
@@ -1686,11 +1696,38 @@ async function handleImport() {
       body: [
         el('p', {
           class: 'modal-note',
-          text: `That file holds ${parsed.document.bookmarks.length} bookmarks.`
+          text: `That file holds ${incoming.length} bookmark${incoming.length === 1 ? '' : 's'}.`
         }),
         el('p', {
           class: 'modal-note',
-          text: `Skipped ${parsed.statistics.skipped}, duplicates ${parsed.statistics.duplicates}. Merge keeps what is already here; replace discards it.`
+          text:
+            repeats.length === 0
+              ? 'It lists every site once — no repeats inside the file.'
+              : `${repeats.length} of them ${repeats.length === 1 ? 'is' : 'are'} the same site twice, so ${repeats.length === 1 ? 'it is' : 'they are'} kept once: ${repeats
+                  .slice(0, 2)
+                  .map((repeat) => repeat.url)
+                  .join(', ')}${repeats.length > 2 ? ', …' : ''}.`
+        }),
+        el('p', {
+          class: 'modal-note',
+          text:
+            alreadyHere === 0
+              ? 'None of them are in this vault yet.'
+              : fresh === 0
+                ? `All ${alreadyHere} are already in this vault — nothing new to add.`
+                : `${alreadyHere} ${alreadyHere === 1 ? 'is' : 'are'} already in this vault; Merge keeps your copy and adds the other ${fresh}.`
+        }),
+        ...(unreadable === 0
+          ? []
+          : [
+              el('p', {
+                class: 'modal-note',
+                text: `${unreadable} could not be read and would be left out.`
+              })
+            ]),
+        el('p', {
+          class: 'modal-note',
+          text: 'Merge keeps what this vault already has. Replace discards it and keeps only the file.'
         })
       ],
       actions: [
