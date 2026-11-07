@@ -203,11 +203,10 @@ The Worker fetches each icon from the site's own `/favicon.ico`, or from the
 the automatic run covers up to twenty hosts per launch. The image is downscaled to 32px in the
 browser and stored inside the sealed vault as a data URI.
 
-The browser never contacts a bookmarked site, and a site learns only that this Worker asked it
-for an icon, at that moment. The hostname travels in a request header, and the URL path carries
-only its SHA-256: an unsalted digest, so the domain stays hidden from a log reader only until a
-list of hostnames is tried against it. A site that cannot be reached, or that answers with
-something that is not an image, simply keeps its lettered tile.
+The browser never contacts a bookmarked site; this Worker does, and the site learns only that
+this Worker asked it for an icon, at that moment. The request names the host in a header, and the
+URL path carries only its SHA-256. A site that cannot be reached, or that answers with something
+that is not an image, simply keeps its lettered tile.
 
 ## Credits
 

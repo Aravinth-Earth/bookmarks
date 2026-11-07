@@ -6,9 +6,8 @@
  * can read them, the image can be downscaled and stored inside the sealed vault. After that the
  * icon is offline, and the host is asked again only if the icon is still missing a week later.
  *
- * The site learns that this Worker asked it for an icon, at that moment. The hostname travels
- * in a header; the query string carries only its SHA-256, an unsalted digest that a list of
- * hostnames can match.
+ * The site learns that this Worker asked it for an icon, at that moment. The hostname is what
+ * the request names; the query string carries only its SHA-256.
  */
 
 const API = '/w/bookmarks/api/icon';
