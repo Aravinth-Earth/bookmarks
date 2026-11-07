@@ -110,6 +110,17 @@
                 </button>
             </div>
 
+            <section id="sync-refusal" class="sync-refusal" role="alert" aria-labelledby="sync-refusal-title" hidden>
+                <div class="sync-refusal-copy">
+                    <p id="sync-refusal-title" class="sync-refusal-title">No room for a new account</p>
+                    <p class="sync-refusal-text">
+                        This server has a fixed number of vault spaces and all of them are in use, so it cannot create a new account.
+                        Write to <a href="mailto:feedback@8alias.com?subject=Bookmarks%20account%20request">feedback@8alias.com</a> to ask for one; this vault keeps working on this device.
+                    </p>
+                </div>
+                <button id="sync-refusal-dismiss" class="button button-quiet sync-refusal-dismiss" type="button">Dismiss</button>
+            </section>
+
             <p id="plan-note" class="plan-note" hidden></p>
 
             <form id="add-form" class="add" novalidate hidden>

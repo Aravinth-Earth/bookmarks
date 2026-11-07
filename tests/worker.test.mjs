@@ -287,6 +287,54 @@ test('an unreachable host is a 502 rather than a crash', async () => {
   assert.match(response.headers.get('cache-control'), /max-age=300/);
 });
 
+test('a body that trickles past the timeout is abandoned, not read to the end', { timeout: 10_000 }, async () => {
+  /* The host answers 200 with an image type and a length under the cap, then sends one byte at a
+     time slower than the timeout. The stream knows nothing of the request's signal, so only the
+     read itself can be given up on. */
+  const pulls = { count: 0 };
+  let cancelled = false;
+
+  const trickle = new ReadableStream(
+    {
+      pull(controller) {
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            if (cancelled) {
+              resolve();
+              return;
+            }
+            pulls.count += 1;
+            controller.enqueue(new Uint8Array([0x89]));
+            if (pulls.count >= 12) controller.close();
+            resolve();
+          }, 40);
+        });
+      },
+      cancel() {
+        cancelled = true;
+      }
+    },
+    { highWaterMark: 0 }
+  );
+
+  const response = await withFetch(
+    async () =>
+      new Response(trickle, {
+        headers: { 'content-type': 'image/png', 'content-length': '16' }
+      }),
+    () => worker.fetch(iconRequest(), { ...harness().env, ICON_TIMEOUT_MS: '50' })
+  );
+
+  assert.equal(response.status, 502, 'a timeout answers as a failure, not a short icon');
+  assert.match(response.headers.get('cache-control'), /max-age=300/);
+
+  const atTimeout = pulls.count;
+  assert.ok(atTimeout <= 2, `only ${atTimeout} byte(s) were read before giving up`);
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(pulls.count, atTimeout, 'nothing is read from the host after the timeout');
+});
+
 test('a page that declares its icon is followed, once', async () => {
   const asked = [];
 

@@ -35,6 +35,89 @@ export class SyncError extends Error {
   }
 }
 
+/**
+ * What a failed sync means to the person reading about it.
+ *
+ * The page owns the words it shows for a refusal that needs an address in it, so the cap case
+ * carries no `message`: it is the only failure with its own persistent notice. Every other case
+ * returns one sentence that a wrong phrase, a dead connection, a trial that has ended and a full
+ * server cannot share — those are different events and reading one as another is a lie.
+ */
+export function describeSyncFailure(error) {
+  const code = typeof error?.code === 'string' ? error.code : 'NETWORK';
+  const status = Number(error?.status) || 0;
+
+  switch (code) {
+    case 'FULL':
+      return { kind: 'cap', label: 'No new accounts' };
+    case 'TRIAL_ENDED':
+      return {
+        kind: 'trial',
+        label: 'Read-only',
+        message: 'The free sync period has ended. This device keeps every bookmark.'
+      };
+    case 'LOGIN_FAILED':
+      return status === 401
+        ? {
+            kind: 'phrase',
+            label: 'Not signed in',
+            message: 'The phrase did not match this account.'
+          }
+        : {
+            kind: 'server',
+            label: 'Not synced',
+            message: 'The server refused the sign-in.'
+          };
+    case 'NO_ACCOUNT':
+      return {
+        kind: 'missing',
+        label: 'Account not found',
+        message: 'This vault is not registered on the server.'
+      };
+    case 'LOCKED':
+      return { kind: 'locked', label: 'Locked out', message: 'Too many attempts. Try again later.' };
+    case 'CONFLICT':
+      return {
+        kind: 'conflict',
+        label: 'Sync conflict',
+        message: 'Another device changed the vault at the same time.'
+      };
+    case 'UNAUTHORIZED':
+      return { kind: 'unauthorized', label: 'Signing in…' };
+    case 'PUSH_FAILED':
+      return status === 413
+        ? {
+            kind: 'size',
+            label: 'Vault too large',
+            message:
+              'This vault is larger than the server allows. Export a sealed backup and trim it.'
+          }
+        : { kind: 'server', label: 'Not synced', message: 'The server did not save the vault.' };
+    case 'PULL_FAILED':
+      return { kind: 'server', label: 'Not synced', message: 'The server did not send the vault.' };
+    case 'REGISTER_FAILED':
+      return {
+        kind: 'server',
+        label: 'Not synced',
+        message: 'The server did not create the account.'
+      };
+    case 'CHALLENGE_FAILED':
+      return { kind: 'server', label: 'Not synced', message: 'The server did not answer.' };
+    case 'SESSIONS_FAILED':
+      return {
+        kind: 'server',
+        label: 'Not synced',
+        message: 'The server did not list the connected places.'
+      };
+    default:
+      return {
+        kind: 'network',
+        label: 'Offline',
+        message: 'No connection to the server. The vault still works on this device.'
+      };
+  }
+}
+
 export class SyncClient {
   constructor({ base = '/w/bookmarks/api', fetch: fetchImpl = globalThis.fetch.bind(globalThis) } = {}) {
     this.base = base.replace(/\/+$/, '');

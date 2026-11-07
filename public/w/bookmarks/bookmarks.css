@@ -335,6 +335,57 @@ a:focus-visible {
     font-size: var(--font-size-sm, 0.8rem);
 }
 
+/* A refusal is not a passing message: it stays in the page, in the danger colour, until the
+   person dismisses it or turns Sync off. It sits in the flow so it never covers the vault. */
+.sync-refusal {
+    display: flex;
+    gap: var(--space-3, 0.75rem);
+    align-items: flex-start;
+    justify-content: space-between;
+    margin: var(--space-3, 0.75rem) 0 0;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid color-mix(in srgb, var(--danger, #f85149) 60%, var(--border, #21262d));
+    border-left: 4px solid var(--danger, #f85149);
+    background: color-mix(in srgb, var(--danger, #f85149) 12%, var(--bg-elevated, #161b22));
+    border-radius: var(--radius-lg, 8px);
+}
+
+.sync-refusal[hidden] {
+    display: none;
+}
+
+.sync-refusal-copy {
+    min-width: 0;
+}
+
+.sync-refusal-title {
+    margin: 0;
+    /* Mixed toward the theme's text colour so the red stays readable on a light surface. */
+    color: color-mix(in srgb, var(--danger, #f85149) 55%, var(--text-primary, #c9d1d9));
+    font-size: var(--font-size-sm, 0.8rem);
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.sync-refusal-text {
+    margin: 0.25rem 0 0;
+    color: var(--text-primary, #c9d1d9);
+    font-size: var(--font-size-sm, 0.8rem);
+    line-height: 1.5;
+}
+
+.sync-refusal-text a {
+    color: color-mix(in srgb, var(--danger, #f85149) 55%, var(--text-primary, #c9d1d9));
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.sync-refusal-dismiss {
+    flex: none;
+    padding: 0.25rem 0.6rem;
+}
+
 .plan-note.ended {
     border-color: color-mix(in srgb, var(--danger, #f85149) 40%, var(--border, #21262d));
     background: color-mix(in srgb, var(--danger, #f85149) 10%, transparent);
