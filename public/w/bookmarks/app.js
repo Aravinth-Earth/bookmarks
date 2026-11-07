@@ -21,6 +21,14 @@ import {
   updateBookmark
 } from './bookmarks.js';
 import { deriveAccount, generatePhrase, open, phraseProblem, seal } from './crypto.js';
+import {
+  ICON_TRIES_KEY,
+  SIZE_KEY,
+  VIEW_KEY,
+  clearDeviceStorage,
+  hostKey,
+  pruneIconTries
+} from './device-store.js';
 import { createVault, indexedDbAdapter } from './vault.js';
 import {
   exportBrowserBookmarks,
@@ -58,8 +66,8 @@ let syncLabel = '';
 /* Icon fetching: four hosts at a time, and the vault saved every fifth batch rather than each. */
 const ICON_BATCH = 4;
 const ICON_SAVE_EVERY = 5;
-/* A host that failed is not asked again on every launch: once a week, and only a few at a time. */
-const ICON_TRIES_KEY = 'bookmarks-icon-tries';
+/* A host that failed is not asked again on every launch: once a week, and only a few at a time.
+   The index of when each host was asked lives in device-store.js, keyed by a digest. */
 const ICON_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 const ICON_TOPUP_HOSTS = 20;
 let iconsBusy = false;
@@ -118,9 +126,8 @@ const syncRefusalDismiss = $('sync-refusal-dismiss');
 /* ------------------------------------------------------------------ appearance */
 
 /* How the list looks is a device preference, not vault data: it is not worth a write to the
-   sealed blob every time a size changes, and it must be readable before the vault is open. */
-const VIEW_KEY = 'bookmarks-view';
-const SIZE_KEY = 'bookmarks-font-size';
+   sealed blob every time a size changes, and it must be readable before the vault is open. The
+   keys live in device-store.js with the rest of the device's own storage. */
 const VIEWS = new Set(VIEW_NAMES);
 const SIZES = new Set(['small', 'medium', 'large']);
 
@@ -903,7 +910,9 @@ function enter({ accountId, authSecret, key, version, sealed, document: vaultDoc
   }
 
   if (syncEnabled()) syncNow();
-  scheduleIconTopUp();
+  /* A top-up that cannot read its own index is not an error worth showing: the next launch
+     simply asks again. */
+  scheduleIconTopUp().catch(() => {});
   if (runningVersion === '') loadVersion();
 }
 
@@ -1518,12 +1527,18 @@ async function fetchAndStoreIcon(id, hostname) {
 }
 
 /* When each host was last asked for an icon. Kept on the device rather than in the vault: it is
-   a local courtesy about retries, not something worth syncing or sealing. */
+   a local courtesy about retries, not something worth syncing or sealing. It is keyed by a digest
+   of the hostname so the stored index names no site in the clear. */
 function readIconTries() {
   try {
     const raw = localStorage.getItem(ICON_TRIES_KEY);
     const value = raw ? JSON.parse(raw) : null;
-    return value && typeof value === 'object' ? value : {};
+    if (!value || typeof value !== 'object') return {};
+    const { kept, dropped } = pruneIconTries(value);
+    /* A map written before the digest existed, or one holding a malformed entry, is rewritten
+       without it rather than left in place until the season turns over. */
+    if (dropped > 0) writeIconTries(kept);
+    return kept;
   } catch {
     return {};
   }
@@ -1611,7 +1626,8 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
       /* A host that just answered — with an icon or not — is not worth asking again this week.
          Written per batch so a closed tab does not lose what it already spent. */
       const triedAt = Date.now();
-      for (const hostname of batch) tries[hostname] = triedAt;
+      const keys = await Promise.all(batch.map((hostname) => hostKey(hostname)));
+      for (const key of keys) tries[key] = triedAt;
       writeIconTries(tries);
     }
 
@@ -1629,7 +1645,7 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
  * short by a closed tab — are topped up when the vault opens: a few hosts at a time, and no host
  * more than once a week. Quiet, because nobody asked for this run.
  */
-function scheduleIconTopUp() {
+async function scheduleIconTopUp() {
   if (!state.document) return;
 
   const missingHosts = [
@@ -1640,9 +1656,10 @@ function scheduleIconTopUp() {
   if (missingHosts.length === 0) return;
 
   const tries = readIconTries();
+  const keys = await Promise.all(missingHosts.map((hostname) => hostKey(hostname)));
   const now = Date.now();
-  const due = missingHosts.filter((hostname) => {
-    const triedAt = Number(tries[hostname]);
+  const due = missingHosts.filter((hostname, at) => {
+    const triedAt = Number(tries[keys[at]]);
     return !Number.isFinite(triedAt) || now - triedAt >= ICON_RETRY_AFTER_MS;
   });
   if (due.length === 0) return;
@@ -2285,14 +2302,14 @@ function openSettings() {
           modal.close();
           await lockVault();
         }),
-        item('Clear this device', 'Delete the sealed vault and its history from this browser.', async () => {
+        item('Clear this device', 'Delete the sealed vault, its history and this device’s local settings from this browser.', async () => {
           modal.close();
           const sure = await askModal({
             title: 'Clear this device?',
             body: [
               el('p', {
                 class: 'modal-note',
-                text: 'The sealed vault, its local history and the remembered key are deleted from this browser. The bookmark list is not recoverable without a backup or the phrase.'
+                text: 'The sealed vault, its local history, the remembered key and the settings this page keeps on this device are deleted from this browser. The bookmark list is not recoverable without a backup or the phrase.'
               })
             ],
             confirmLabel: 'Clear this device',
@@ -2300,6 +2317,7 @@ function openSettings() {
           });
           if (!sure) return;
           await store.clear();
+          clearDeviceStorage();
           location.reload();
         }, { danger: true })
       ]),
