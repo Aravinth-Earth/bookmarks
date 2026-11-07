@@ -129,6 +129,9 @@ export class SyncClient {
       this.token = null;
       throw new SyncError('UNAUTHORIZED', 'The session expired.');
     }
+    if (response.status === 402) {
+      throw new SyncError('TRIAL_ENDED', 'The free sync period has ended.', { status: 402 });
+    }
     if (response.status === 409) {
       return {
         conflict: true,

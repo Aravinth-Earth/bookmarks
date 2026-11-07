@@ -12,7 +12,13 @@
  * `now` is injectable so expiry and lockout are testable without waiting.
  */
 
-const MAX_CT_CHARS = 1_400_000;
+export const PAID_MAX_CT_CHARS = 1_400_000;
+/* About 120 KB sealed: a few hundred bookmarks with icons. Small on purpose — the free tier is
+   a trial, not a place to keep a library forever. */
+export const FREE_MAX_CT_CHARS = 160_000;
+export const FREE_TRIAL_MS = 30 * 24 * 60 * 60 * 1000;
+export const READ_ONLY_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+const OWNER_RECHECK_MS = 365 * 24 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 3;
 const NONCE_TTL_MS = 60_000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -128,6 +134,7 @@ export class Vault {
     /* The cap lives in one object, so creation is serialised against it. An existing account
        never reaches this point, so a full registry cannot lock out the person who already has
        one, and a retried first sync cannot consume a second slot. */
+    let first = false;
     const registry = this.env?.REGISTRY;
     if (registry) {
       const stub = registry.get(registry.idFromName('registry'));
@@ -139,15 +146,33 @@ export class Vault {
         })
       );
       if (!reserved.ok) return json({ error: 'full' }, 429);
+
+      const reservation = await reserved.json().catch(() => ({}));
+      first = reservation.first === true;
     }
+
+    /* The first account on a fresh deployment is the owner's: it never expires, so the person
+       running this is not on a trial on their own server. No id or secret has to be configured
+       for that to be true. */
+    const now = this.now();
+    const plan = first ? 'owner' : 'free';
+    const trialEndsAt = plan === 'free' ? now + FREE_TRIAL_MS : null;
 
     await this.storage.put('account', {
       accountId,
       authSecret,
-      createdAt: this.now(),
-      lastSeenAt: this.now()
+      plan,
+      createdAt: now,
+      lastSeenAt: now,
+      trialEndsAt,
+      paidUntil: null
     });
-    return json({ ok: true }, 201);
+
+    if (plan === 'free' && typeof this.storage.setAlarm === 'function') {
+      await this.storage.setAlarm(trialEndsAt);
+    }
+
+    return json({ ok: true, plan, trialEndsAt }, 201);
   }
 
   async challenge(request) {
@@ -207,7 +232,13 @@ export class Vault {
     const expiresAt = now + SESSION_TTL_MS;
     await this.storage.put(`session:${await sessionHash(token)}`, { expiresAt, createdAt: now });
 
-    return json({ token, expiresAt });
+    return json({
+      token,
+      expiresAt,
+      plan: account.plan ?? 'free',
+      trialEndsAt: account.trialEndsAt ?? null,
+      paidUntil: account.paidUntil ?? null
+    });
   }
 
   async logout(request) {
@@ -231,6 +262,13 @@ export class Vault {
     const auth = await this.authorize(request);
     if (!auth) return json({ error: 'unauthorized' }, 401);
 
+    const account = await this.storage.get('account');
+    if (!account) return json({ error: 'no_account' }, 404);
+
+    if (this.trialEnded(account)) {
+      return json({ error: 'trial_ended' }, 402);
+    }
+
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return json({ error: 'invalid' }, 400);
 
@@ -244,7 +282,9 @@ export class Vault {
     if (typeof ct !== 'string' || ct.length === 0 || !BASE64URL.test(ct)) {
       return json({ error: 'bad_ct' }, 400);
     }
-    if (ct.length > MAX_CT_CHARS) return json({ error: 'too_large' }, 413);
+    const limit =
+      account.plan === 'owner' || account.plan === 'paid' ? PAID_MAX_CT_CHARS : FREE_MAX_CT_CHARS;
+    if (ct.length > limit) return json({ error: 'quota', limit }, 413);
 
     const current = (await this.storage.get('vault')) ?? { version: 0 };
     if (baseVersion !== current.version) {
@@ -269,11 +309,64 @@ export class Vault {
 
     const vault = { version, iv, ct, updatedAt };
     await this.storage.put('vault', vault);
-
-    const account = await this.storage.get('account');
-    if (account) await this.storage.put('account', { ...account, lastSeenAt: updatedAt });
+    await this.storage.put('account', { ...account, lastSeenAt: updatedAt });
 
     return json(vault);
+  }
+
+  /** A free trial that has run out is read-only: the data can still be read and exported. */
+  trialEnded(account) {
+    if (!account || account.plan === 'owner' || account.plan === 'paid') return false;
+    if (account.paidUntil && account.paidUntil > this.now()) return false;
+    return typeof account.trialEndsAt === 'number' && this.now() >= account.trialEndsAt;
+  }
+
+  /**
+   * The deadline the runtime wakes this object for: the end of the trial, then the end of the
+   * read-only grace, then deletion. An owner or a paying account is rescheduled a year out.
+   */
+  async alarm() {
+    const account = await this.storage.get('account');
+    if (!account) return;
+
+    const now = this.now();
+    const paying = account.plan === 'owner' || (account.paidUntil && account.paidUntil > now);
+
+    if (paying) {
+      await this.storage.setAlarm(now + OWNER_RECHECK_MS);
+      return;
+    }
+
+    const trialEnds = account.trialEndsAt ?? 0;
+    if (now < trialEnds) {
+      await this.storage.setAlarm(trialEnds);
+      return;
+    }
+    if (now < trialEnds + READ_ONLY_GRACE_MS) {
+      await this.storage.setAlarm(trialEnds + READ_ONLY_GRACE_MS);
+      return;
+    }
+
+    await this.releaseSlot(account.accountId);
+    await this.storage.deleteAll();
+  }
+
+  /** Give the account's slot back, so the cap frees itself as trials end. */
+  async releaseSlot(accountId) {
+    const registry = this.env?.REGISTRY;
+    if (!registry) return;
+
+    try {
+      await registry.get(registry.idFromName('registry')).fetch(
+        new Request('https://registry/release', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ accountId })
+        })
+      );
+    } catch {
+      /* The cap is a convenience; a failed release must not stop the deletion. */
+    }
   }
 
   async authorize(request) {

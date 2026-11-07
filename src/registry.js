@@ -36,6 +36,7 @@ export class Registry {
     const path = new URL(request.url).pathname;
 
     if (path === '/reserve' && request.method === 'POST') return this.reserve(request);
+    if (path === '/release' && request.method === 'POST') return this.release(request);
     if (path === '/stats' && request.method === 'GET') {
       const accounts = (await this.storage.get('accounts')) ?? [];
       return json({ count: accounts.length, max: this.max() });
@@ -61,6 +62,28 @@ export class Registry {
 
     accounts.push(accountId);
     await this.storage.put('accounts', accounts);
-    return json({ ok: true, count: accounts.length, max: this.max() });
+    return json({
+      ok: true,
+      first: accounts.length === 1,
+      count: accounts.length,
+      max: this.max()
+    });
+  }
+
+  /**
+   * Free a slot when its account is deleted. Unknown ids are a no-op, so a retried deletion is
+   * harmless.
+   */
+  async release(request) {
+    const body = await request.json().catch(() => null);
+    const accountId = body?.accountId;
+
+    if (!ACCOUNT_ID.test(accountId ?? '')) return json({ error: 'invalid' }, 400);
+
+    const accounts = (await this.storage.get('accounts')) ?? [];
+    const remaining = accounts.filter((id) => id !== accountId);
+    if (remaining.length !== accounts.length) await this.storage.put('accounts', remaining);
+
+    return json({ ok: true, count: remaining.length, max: this.max() });
   }
 }

@@ -307,6 +307,24 @@ a:focus-visible {
     min-width: 5.5rem;
 }
 
+/* -------------------------------------------------------------- plan note */
+
+.plan-note {
+    margin: var(--space-2, 0.5rem) 0 0;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--accent, #58a6ff) 35%, var(--border, #21262d));
+    background: color-mix(in srgb, var(--accent, #58a6ff) 10%, transparent);
+    border-radius: var(--radius-lg, 8px);
+    color: var(--text-secondary, #8b949e);
+    font-size: var(--font-size-sm, 0.8rem);
+}
+
+.plan-note.ended {
+    border-color: color-mix(in srgb, var(--danger, #f85149) 40%, var(--border, #21262d));
+    background: color-mix(in srgb, var(--danger, #f85149) 10%, transparent);
+    color: var(--text-primary, #c9d1d9);
+}
+
 /* --------------------------------------------------------------- add form */
 
 .add {

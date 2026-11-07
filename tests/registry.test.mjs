@@ -44,6 +44,10 @@ function reserve(body, path = '/reserve') {
   });
 }
 
+function release(body) {
+  return reserve(body, '/release');
+}
+
 async function json(response) {
   return { status: response.status, body: await response.json() };
 }
@@ -122,4 +126,41 @@ test('an unknown route is a 404', async () => {
   const { registry } = harness();
   const response = await registry.fetch(new Request('https://registry/nothing'));
   assert.equal(response.status, 404);
+});
+
+test('the first reservation is marked as the first account', async () => {
+  const { registry } = harness();
+
+  const first = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
+  assert.equal(first.body.first, true);
+
+  const second = await json(await registry.fetch(reserve({ accountId: accountId(2) })));
+  assert.equal(second.body.first, false);
+});
+
+test('releasing a slot lets another account take it', async () => {
+  const { registry } = harness({ MAX_ACCOUNTS: '1' });
+
+  await registry.fetch(reserve({ accountId: accountId(1) }));
+  const refused = await json(await registry.fetch(reserve({ accountId: accountId(2) })));
+  assert.equal(refused.status, 429);
+
+  const released = await json(await registry.fetch(release({ accountId: accountId(1) })));
+  assert.equal(released.status, 200);
+  assert.equal(released.body.count, 0);
+
+  const accepted = await json(await registry.fetch(reserve({ accountId: accountId(2) })));
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.body.first, true, 'the freed slot makes the next account the first');
+});
+
+test('releasing an unknown id is harmless, an invalid one is refused', async () => {
+  const { registry } = harness();
+
+  const unknown = await json(await registry.fetch(release({ accountId: accountId(9) })));
+  assert.equal(unknown.status, 200);
+  assert.equal(unknown.body.count, 0);
+
+  const invalid = await json(await registry.fetch(release({ accountId: 'short' })));
+  assert.equal(invalid.status, 400);
 });

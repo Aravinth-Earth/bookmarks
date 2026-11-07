@@ -52,6 +52,8 @@ let syncQueued = false;
 let syncTimer = 0;
 let syncLabel = '';
 let lastSyncedAt = 0;
+let plan = null;
+let trialEndsAt = null;
 
 let saving = false;
 let dirty = false;
@@ -84,6 +86,7 @@ const list = $('list');
 const empty = $('empty');
 const vaultStatus = $('vault-status');
 const status = $('status');
+const planNote = $('plan-note');
 
 /* ------------------------------------------------------------------ appearance */
 
@@ -414,6 +417,51 @@ function setSyncStatus(label) {
   updateStatusLine();
 }
 
+function trialDaysLeft() {
+  if (typeof trialEndsAt !== 'number') return null;
+  return Math.ceil((trialEndsAt - Date.now()) / 86_400_000);
+}
+
+function applyPlan(payload) {
+  plan = payload?.plan ?? null;
+  trialEndsAt = typeof payload?.trialEndsAt === 'number' ? payload.trialEndsAt : null;
+  renderPlanNote();
+}
+
+/** The owner and paying accounts carry no banner; a free trial carries a live countdown. */
+function renderPlanNote() {
+  if (!syncEnabled() || !plan || plan === 'owner' || plan === 'paid') {
+    planNote.hidden = true;
+    return;
+  }
+
+  const days = trialDaysLeft();
+  planNote.hidden = false;
+  planNote.classList.toggle('ended', days !== null && days <= 0);
+
+  if (days === null) {
+    planNote.textContent = 'Free sync.';
+    return;
+  }
+  if (days <= 0) {
+    planNote.textContent =
+      'Free sync has ended. Your bookmarks are still on this device — export a sealed backup from Settings before the server copy is deleted.';
+    return;
+  }
+  planNote.textContent = `Free sync · ${days} day${days === 1 ? '' : 's'} left. Your bookmarks stay on this device either way.`;
+}
+
+function planLabel() {
+  if (!syncEnabled()) return 'sync off';
+  if (plan === 'owner') return 'owner account';
+  if (plan === 'paid') return 'paid';
+  if (plan === 'free') {
+    const days = trialDaysLeft();
+    return days !== null && days > 0 ? `free trial · ${days} days left` : 'free trial ended · read-only';
+  }
+  return 'sync on';
+}
+
 function markSynced() {
   lastSyncedAt = Date.now();
   const at = new Date(lastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -421,6 +469,19 @@ function markSynced() {
 }
 
 function handleSyncError(error) {
+  if (error?.code === 'TRIAL_ENDED') {
+    trialEndsAt = Date.now();
+    renderPlanNote();
+    setSyncStatus('Read-only');
+    return;
+  }
+  if (error?.code === 'PUSH_FAILED' && error.status === 413) {
+    setSyncStatus('Vault too large');
+    announce('This vault is larger than the free tier allows. Export a sealed backup and trim it.', {
+      duration: 8000
+    });
+    return;
+  }
   if (error?.code === 'FULL') {
     setSyncStatus('Server full');
     announce('This server is not accepting new vaults right now.', { duration: 6000 });
@@ -463,8 +524,10 @@ async function syncNow() {
   try {
     if (!sync.signedIn) {
       setSyncStatus('Signing in…');
+      let session;
+
       try {
-        await sync.login(state.accountId, state.authSecret);
+        session = await sync.login(state.accountId, state.authSecret);
       } catch (error) {
         if (error.code !== 'NO_ACCOUNT') throw error;
 
@@ -472,8 +535,10 @@ async function syncNow() {
            would have used, so there is nothing to provision and no token to hold. */
         setSyncStatus('Creating the account…');
         await sync.register(state.accountId, state.authSecret);
-        await sync.login(state.accountId, state.authSecret);
+        session = await sync.login(state.accountId, state.authSecret);
       }
+
+      applyPlan(session);
     }
 
     const remote = await sync.pull();
@@ -1403,7 +1468,7 @@ function openSettings() {
     body: [
       el('p', {
         class: 'modal-note',
-        text: `${count} bookmarks in this vault · version ${state.version} · saved on this device.`
+        text: `${count} bookmarks in this vault · version ${state.version} · ${planLabel()}.`
       }),
       el('h3', { class: 'settings-heading', text: 'Appearance' }),
       el('label', { class: 'field' }, [
@@ -1549,6 +1614,9 @@ async function lockVault() {
   saveStamp = '';
   syncLabel = '';
   lastSyncedAt = 0;
+  plan = null;
+  trialEndsAt = null;
+  planNote.hidden = true;
   list.replaceChildren();
   showLock('Locked. Enter your phrase to reopen the vault.');
 }

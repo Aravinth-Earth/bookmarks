@@ -10,7 +10,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Vault } from '../src/vault.js';
+import {
+  FREE_MAX_CT_CHARS,
+  FREE_TRIAL_MS,
+  READ_ONLY_GRACE_MS,
+  Vault
+} from '../src/vault.js';
 import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
 
@@ -22,6 +27,7 @@ const CT = 'abcdefghijklmnopqrstuvwxyz';
 
 function storage() {
   const map = new Map();
+  const alarms = [];
   return {
     async get(key) {
       return map.get(key);
@@ -39,6 +45,13 @@ function storage() {
           .map(([key, value]) => [key, structuredClone(value)])
       );
     },
+    async setAlarm(at) {
+      alarms.push(at);
+    },
+    async deleteAll() {
+      map.clear();
+    },
+    alarms,
     raw: map
   };
 }
@@ -50,18 +63,28 @@ function object(overrides = {}) {
   };
 
   const reserved = [];
+  const released = [];
   let full = overrides.registryFull ?? false;
+  const first = overrides.first !== false;
 
   const env = {
     REGISTRY: {
       idFromName: (name) => ({ name }),
       get: (id) => ({
         fetch: async (request) => {
+          const path = new URL(request.url).pathname;
           const body = await request.clone().json();
+          const headers = { 'content-type': 'application/json' };
+
+          if (path === '/release') {
+            released.push(body.accountId);
+            return new Response(JSON.stringify({ ok: true }), { status: 200, headers });
+          }
+
           reserved.push(body.accountId);
-          return new Response(JSON.stringify(full ? { error: 'full' } : { ok: true }), {
+          return new Response(JSON.stringify(full ? { error: 'full' } : { ok: true, first }), {
             status: full ? 429 : 200,
-            headers: { 'content-type': 'application/json' }
+            headers
           });
         }
       })
@@ -77,6 +100,7 @@ function object(overrides = {}) {
     env,
     storage: ctx.storage,
     reserved,
+    released,
     setFull(value) {
       full = value;
     },
@@ -383,4 +407,149 @@ test('an unknown route is a 404, not a crash', async () => {
   const harness = object();
   const response = await read(await harness.vault.fetch(request('/nothing')));
   assert.equal(response.status, 404);
+});
+
+const DAY = 24 * 60 * 60 * 1000;
+
+test('the first account is the owner and never expires', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const session = await login(harness);
+  assert.equal(session.body.plan, 'owner');
+  assert.equal(session.body.trialEndsAt, null);
+
+  harness.advance(10 * 365 * DAY);
+  const refreshed = await login(harness);
+  const auth = { authorization: `Bearer ${refreshed.body.token}` };
+  const response = await read(
+    await harness.vault.fetch(
+      request('/vault', { method: 'PUT', headers: auth, body: { baseVersion: 0, iv: IV, ct: CT } })
+    )
+  );
+  assert.equal(response.status, 200, 'the owner is never read-only');
+
+  await harness.vault.alarm();
+  assert.ok(harness.storage.raw.has('account'), 'the owner is never deleted');
+  assert.deepEqual(harness.released, []);
+});
+
+test('a later account is free and carries a trial deadline', async () => {
+  const harness = object({ first: false });
+  await provision(harness);
+
+  const session = await login(harness);
+  assert.equal(session.body.plan, 'free');
+  assert.equal(session.body.trialEndsAt, 1_000_000 + FREE_TRIAL_MS);
+});
+
+test('a free vault turns read-only at the deadline and is deleted after the grace', async () => {
+  const harness = object({ first: false });
+  await provision(harness);
+  const session = await login(harness);
+  const auth = { authorization: `Bearer ${session.body.token}` };
+
+  const written = await read(
+    await harness.vault.fetch(
+      request('/vault', { method: 'PUT', headers: auth, body: { baseVersion: 0, iv: IV, ct: CT } })
+    )
+  );
+  assert.equal(written.status, 200);
+
+  harness.advance(FREE_TRIAL_MS + 1);
+
+  /* A read-only account can still sign in — that is how its owner exports before deletion. */
+  const after = await login(harness);
+  const afterAuth = { authorization: `Bearer ${after.body.token}` };
+
+  const readBack = await read(
+    await harness.vault.fetch(request('/vault', { method: 'GET', headers: afterAuth }))
+  );
+  assert.equal(readBack.status, 200, 'the data is still readable');
+
+  const denied = await read(
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: afterAuth,
+        body: { baseVersion: 1, iv: IV, ct: CT }
+      })
+    )
+  );
+  assert.equal(denied.status, 402);
+  assert.equal(denied.body.error, 'trial_ended');
+
+  await harness.vault.alarm();
+  assert.ok(harness.storage.raw.has('account'), 'the grace period is not over');
+
+  harness.advance(READ_ONLY_GRACE_MS + 2);
+  await harness.vault.alarm();
+
+  assert.equal(harness.storage.raw.size, 0);
+  assert.deepEqual(harness.released, [ACCOUNT.accountId]);
+});
+
+test('a paid account keeps writing after the trial', async () => {
+  const harness = object({ first: false });
+  await provision(harness);
+
+  const account = await harness.storage.get('account');
+  await harness.storage.put('account', {
+    ...account,
+    plan: 'paid',
+    paidUntil: 1_000_000 + FREE_TRIAL_MS + 90 * DAY
+  });
+
+  await login(harness);
+  harness.advance(FREE_TRIAL_MS + 1);
+
+  const refreshed = await login(harness);
+  const response = await read(
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${refreshed.body.token}` },
+        body: { baseVersion: 0, iv: IV, ct: CT }
+      })
+    )
+  );
+  assert.equal(response.status, 200);
+});
+
+test('a free vault is held to the smaller quota', async () => {
+  const harness = object({ first: false });
+  await provision(harness);
+  const session = await login(harness);
+
+  const response = await read(
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${session.body.token}` },
+        body: { baseVersion: 0, iv: IV, ct: 'a'.repeat(FREE_MAX_CT_CHARS + 1) }
+      })
+    )
+  );
+
+  assert.equal(response.status, 413);
+  assert.equal(response.body.error, 'quota');
+  assert.equal(response.body.limit, FREE_MAX_CT_CHARS);
+});
+
+test('the owner keeps the larger quota', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+
+  const response = await read(
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${session.body.token}` },
+        body: { baseVersion: 0, iv: IV, ct: 'a'.repeat(FREE_MAX_CT_CHARS + 1) }
+      })
+    )
+  );
+
+  assert.equal(response.status, 200);
 });

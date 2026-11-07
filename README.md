@@ -69,6 +69,21 @@ is **1 while the service is being tested** — set in `wrangler.toml` as `MAX_AC
 back to 50 in `src/registry.js` when the var is absent. At the cap the server answers
 `429 {error:"full"}`.
 
+## Plans and limits
+
+| Plan | Sync | Vault | How it is chosen |
+|---|---|---|---|
+| Owner | no expiry | ~1 MB | The first account on a fresh deployment |
+| Free | 30 days, then 7 days read-only | ~120 KB | Any account created after the first |
+| Paid | no expiry | ~1 MB+ | Planned; a subscription extends `paidUntil` |
+
+The countdown is shown in the app. When a free trial ends the server copy becomes read-only for
+a week and is then deleted; **the bookmarks stay on the device throughout**, and a sealed backup
+can be exported at any time. The Registry releases the slot on deletion, so the cap frees itself.
+
+The free limit is bytes, not bookmarks: the vault is sealed, and the server cannot count entries
+without breaking the encryption.
+
 ## Secrets
 
 There are none. No token is needed in any environment, and nothing in this repository is a
