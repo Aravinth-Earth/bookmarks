@@ -32,6 +32,7 @@ import {
 import { tileFor } from './tiles.js';
 import { fetchIcon, fetchPageTitle } from './icons.js';
 import { SyncClient, SyncError } from './sync.js';
+import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
 
 const store = createVault(indexedDbAdapter());
 
@@ -88,7 +89,6 @@ const restoreButton = $('restore-button');
 
 const searchInput = $('search');
 const sortInput = $('sort');
-const viewInput = $('view');
 const settingsButton = $('settings-button');
 const lockButton = $('lock-button');
 const deviceNote = $('lock-device-note');
@@ -111,7 +111,7 @@ const planNote = $('plan-note');
    sealed blob every time a size changes, and it must be readable before the vault is open. */
 const VIEW_KEY = 'bookmarks-view';
 const SIZE_KEY = 'bookmarks-font-size';
-const VIEWS = new Set(['pills', 'list']);
+const VIEWS = new Set(VIEW_NAMES);
 const SIZES = new Set(['small', 'medium', 'large']);
 
 function readPref(key, allowed, fallback) {
@@ -131,16 +131,43 @@ function writePref(key, value) {
   }
 }
 
-let currentView = readPref(VIEW_KEY, VIEWS, 'pills');
+let currentView = readPref(VIEW_KEY, VIEWS, DEFAULT_VIEW);
 let currentSize = readPref(SIZE_KEY, SIZES, 'medium');
 
 function applyAppearance() {
   list.dataset.view = currentView;
   document.documentElement.dataset.size = currentSize;
-  viewInput.value = currentView;
+  renderViewToggle();
   /* Pills are for opening pages; editing and deleting live in the list, so say where they are. */
   viewHint.hidden =
     currentView !== 'pills' || (state.document?.bookmarks.length ?? 0) === 0;
+}
+
+/**
+ * The toggle shows the view a tap moves to, so its icon and its accessible name always describe
+ * the next state. A hidden label would leave the button unnamed, which is why the name is set
+ * on the button itself.
+ */
+function renderViewToggle() {
+  const { target, label, title } = viewToggleState(currentView);
+  viewToggle.setAttribute('aria-label', label);
+  viewToggle.title = title;
+  viewToggle.dataset.view = currentView;
+  const path = viewToggle.querySelector('path');
+  path?.setAttribute('d', target === 'list' ? ICON_PATHS.list : ICON_PATHS.pills);
+}
+
+/** One tap, not two: the only other view is the one the toggle names. */
+function switchView() {
+  if (!state.document) return;
+  currentView = nextView(currentView);
+  writePref(VIEW_KEY, currentView);
+  applyAppearance();
+  state.document = {
+    ...state.document,
+    prefs: { ...state.document.prefs, view: currentView }
+  };
+  saveNow();
 }
 
 /* --------------------------------------------------------------- small helpers */
@@ -193,7 +220,11 @@ function labelOf(bookmark) {
 const ICON_PATHS = {
   pin: 'M12 3.6l2.5 5.1 5.6.8-4.1 4 1 5.6-5-2.6-5 2.6 1-5.6-4.1-4 5.6-.8z',
   edit: 'M4 20h4L19 9l-4-4L4 16v4zM14.5 5.5l4 4',
-  remove: 'M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13'
+  remove: 'M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13',
+  /* The view toggle draws the view it switches to: three lines for the table, four tiles for
+     the pills. */
+  list: 'M4 7h16M4 12h16M4 17h16',
+  pills: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z'
 };
 
 function icon(name) {
@@ -378,6 +409,31 @@ function updateStatusLine() {
   const suffix = saveStamp ? ` · saved ${saveStamp}` : ' · stored on this device';
   const syncSuffix = syncEnabled() ? ` · ${syncLabel || 'Not synced'}` : '';
   setVaultStatus(`${count} ${noun}${suffix}${syncSuffix}`);
+}
+
+/* --------------------------------------------------------------- app version */
+
+/* The Worker is the only place the running version is written down; the page keeps its answer
+   for the session and states it nowhere else. A failed answer leaves the version unstated,
+   because a stored one would outlive the deploy it describes. */
+let runningVersion = '';
+
+async function loadVersion() {
+  try {
+    const response = await fetch('/w/bookmarks/api/health', {
+      headers: { accept: 'application/json' }
+    });
+    if (!response.ok) return;
+
+    const payload = await response.json();
+    const version = typeof payload?.version === 'string' ? payload.version.trim() : '';
+    if (version === '') return;
+
+    runningVersion = version;
+    vaultStatus.title = `Version ${version}`;
+  } catch {
+    /* Offline, or the first run before the Worker answers: nothing is shown. */
+  }
 }
 
 /* -------------------------------------------------------------------- saving */
@@ -803,6 +859,7 @@ function enter({ accountId, authSecret, key, version, sealed, document: vaultDoc
 
   if (syncEnabled()) syncNow();
   scheduleIconTopUp();
+  if (runningVersion === '') loadVersion();
 }
 
 async function tryRemembered() {
@@ -2132,7 +2189,10 @@ function openSettings() {
       el('p', {
         class: 'modal-note',
         text: 'The vault is sealed in this browser with AES-256-GCM. This server only ever holds the sealed blob.'
-      })
+      }),
+      ...(runningVersion === ''
+        ? []
+        : [el('p', { class: 'modal-note settings-version', text: `Version ${runningVersion}` })])
     ]
   });
 }
@@ -2199,13 +2259,7 @@ function bindEvents() {
 
   settingsButton.addEventListener('click', openSettings);
 
-  viewInput.addEventListener('change', () => {
-    currentView = VIEWS.has(viewInput.value) ? viewInput.value : 'pills';
-    writePref(VIEW_KEY, currentView);
-    applyAppearance();
-    setPrefs({ view: currentView });
-    saveNow();
-  });
+  viewToggle.addEventListener('click', switchView);
 
   document.addEventListener('keydown', (event) => {
     if (activeModal) return;

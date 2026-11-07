@@ -251,9 +251,17 @@ a:focus-visible {
 
 /* ---------------------------------------------------------------- toolbar */
 
-/* The view toggle is the phone's stand-in for the view select. */
+/* One control for the two views. The icon draws the view a tap moves to and the accessible name
+   states it, so the two-step select is gone. */
 .view-toggle {
-    display: none;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    padding: 0.5rem 0.6rem;
+}
+
+.view-toggle .button-icon {
+    display: block;
 }
 
 /* The toolbar's own icons exist for the phone width, where the labels are hidden. */
@@ -308,15 +316,6 @@ a:focus-visible {
 .sort select {
     width: auto;
     min-width: 8.5rem;
-}
-
-.view {
-    flex: 0 0 auto;
-}
-
-.view select {
-    width: auto;
-    min-width: 5.5rem;
 }
 
 /* -------------------------------------------------------------- plan note */
@@ -520,8 +519,9 @@ a:focus-visible {
 }
 
 /* The name sits beside the tile inside the link, so hiding it leaves the tile on its own. The
-   link keeps its accessible name from aria-label. */
-.row.icon-only .row-name {
+   link keeps its accessible name from aria-label. Only the pills view drops the label: the list
+   is a table, and its Name column stays filled whatever the bookmark's own setting says. */
+.list[data-view='pills'] .row.icon-only .row-name {
     display: none;
 }
 
@@ -990,7 +990,7 @@ body.modal-open {
         flex: 1 1 100%;
     }
 
-    /* One select and four icons: two selects plus buttons was a crowded, clipped row. */
+    /* One select and four icon buttons: a second select made a crowded, clipped row. */
     .sort {
         flex: 1 1 auto;
         min-width: 0;
@@ -998,15 +998,6 @@ body.modal-open {
 
     .sort select {
         width: 100%;
-    }
-
-    .view {
-        display: none;
-    }
-
-    .view-toggle {
-        display: grid;
-        place-items: center;
     }
 
     .toolbar .button-label {
