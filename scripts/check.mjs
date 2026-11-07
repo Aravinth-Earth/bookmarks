@@ -78,13 +78,24 @@ const bannedHosts = [
   'favicon.io',
   'icon.horse'
 ];
-/* Copy that would be a lie: the sealed blob does go to this Worker, and the icon route learns
-   a hostname. Neither is a reason to overclaim. */
+/* Copy that would be a lie: the sealed blob does go to this Worker, the icon route learns a
+   hostname, and the server keeps an account record beside the blob. Each sentence below said
+   otherwise once; the list keeps the exact wording out of the page. */
 const bannedCopy = [
   'no data sent anywhere',
   'no data ever leaves',
   'nothing leaves your device',
-  'completely anonymous'
+  'completely anonymous',
+  'nothing is sent anywhere',
+  'only ever holds a sealed blob',
+  'only ever holds the sealed blob',
+  'each site is asked once, by this server',
+  'cached at the edge for 30 days',
+  'never appears in a url that platform logs record',
+  'does not appear in a request path that platform logs record',
+  'no third party ever learns that this vault contains that site',
+  'no third-party anything',
+  'nothing else identifies you'
 ];
 /* Nothing personal belongs in a page strangers load. */
 const personal = ['aravinth', '@332321.xyz', 'simplelogin'];
@@ -131,7 +142,19 @@ for (const file of assets) {
   }
 }
 
-/* 3. The word list is the entropy of every vault: a truncated one silently weakens every phrase
+/* 3. README.md makes the same promises to a reader who never opens the page, so it is held to
+   the same list. It is read directly: a repository with no README fails here rather than
+   passing the way an empty scan would. */
+try {
+  const readme = readFileSync(join(root, 'README.md'), 'utf8').toLowerCase().replace(/\s+/g, ' ');
+  for (const phrase of bannedCopy) {
+    if (readme.includes(phrase)) problems.push(`README.md: overclaiming copy "${phrase}"`);
+  }
+} catch (error) {
+  problems.push(`README.md: ${error.message}`);
+}
+
+/* 4. The word list is the entropy of every vault: a truncated one silently weakens every phrase
    made after the truncation, and nothing else would notice. */
 try {
   const { WORDLIST } = await import(join(publicDir, 'w/bookmarks/wordlist.js'));
@@ -145,7 +168,7 @@ try {
   problems.push(`wordlist: ${error.message}`);
 }
 
-/* 4. The request limits the Worker counts are the ones wrangler.toml declares. A binding renamed
+/* 5. The request limits the Worker counts are the ones wrangler.toml declares. A binding renamed
    or a threshold edited in one file only would deploy, and would count nothing. */
 try {
   const { LIMITS } = await import(join(root, 'src/index.js'));

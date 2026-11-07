@@ -4,17 +4,19 @@ An end-to-end encrypted, local-first bookmark vault, served at
 <https://b.332321.xyz/w/bookmarks/>.
 
 The vault is sealed in the browser with AES-256-GCM under a key derived from a 13-word phrase.
-The Worker holds one ciphertext blob per account and cannot read any of it. Adding, editing,
-deleting, searching and importing all work with no network at all; sync only ever moves the
-sealed blob.
+The Worker holds one ciphertext blob per account and cannot read any of it; beside the blob it
+keeps an account record — creation and last-seen dates, plan, sealed size, and the devices
+signed in. Adding, editing, deleting, searching and importing all work with no network at all;
+sync only ever moves the sealed blob.
 
 ## What this is not
 
 - **No account, in the email sense.** The phrase is the account: it derives the account id, the
-  auth secret and the vault key. Nothing else identifies you, and there is nothing to sign up to.
+  auth secret and the vault key. The id is a hash of the phrase, not an address, and there is
+  nothing to sign up to.
 - **No recovery.** Lose the phrase and the vault is unopenable, by construction. The only backup
   is an export you keep yourself.
-- **No third-party anything.** No CDN, no web font, no analytics, no tracker, no vendor icon
+- **No third-party code.** No CDN, no web font, no analytics, no tracker, no vendor icon
   service. The page loads only files this Worker serves.
 
 ## Layout
@@ -66,9 +68,10 @@ A branch build only uploads a preview version; it never takes production traffic
 
 ## Turning on sync
 
-The server stores one sealed blob per account and cannot read it. There is no signup form and
-no provisioning step: the first sync that names an account creates it, first write wins, from
-the same phrase-derived secrets the login uses.
+The server stores one sealed blob per account and an account record of dates, plan, size and
+signed-in devices; it cannot read the blob. There is no signup form and no provisioning step:
+the first sync that names an account creates it, first write wins, from the same phrase-derived
+secrets the login uses.
 
 Open the app, create a vault (or unlock one), then Settings → **Sync**. The first run creates
 the account and pushes this device's vault; another device that enters the same phrase pulls it
@@ -195,14 +198,15 @@ reaches the server; the auth secret it derives can log in and cannot decrypt.
 
 ## Icons
 
-Each icon is fetched once by the Worker — from the site's own `/favicon.ico`, or from the
-`<link rel="icon">` the page declares — cached at the edge for 30 days, downscaled to 32px in
-the browser, and stored inside the sealed vault as a data URI.
+The Worker fetches each icon from the site's own `/favicon.ico`, or from the
+`<link rel="icon">` the page declares. A site that yields neither is asked again a week later;
+the automatic run covers up to twenty hosts per launch. The image is downscaled to 32px in the
+browser and stored inside the sealed vault as a data URI.
 
-The browser never contacts a bookmarked site. The hostname travels in a request header and the
-URL carries only its SHA-256, so the domain does not appear in a request path that platform
-logs record. A site that cannot be reached, or that answers with something that is not an
-image, simply keeps its lettered tile.
+The browser never contacts a bookmarked site; this Worker does, and the site learns only that
+this Worker asked it for an icon, at that moment. The request names the host in a header, and the
+URL path carries only its SHA-256. A site that cannot be reached, or that answers with something
+that is not an image, simply keeps its lettered tile.
 
 ## Credits
 

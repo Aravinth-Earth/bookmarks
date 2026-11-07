@@ -2196,7 +2196,7 @@ function openSettings() {
       el('div', { class: 'settings-list' }, [
         item(
           'Fetch missing icons',
-          `${missingIcons} without an icon. Each site is asked once, by this server, and the image is stored inside the sealed vault.`,
+          `${missingIcons} without an icon. This server asks each site for its icon, and asks again in a week if there is none. The image is stored inside the sealed vault.`,
           async () => {
             modal.close();
             await fetchMissingIcons();
@@ -2305,7 +2305,7 @@ function openSettings() {
       ]),
       el('p', {
         class: 'modal-note',
-        text: 'The vault is sealed in this browser with AES-256-GCM. This server only ever holds the sealed blob.'
+        text: 'The vault is sealed in this browser with AES-256-GCM. The server holds the sealed copy, an account record with dates, plan and size, and the list of signed-in devices.'
       }),
       ...(runningVersion === ''
         ? []
