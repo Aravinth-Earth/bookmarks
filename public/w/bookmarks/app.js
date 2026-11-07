@@ -18,7 +18,7 @@ import {
   togglePin,
   updateBookmark
 } from './bookmarks.js';
-import { deriveAccount, generatePhrase, keyFromBytes, open, seal } from './crypto.js';
+import { deriveAccount, generatePhrase, keyFromBytes, open, phraseProblem, seal } from './crypto.js';
 import { createVault, indexedDbAdapter } from './vault.js';
 import {
   exportBrowserBookmarks,
@@ -93,6 +93,7 @@ const sortInput = $('sort');
 const viewInput = $('view');
 const settingsButton = $('settings-button');
 const lockButton = $('lock-button');
+const deviceNote = $('lock-device-note');
 const viewToggle = $('view-toggle');
 const addForm = $('add-form');
 const addToggle = $('add-toggle');
@@ -163,6 +164,16 @@ function clean(message) {
 
 function messageFor(error) {
   const message = clean(error?.message ?? 'Something went wrong.');
+
+  /* Whether a phrase has an account is never stated: the same sentence covers "no account",
+     "wrong phrase" and "the server refused", so the screen cannot be used as an oracle. */
+  if (
+    /not registered on the server|does not open a vault on this server|refused the sign-in|bad_proof/i.test(
+      message
+    )
+  ) {
+    return 'That phrase does not open a vault. Check the words, or create a new vault.';
+  }
 
   if (/holds a vault for a different phrase/.test(message)) {
     return 'This device already holds a different vault. Clear it in Settings first, or enter the phrase that matches it.';
@@ -710,9 +721,20 @@ function showLockError(message) {
   lockError.hidden = !message;
 }
 
-function showLock(message = '') {
+/**
+ * The lock screen for two different situations: a device that holds a vault and is locked, and a
+ * device that holds nothing and is being asked for a phrase that belongs to a server copy. The
+ * screen is the same; the sentence under the field is not.
+ */
+function showLock(message = '', { hasVault = null } = {}) {
   appView.hidden = true;
   lockView.hidden = false;
+  if (hasVault !== null) {
+    deviceNote.textContent = hasVault
+      ? 'This device holds a vault. Enter its 13 words to open it.'
+      : 'No vault on this device yet. Enter your 13 words to load a synced one, or create a new vault.';
+    deviceNote.hidden = false;
+  }
   showLockError(message);
   phraseInput.focus();
 }
@@ -759,9 +781,9 @@ async function tryRemembered() {
   try {
     remembered = await store.readRemembered();
   } catch {
-    return showLock();
+    return showLock('', { hasVault: false });
   }
-  if (!remembered) return showLock();
+  if (!remembered) return showLock('', { hasVault: false });
 
   try {
     const key = await keyFromBytes(remembered.keyBytes);
@@ -779,7 +801,7 @@ async function tryRemembered() {
     });
   } catch {
     await store.forget().catch(() => {});
-    showLock('This device could not reopen its vault. Enter your phrase.');
+    showLock('This device could not reopen its vault. Enter your phrase.', { hasVault: true });
   }
 }
 
@@ -790,8 +812,9 @@ async function handleUnlock(event) {
   showLockError('');
 
   const phrase = phraseInput.value;
-  if (phrase.trim() === '') {
-    showLockError('Enter your 13-word phrase.');
+  const problem = phraseProblem(phrase);
+  if (problem) {
+    showLockError(problem);
     phraseInput.focus();
     return;
   }
@@ -2084,7 +2107,7 @@ async function lockVault() {
   trialEndsAt = null;
   planNote.hidden = true;
   list.replaceChildren();
-  showLock('Locked. Enter your phrase to reopen the vault.');
+  showLock('Locked. Enter your phrase to reopen the vault.', { hasVault: true });
 }
 
 /* --------------------------------------------------------------------- boot */

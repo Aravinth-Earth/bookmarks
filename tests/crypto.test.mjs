@@ -27,6 +27,7 @@ import {
   generatePhrase,
   normalizePhrase,
   open,
+  phraseProblem,
   seal
 } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
@@ -152,4 +153,17 @@ test('a tampered or malformed blob is refused, never partially read', async () =
   await assert.rejects(() => open(key, { ct: sealed.ct }, accountId), /iv and a ct/);
   await assert.rejects(() => open(key, { iv: sealed.iv }, accountId), /iv and a ct/);
   await assert.rejects(() => open(key, null, accountId), /iv and a ct/);
+});
+
+test('a phrase problem names what to fix, not what the parser saw', async () => {
+  /* Five words: the count is the whole story. */
+  assert.match(phraseProblem('one two three four five'), /That is 5 words — the phrase is 13\./);
+
+  /* Thirteen words with one that is not in the list: name it, do not say "normalisation failed". */
+  const unknown = `${WORDLIST.slice(0, 12).join(' ')} notaword`;
+  assert.match(phraseProblem(unknown), /“notaword” is not one of the words these phrases use/);
+
+  /* A real phrase has nothing to report. */
+  assert.equal(phraseProblem(WORDLIST.slice(0, 13).join(' ')), null);
+  assert.equal(phraseProblem('  '), 'The phrase has 13 words.');
 });
