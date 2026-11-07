@@ -134,6 +134,28 @@ in that file and the `LIMITS` table in `src/index.js` disagree.
 A challenge is valid for 60 seconds, and asking for one again during that time returns the same
 nonce. A sign-in that is already in progress therefore completes whatever else arrives.
 
+### Sign-in lockout
+
+A wrong proof is counted against the source it came from, never against the account, so no one
+who knows an account id can shut its owner out by failing five times. The Worker derives the
+source from the caller's address, forwards only its SHA-256, and replaces any value the caller
+sent; the account object stores a second digest over that and the account. Five wrong proofs
+from one source lock that source for **15 minutes** and nothing else — another source, the
+owner's included, still signs in. A correct proof clears that source's count at once, and a
+count older than fifteen minutes is forgotten.
+
+One account remembers at most **64 sources**. A new source is admitted only by evicting the
+oldest entry, so inventing sources cannot grow the record, and an evicted entry can only forget
+failures: a lock lives inside its entry and nowhere else.
+
+A distributed attempt is met by a whole-account counter that throttles rather than locks. Inside
+a minute, the first **20** failures cost nothing — more than four sources can spend, since each
+is locked at five. Each failure after that answers `429 {"error":"throttled"}` with a
+`retry-after` that doubles from **1 second** and stops at **30 seconds**, and a correct proof
+clears the counter. The wait is written at most thirty seconds ahead and is never a stored
+deadline an attacker can extend, so the owner's worst case is a thirty-second retry, not a
+lockout.
+
 ## Events
 
 Observability is on for the Worker, and each refusal is written as one JSON line through
@@ -148,8 +170,9 @@ means something was refused or failed:
 |---|---|
 | `event` | `signin_failed`, `signin_locked`, `create_refused`, `rate_limited`, `proxy_refused`, `server_error` |
 | `route` | The class the route is counted as — `signin`, `fetch` or `vault` — or `api` when an exception surfaced before a class was known |
-| `reason` | The code the refusing branch answered with: `bad_proof`, `challenge_expired`, `no_account`, `too_large`, `cap_full`, `invalid`, `mismatch`, `locked`, `over_limit`, `bad_host`, `blocked_host`, `bad_hash`, `timeout`, `fetch_failed`, `unhandled` |
+| `reason` | The code the refusing branch answered with: `bad_proof`, `challenge_expired`, `no_account`, `too_large`, `cap_full`, `invalid`, `mismatch`, `locked`, `throttled`, `over_limit`, `bad_host`, `blocked_host`, `bad_hash`, `timeout`, `fetch_failed`, `unhandled` |
 | `account` | The first 12 hex characters of SHA-256(account id), present when the branch holds the account. The id itself is never written. |
+| `source` | The first 12 hex characters of SHA-256 over the source digest the Worker forwarded, present when the sign-in was counted against a source. Never an address. |
 | `retry_after` | Whole seconds; on `rate_limited` and `signin_locked` only |
 
 The shape is defined once, in `src/events.js`, and `logEvent` is the only writer. It takes an

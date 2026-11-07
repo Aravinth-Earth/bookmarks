@@ -11,8 +11,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  ACCOUNT_FREE_FAILURES,
+  ACCOUNT_RETRY_MAX_MS,
   FREE_MAX_CT_CHARS,
   FREE_TRIAL_MS,
+  LOCKOUT_MS,
+  MAX_FAILURES,
+  MAX_TRACKED_SOURCES,
   MAX_VAULT_BODY,
   OWNER_UNITS,
   READ_ONLY_GRACE_MS,
@@ -332,7 +337,11 @@ test('a challenge from anywhere else does not displace the nonce a sign-in is ho
   const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, owner.body.nonce);
   const login = await read(await harness.vault.fetch(request('/login', { body: { proof } })));
   assert.equal(login.status, 200, 'the sign-in that was in progress completes');
-  assert.equal((await harness.storage.get('lock')).failures, 0, 'and no failure is counted');
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('source:')),
+    [],
+    'and no failure is counted'
+  );
 });
 
 test('a nonce that has expired is replaced, never handed out again', async () => {
@@ -368,7 +377,7 @@ test('the right proof logs in, and the same proof cannot be replayed', async () 
   assert.equal(replay.body.error, 'challenge_expired');
 });
 
-test('a wrong proof is refused, and five in a row lock the account', async () => {
+test('a wrong proof is refused, and five in a row from the object lock the account it reached', async () => {
   const harness = object();
   await provision(harness);
 
@@ -394,6 +403,184 @@ test('a wrong proof is refused, and five in a row lock the account', async () =>
   harness.advance(15 * 60 * 1000 + 1);
   const after = await login(harness);
   assert.equal(after.status, 200, 'the lockout ends');
+});
+
+/* ------------------------------------------------------------- what a source carries */
+
+/* Two digests of the shape the Worker forwards: the object never sees the address they came
+   from, so a test can choose one per caller. */
+const SOURCE_A = 'a'.repeat(64);
+const SOURCE_B = 'b'.repeat(64);
+
+/** A digest-shaped source for the Nth invented caller. */
+function sourceOf(index) {
+  return index.toString(16).padStart(64, '0');
+}
+
+async function failedLoginFrom(harness, source) {
+  const challenge = await read(
+    await harness.vault.fetch(request('/challenge', { headers: { 'x-vault-source': source } }))
+  );
+  assert.equal(challenge.status, 200, 'a challenge arrives');
+  return read(
+    await harness.vault.fetch(
+      request('/login', {
+        body: { proof: 'not-the-proof' },
+        headers: { 'x-vault-source': source }
+      })
+    )
+  );
+}
+
+async function loginFrom(harness, source) {
+  const challenge = await read(
+    await harness.vault.fetch(request('/challenge', { headers: { 'x-vault-source': source } }))
+  );
+  assert.equal(challenge.status, 200, 'a challenge arrives');
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  return read(
+    await harness.vault.fetch(
+      request('/login', { body: { proof }, headers: { 'x-vault-source': source } })
+    )
+  );
+}
+
+test('five failures from one source lock that source alone', async () => {
+  const harness = object();
+  await provision(harness);
+
+  for (let attempt = 1; attempt <= MAX_FAILURES; attempt += 1) {
+    const refused = await failedLoginFrom(harness, SOURCE_A);
+    assert.equal(refused.status, 401, `attempt ${attempt}`);
+    assert.equal(refused.body.error, 'bad_proof');
+  }
+
+  const locked = await failedLoginFrom(harness, SOURCE_A);
+  assert.equal(locked.status, 429);
+  assert.equal(locked.body.error, 'locked');
+  assert.equal(locked.body.retryAfter, LOCKOUT_MS / 1000);
+
+  /* The second source is on its first failure, not its sixth: the budget is its own. */
+  const other = await failedLoginFrom(harness, SOURCE_B);
+  assert.equal(other.status, 401);
+  assert.equal(other.body.error, 'bad_proof');
+});
+
+test('a locked source does not keep another source, the owner included, out', async () => {
+  const harness = object({ ownerId: ACCOUNT.accountId });
+  await provision(harness);
+
+  for (let attempt = 1; attempt <= MAX_FAILURES; attempt += 1) {
+    await failedLoginFrom(harness, SOURCE_A);
+  }
+  assert.equal((await failedLoginFrom(harness, SOURCE_A)).status, 429);
+
+  const owner = await loginFrom(harness, SOURCE_B);
+  assert.equal(owner.status, 200, 'the owner signs in from another place');
+  assert.equal(owner.body.plan, 'owner');
+
+  /* A sign-in elsewhere does not shorten the first source's lock either. */
+  const still = await failedLoginFrom(harness, SOURCE_A);
+  assert.equal(still.status, 429);
+  assert.ok(still.body.retryAfter > 0);
+});
+
+test('a correct proof clears its own source, so four failures never become five', async () => {
+  const harness = object();
+  await provision(harness);
+
+  for (let attempt = 1; attempt < MAX_FAILURES; attempt += 1) {
+    assert.equal((await failedLoginFrom(harness, SOURCE_A)).status, 401);
+  }
+
+  assert.equal((await loginFrom(harness, SOURCE_A)).status, 200, 'the right proof still works');
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('source:')),
+    [],
+    'and the count it had is gone'
+  );
+
+  /* Four more would have crossed the threshold if the first four were still counted. */
+  for (let attempt = 1; attempt < MAX_FAILURES; attempt += 1) {
+    assert.equal((await failedLoginFrom(harness, SOURCE_A)).status, 401, `again ${attempt}`);
+  }
+  assert.equal((await loginFrom(harness, SOURCE_A)).status, 200, 'the count started at zero');
+});
+
+test('the source table keeps sixty-four entries and evicts the oldest rather than growing', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const total = MAX_TRACKED_SOURCES + 8;
+  for (let index = 0; index < total; index += 1) {
+    /* A minute between attempts keeps the whole-account throttle out of the way; a source entry
+       only ages out after fifteen. */
+    harness.advance(61_000);
+    const refused = await failedLoginFrom(harness, sourceOf(index));
+    assert.equal(refused.status, 401, `source ${index}`);
+  }
+
+  const keys = [...harness.storage.raw.keys()].filter((key) => key.startsWith('source:'));
+  assert.equal(keys.length, MAX_TRACKED_SOURCES, 'the table is capped');
+
+  const oldest = await harness.vault.failureKey(ACCOUNT.accountId, sourceOf(0));
+  const newest = await harness.vault.failureKey(ACCOUNT.accountId, sourceOf(total - 1));
+  assert.equal(keys.includes(oldest), false, 'the oldest entry made room');
+  assert.equal(keys.includes(newest), true, 'the newest is the one kept');
+});
+
+test('a distributed attempt earns a wait that grows to a cap and never a lock', async () => {
+  const harness = object();
+  await provision(harness);
+
+  for (let index = 0; index < ACCOUNT_FREE_FAILURES; index += 1) {
+    assert.equal((await failedLoginFrom(harness, sourceOf(index))).status, 401, `free ${index}`);
+  }
+  /* The failure that crosses the allowance earns the first wait. */
+  assert.equal(
+    (await failedLoginFrom(harness, sourceOf(ACCOUNT_FREE_FAILURES))).status,
+    401,
+    'the failure itself is still counted'
+  );
+
+  const waits = [];
+  for (let round = 0; round < 6; round += 1) {
+    const refused = await failedLoginFrom(harness, sourceOf(100 + round));
+    assert.equal(refused.status, 429, `round ${round}`);
+    assert.equal(refused.body.error, 'throttled');
+    waits.push(refused.body.retryAfter);
+
+    harness.advance(refused.body.retryAfter * 1000);
+    assert.equal(
+      (await failedLoginFrom(harness, sourceOf(200 + round))).status,
+      401,
+      'the next failure earns a longer wait'
+    );
+  }
+
+  assert.deepEqual(waits, [1, 2, 4, 8, 16, 30], 'one second, doubling, and no further');
+  assert.equal(Math.max(...waits), ACCOUNT_RETRY_MAX_MS / 1000);
+
+  /* A fresh minute, so the owner meets a wait that is running rather than an expired one. */
+  harness.advance(61_000);
+  for (let index = 0; index < ACCOUNT_FREE_FAILURES; index += 1) {
+    assert.equal((await failedLoginFrom(harness, sourceOf(300 + index))).status, 401);
+  }
+  assert.equal(
+    (await failedLoginFrom(harness, sourceOf(400))).status,
+    401,
+    'the failure that starts the wait'
+  );
+
+  /* The owner is delayed by the wait that is running, and gets in as soon as it ends. */
+  const blocked = await loginFrom(harness, sourceOf(5_000));
+  assert.equal(blocked.status, 429, 'a wait applies to every source');
+  assert.ok(blocked.body.retryAfter <= ACCOUNT_RETRY_MAX_MS / 1000, 'and is at most the cap');
+
+  harness.advance(blocked.body.retryAfter * 1000);
+  const owner = await loginFrom(harness, sourceOf(5_000));
+  assert.equal(owner.status, 200, 'the same proof is accepted once the wait is over');
+  assert.equal(await harness.storage.get('attempts'), undefined, 'and the counter is cleared');
 });
 
 test('a nonce expires after a minute', async () => {
