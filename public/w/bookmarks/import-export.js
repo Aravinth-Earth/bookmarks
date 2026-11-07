@@ -137,7 +137,10 @@ export function importPlain(payload, now = Date.now) {
     throw fail('INVALID_IMPORT', 'that file carries no bookmark list');
   }
 
-  const statistics = { imported: 0, skipped: 0, duplicates: 0 };
+  /* `duplicates` counts entries the file repeats (the same URL twice after normalisation);
+     `repeats` names them, so the importer can say which line is the offender instead of only
+     how many. A clash with the vault's own bookmarks is not this file's business. */
+  const statistics = { imported: 0, skipped: 0, duplicates: 0, repeats: [] };
   let document = createDocument();
 
   for (const entry of entries) {
@@ -151,8 +154,15 @@ export function importPlain(payload, now = Date.now) {
       document = result.document;
       statistics.imported += 1;
     } catch (error) {
-      if (error.code === 'DUPLICATE') statistics.duplicates += 1;
-      else statistics.skipped += 1;
+      if (error.code === 'DUPLICATE') {
+        statistics.duplicates += 1;
+        statistics.repeats.push({
+          url: typeof entry.url === 'string' ? entry.url.trim() : '',
+          name: legacyName(entry)
+        });
+      } else {
+        statistics.skipped += 1;
+      }
     }
   }
 

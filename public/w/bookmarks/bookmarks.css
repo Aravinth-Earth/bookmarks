@@ -251,6 +251,11 @@ a:focus-visible {
 
 /* ---------------------------------------------------------------- toolbar */
 
+/* The view toggle is the phone's stand-in for the view select. */
+.view-toggle {
+    display: none;
+}
+
 /* The toolbar's own icons exist for the phone width, where the labels are hidden. */
 .button-icon {
     display: none;
@@ -386,13 +391,58 @@ a:focus-visible {
     --bookmark-font-size: 1.15rem;
 }
 
+/* The list is the table: name, address, clicks, last use, actions. */
 .row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: 2.125rem minmax(0, 1.2fr) minmax(0, 1fr) 4.5rem 6rem 6.5rem;
     align-items: center;
     gap: var(--space-2, 0.5rem);
     border-radius: var(--radius-lg, 8px);
     padding: 1px var(--space-1, 0.25rem);
+}
+
+/* The link covers the tile and the name, so both open the page and the columns stay aligned. */
+.row-link {
+    grid-column: 1 / 3;
+}
+
+.row-head {
+    display: grid;
+    padding-bottom: 0.15rem;
+    border-bottom: 1px solid var(--border, #21262d);
+    color: var(--text-muted, #6e7681);
+    font-size: var(--font-size-xs, 0.7rem);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.row-head:hover {
+    background: transparent;
+}
+
+.row-head > span {
+    align-self: end;
+}
+
+/* The name sits inside the link, past the tile; line the label up with it. */
+.row-head > span:nth-child(2) {
+    padding-left: 0.5rem;
+}
+
+.row-head .clicks,
+.clicks {
+    text-align: right;
+}
+
+.row-actions {
+    justify-content: flex-end;
+}
+
+.row-when {
+    color: var(--text-muted, #6e7681);
+    font-size: var(--font-size-xs, 0.75rem);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
 .row:hover {
@@ -622,8 +672,17 @@ a:focus-visible {
     display: inline;
 }
 
-.list[data-view='pills'] .row-host {
+.list[data-view='pills'] .row-host,
+.list[data-view='pills'] .row-when,
+.list[data-view='pills'] .row-head {
     display: none;
+}
+
+/* Read-only view: say where editing lives instead of putting a pencil on every chip. */
+.view-hint {
+    margin: 0 0 var(--space-2, 0.5rem);
+    color: var(--text-muted, #6e7681);
+    font-size: var(--font-size-xs, 0.75rem);
 }
 
 .list[data-view='pills'] .row-name {
@@ -933,15 +992,23 @@ body.modal-open {
         flex: 1 1 100%;
     }
 
-    .sort,
-    .view {
-        flex: 1 1 0;
+    /* One select and four icons: two selects plus buttons was a crowded, clipped row. */
+    .sort {
+        flex: 1 1 auto;
         min-width: 0;
     }
 
-    .sort select,
-    .view select {
+    .sort select {
         width: 100%;
+    }
+
+    .view {
+        display: none;
+    }
+
+    .view-toggle {
+        display: grid;
+        place-items: center;
     }
 
     .toolbar .button-label {

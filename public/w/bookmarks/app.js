@@ -90,6 +90,8 @@ const searchInput = $('search');
 const sortInput = $('sort');
 const viewInput = $('view');
 const settingsButton = $('settings-button');
+const lockButton = $('lock-button');
+const viewToggle = $('view-toggle');
 const addForm = $('add-form');
 const addToggle = $('add-toggle');
 const addCancel = $('add-cancel');
@@ -97,6 +99,7 @@ const addUrl = $('add-url');
 const addName = $('add-name');
 const list = $('list');
 const empty = $('empty');
+const viewHint = $('view-hint');
 const vaultStatus = $('vault-status');
 const status = $('status');
 const planNote = $('plan-note');
@@ -134,6 +137,9 @@ function applyAppearance() {
   list.dataset.view = currentView;
   document.documentElement.dataset.size = currentSize;
   viewInput.value = currentView;
+  /* Pills are for opening pages; editing and deleting live in the list, so say where they are. */
+  viewHint.hidden =
+    currentView !== 'pills' || (state.document?.bookmarks.length ?? 0) === 0;
 }
 
 /* --------------------------------------------------------------- small helpers */
@@ -1095,6 +1101,11 @@ function actionButton(action, label, iconName, { pressed = false } = {}) {
   return button;
 }
 
+/**
+ * One row. The list view is the table: name, address, clicks, last use, actions. The pills view
+ * reuses the same markup, showing only the tile, the name and the count — it is a reading and
+ * clicking view, not an editing one.
+ */
 function rowFor(bookmark) {
   const { initial, background, foreground } = tileFor(bookmark);
 
@@ -1105,17 +1116,14 @@ function rowFor(bookmark) {
     tile.textContent = initial;
   }
 
-  const label = el('span', { class: 'row-label' }, [
-    el('span', { class: 'row-name', text: bookmark.name || bookmark.search || bookmark.hostname }),
-    el('span', { class: 'row-host', text: bookmark.hostname })
-  ]);
+  const name = el('span', { class: 'row-name', text: labelOf(bookmark) });
 
   const link = el('a', {
     class: 'row-link',
     href: bookmark.url,
     target: '_blank',
     rel: 'noopener noreferrer'
-  }, [tile, label]);
+  }, [tile, name]);
 
   /* An icon-only pill hides its label, and a hidden label leaves the link with no accessible
      name at all — so the name is stated explicitly. */
@@ -1130,11 +1138,15 @@ function rowFor(bookmark) {
   row.style.setProperty('--tile-seed', background);
   row.style.setProperty('--tile-fg', foreground);
 
+  const host = el('span', { class: 'row-host', text: bookmark.hostname });
+
   const clicks = el('span', {
     class: 'clicks',
     text: String(bookmark.clickCount),
     'aria-label': `${bookmark.clickCount} clicks`
   });
+
+  const when = el('span', { class: 'row-when', text: lastUsedLabel(bookmark) });
 
   const actions = el('span', { class: 'row-actions' }, [
     actionButton('pin', `${bookmark.pinned ? 'Unpin' : 'Pin'} ${labelOf(bookmark)}`, 'pin', {
@@ -1144,8 +1156,17 @@ function rowFor(bookmark) {
     actionButton('remove', `Delete ${labelOf(bookmark)}`, 'remove')
   ]);
 
-  row.append(link, clicks, actions);
+  row.append(link, host, clicks, when, actions);
   return row;
+}
+
+/** The day a bookmark was last opened, short enough for a column. */
+function lastUsedLabel(bookmark) {
+  const stamp = bookmark.lastClickedAt ?? bookmark.createdAt ?? null;
+  if (!stamp) return '—';
+  const when = new Date(stamp);
+  if (Number.isNaN(when.getTime())) return '—';
+  return when.toLocaleDateString([], { day: 'numeric', month: 'short' });
 }
 
 function render() {
@@ -1156,7 +1177,17 @@ function render() {
   const view = { ...state.document, bookmarks: matched };
   const sorted = sortBookmarks(view, sortInput.value);
 
-  list.replaceChildren(...sorted.map(rowFor));
+  /* The list view is a table, so it gets a header. Pills view hides it with CSS. */
+  const head = el('li', { class: 'row row-head' }, [
+    el('span', { 'aria-hidden': 'true' }),
+    el('span', { text: 'Name' }),
+    el('span', { text: 'Address' }),
+    el('span', { class: 'clicks', text: 'Clicks' }),
+    el('span', { class: 'row-when', text: 'Last used' }),
+    el('span')
+  ]);
+
+  list.replaceChildren(head, ...sorted.map(rowFor));
 
   empty.hidden = sorted.length !== 0;
   empty.textContent =
@@ -1165,6 +1196,7 @@ function render() {
       : `No bookmark matches “${query.trim()}”.`;
 
   updateStatusLine();
+  viewHint.hidden = currentView !== 'pills' || sorted.length === 0;
 }
 
 /* ------------------------------------------------------------------- actions */
@@ -1198,6 +1230,8 @@ async function suggestName() {
     addName.placeholder = original;
   }
   if (!title || nameTouched || addName.value.trim() !== '' || addUrl.value.trim() !== raw) return;
+  /* The answer can land after the person has moved into the field; typing wins. */
+  if (document.activeElement === addName) return;
 
   addName.value = shortenTitle(title);
 }
@@ -1579,6 +1613,7 @@ function handleListClick(event) {
     return;
   }
 
+
   /* A click on the link counts the visit. It is not prevented: the browser opens the tab, and
      the count is written behind it. The list re-sorts only after the click has been handled. */
   const link = event.target.closest('a.row-link');
@@ -1658,6 +1693,16 @@ async function handleImport() {
     return;
   }
 
+  /* Two different collisions, counted apart: the file repeating itself, and the file meeting
+     what this vault already holds. Saying "duplicates 1" for either one is what made the dialog
+     unreadable. */
+  const incoming = parsed.document.bookmarks;
+  const existingUrls = new Set(state.document.bookmarks.map((bookmark) => bookmark.url));
+  const alreadyHere = incoming.filter((bookmark) => existingUrls.has(bookmark.url)).length;
+  const fresh = incoming.length - alreadyHere;
+  const repeats = parsed.statistics.repeats ?? [];
+  const unreadable = parsed.statistics.skipped ?? 0;
+
   const choice = await new Promise((resolve) => {
     let settled = false;
 
@@ -1673,11 +1718,38 @@ async function handleImport() {
       body: [
         el('p', {
           class: 'modal-note',
-          text: `That file holds ${parsed.document.bookmarks.length} bookmarks.`
+          text: `That file holds ${incoming.length} bookmark${incoming.length === 1 ? '' : 's'}.`
         }),
         el('p', {
           class: 'modal-note',
-          text: `Skipped ${parsed.statistics.skipped}, duplicates ${parsed.statistics.duplicates}. Merge keeps what is already here; replace discards it.`
+          text:
+            repeats.length === 0
+              ? 'It lists every site once — no repeats inside the file.'
+              : `${repeats.length} of them ${repeats.length === 1 ? 'is' : 'are'} the same site twice, so ${repeats.length === 1 ? 'it is' : 'they are'} kept once: ${repeats
+                  .slice(0, 2)
+                  .map((repeat) => repeat.url)
+                  .join(', ')}${repeats.length > 2 ? ', …' : ''}.`
+        }),
+        el('p', {
+          class: 'modal-note',
+          text:
+            alreadyHere === 0
+              ? 'None of them are in this vault yet.'
+              : fresh === 0
+                ? `All ${alreadyHere} are already in this vault — nothing new to add.`
+                : `${alreadyHere} ${alreadyHere === 1 ? 'is' : 'are'} already in this vault; Merge keeps your copy and adds the other ${fresh}.`
+        }),
+        ...(unreadable === 0
+          ? []
+          : [
+              el('p', {
+                class: 'modal-note',
+                text: `${unreadable} could not be read and would be left out.`
+              })
+            ]),
+        el('p', {
+          class: 'modal-note',
+          text: 'Merge keeps what this vault already has. Replace discards it and keeps only the file.'
         })
       ],
       actions: [
@@ -2066,6 +2138,7 @@ function bindEvents() {
     delete addName.dataset.suggesting;
   });
   list.addEventListener('click', handleListClick);
+
   searchInput.addEventListener('input', render);
 
   sortInput.addEventListener('change', () => {
