@@ -573,6 +573,35 @@ a:focus-visible {
     color: inherit;
 }
 
+/* The pill is the target, not only the words inside it. The anchor stretches over the pill's
+   own padding and over the count, so a tap anywhere on the shape opens the bookmark; the count
+   is a label, so it lets the click through instead of swallowing it. */
+.list[data-view='pills'] .row {
+    position: relative;
+}
+
+.list[data-view='pills'] .row-link::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-full, 999px);
+}
+
+.list[data-view='pills'] .clicks {
+    position: relative;
+    pointer-events: none;
+}
+
+/* A focus ring around the whole pill, because that is now the thing the link covers. */
+.list[data-view='pills'] .row:focus-within {
+    outline: 2px solid var(--focus-ring, var(--accent, #58a6ff));
+    outline-offset: 2px;
+}
+
+.list[data-view='pills'] .row-link:focus-visible {
+    outline: none;
+}
+
 .list[data-view='pills'] .tile {
     width: 1.3rem;
     height: 1.3rem;
