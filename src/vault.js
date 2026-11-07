@@ -166,6 +166,10 @@ export class Vault {
     if (path === '/vault' && request.method === 'GET') return this.readVault(request);
     if (path === '/vault' && request.method === 'PUT') return this.writeVault(request);
 
+    /* Operator route: read by a Worker bound to this object, never by a browser. The public
+       API refuses any `/a/<id>/admin-` path, so this is reachable only through a binding. */
+    if (path === '/admin-stats' && request.method === 'GET') return this.adminStats();
+
     return json({ error: 'not_found' }, 404);
   }
 
@@ -422,6 +426,40 @@ export class Vault {
     const upgraded = { ...account, plan: 'owner', units: OWNER_UNITS, trialEndsAt: null };
     await this.storage.put('account', upgraded);
     return upgraded;
+  }
+
+  /**
+   * Dates, sizes and counts for an operator view: how much space an account holds against its
+   * cap, when it was last seen, whether its trial has run out.
+   *
+   * The phrase, the auth secret, the session records and the sealed blob are not in the answer.
+   */
+  async adminStats() {
+    const account = await this.storage.get('account');
+    if (!account) return json({ error: 'no_account' }, 404);
+
+    const vault = (await this.storage.get('vault')) ?? { version: 0 };
+    const now = this.now();
+    /* Only live places are counted, so an expired session that has not been pruned yet does
+       not inflate the number an operator reads. */
+    const sessions = [...(await this.storage.list({ prefix: 'session:' }))].filter(
+      ([, session]) => (session.expiresAt ?? 0) > now
+    ).length;
+
+    return json({
+      plan: account.plan ?? 'free',
+      units: account.units ?? 0,
+      createdAt: account.createdAt ?? null,
+      lastSeenAt: account.lastSeenAt ?? null,
+      trialEndsAt: account.trialEndsAt ?? null,
+      paidUntil: account.paidUntil ?? null,
+      vaultVersion: vault.version ?? 0,
+      ctChars: typeof vault.ct === 'string' ? vault.ct.length : 0,
+      updatedAt: vault.updatedAt ?? null,
+      capChars: this.capChars(account),
+      readOnly: this.trialEnded(account),
+      sessions
+    });
   }
 
   /** Paid and owner accounts hold a number of units; free accounts hold a fixed trial size. */
