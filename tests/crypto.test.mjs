@@ -19,6 +19,8 @@ import {
   IV_BYTES,
   KEY_BITS,
   LABELS,
+  PAD_BUCKET_BYTES,
+  PAD_VERSION,
   PBKDF2_ITERATIONS,
   WORD_COUNT,
   accountIdFromPhrase,
@@ -47,6 +49,37 @@ const PHRASE_B = WORDLIST.slice(WORD_COUNT, WORD_COUNT * 2).join(' ');
 function flipFirstCharacter(text) {
   const first = text[0] === 'A' ? 'B' : 'A';
   return first + text.slice(1);
+}
+
+/* What the stored length is read as: the ciphertext bytes, where GCM adds a 16-byte tag. */
+const GCM_TAG_BYTES = 16;
+
+function ciphertextBytes(sealed) {
+  return Buffer.from(sealed.ct, 'base64url').length;
+}
+
+/* The exact byte accounting of the padded envelope, written out so the tests state the format. */
+function envelopeBytes(document) {
+  return Buffer.byteLength(JSON.stringify({ v: PAD_VERSION, doc: document, pad: '' }));
+}
+
+/** Seal the way the module did before padding existed: the bare document, no envelope. */
+async function sealUnpadded(key, value, associated) {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv,
+      tagLength: 128,
+      additionalData: new TextEncoder().encode(associated)
+    },
+    key,
+    new TextEncoder().encode(JSON.stringify(value))
+  );
+  return {
+    iv: Buffer.from(iv).toString('base64url'),
+    ct: Buffer.from(ciphertext).toString('base64url')
+  };
 }
 
 test('the wordlist is the EFF short list and thirteen words carry 134 bits', () => {
@@ -224,4 +257,91 @@ test('remembered material is only ever a non-extractable key', async () => {
     /256 bits/
   );
   await assert.rejects(() => keyFromBytes({}), /base64url/);
+});
+
+test('a blob sealed before padding existed still opens, and gains no pad key', async () => {
+  const accountId = await accountIdFromPhrase(PHRASE_A);
+  const key = await deriveVaultKey(PHRASE_A);
+  const document = {
+    bookmarks: [{ url: 'https://example.com', clicks: 4 }],
+    prefs: { view: 'all', updatedAt: 1 }
+  };
+
+  const legacy = await sealUnpadded(key, document, accountId);
+
+  /* The old blob has no envelope, so the length is the document's own and nothing is stripped. */
+  assert.equal(
+    ciphertextBytes(legacy),
+    Buffer.byteLength(JSON.stringify(document)) + GCM_TAG_BYTES
+  );
+  assert.deepEqual(await open(key, legacy, accountId), document);
+  assert.equal('pad' in (await open(key, legacy, accountId)), false, 'no padding leaks out');
+
+  /* An old document that happens to own `doc` and `pad` keys is handed back whole, not unwrapped:
+     only the marked envelope is one. */
+  const lookalike = { doc: { url: 'https://example.com' }, pad: 'not padding at all' };
+  const sealedLookalike = await sealUnpadded(key, lookalike, accountId);
+  assert.deepEqual(await open(key, sealedLookalike, accountId), lookalike);
+});
+
+test('a new blob round-trips the document and hides the pad', async () => {
+  const accountId = await accountIdFromPhrase(PHRASE_A);
+  const key = await deriveVaultKey(PHRASE_A);
+  const document = { bookmarks: [{ url: 'https://example.com', clicks: 2 }], prefs: { view: 'all' } };
+
+  const sealed = await seal(key, document, accountId);
+  assert.deepEqual(await open(key, sealed, accountId), document);
+  assert.equal((ciphertextBytes(sealed) - GCM_TAG_BYTES) % PAD_BUCKET_BYTES, 0, 'a whole bucket');
+
+  /* Same document, second derivation, exactly as another device opens it. */
+  const other = await deriveVaultKey(PHRASE_A);
+  assert.deepEqual(await open(other, sealed, accountId), document);
+});
+
+test('two documents of clearly different sizes seal into the same bucket', async () => {
+  const accountId = await accountIdFromPhrase(PHRASE_A);
+  const key = await deriveVaultKey(PHRASE_A);
+
+  const small = { bookmarks: [{ url: 'https://a.example' }] };
+  const large = {
+    bookmarks: Array.from({ length: 8 }, (unused, at) => ({
+      url: `https://b${at}.example`,
+      name: 'x'.repeat(40)
+    }))
+  };
+
+  const smallBytes = envelopeBytes(small);
+  const largeBytes = envelopeBytes(large);
+  assert.ok(largeBytes - smallBytes > 200, 'the two documents differ by more than 200 bytes');
+
+  const sealedSmall = await seal(key, small, accountId);
+  const sealedLarge = await seal(key, large, accountId);
+
+  assert.equal(ciphertextBytes(sealedSmall), ciphertextBytes(sealedLarge));
+  assert.equal((ciphertextBytes(sealedSmall) - GCM_TAG_BYTES) % PAD_BUCKET_BYTES, 0);
+  assert.deepEqual(await open(key, sealedSmall, accountId), small);
+  assert.deepEqual(await open(key, sealedLarge, accountId), large);
+});
+
+test('a document just over a bucket boundary moves to the next bucket', async () => {
+  const accountId = await accountIdFromPhrase(PHRASE_A);
+  const key = await deriveVaultKey(PHRASE_A);
+
+  /* The note length that fills the first bucket exactly, then one character more. */
+  const empty = { note: '' };
+  const roomInBucket = PAD_BUCKET_BYTES - envelopeBytes(empty);
+  assert.ok(roomInBucket > 0 && roomInBucket < PAD_BUCKET_BYTES, 'the first bucket has room');
+
+  const atBoundary = { note: 'a'.repeat(roomInBucket) };
+  const overBoundary = { note: 'a'.repeat(roomInBucket + 1) };
+  assert.equal(envelopeBytes(atBoundary), PAD_BUCKET_BYTES);
+  assert.equal(envelopeBytes(overBoundary), PAD_BUCKET_BYTES + 1);
+
+  const sealedAt = await seal(key, atBoundary, accountId);
+  const sealedOver = await seal(key, overBoundary, accountId);
+
+  assert.equal(ciphertextBytes(sealedAt), PAD_BUCKET_BYTES + GCM_TAG_BYTES);
+  assert.equal(ciphertextBytes(sealedOver), PAD_BUCKET_BYTES * 2 + GCM_TAG_BYTES);
+  assert.deepEqual(await open(key, sealedAt, accountId), atBoundary);
+  assert.deepEqual(await open(key, sealedOver, accountId), overBoundary);
 });

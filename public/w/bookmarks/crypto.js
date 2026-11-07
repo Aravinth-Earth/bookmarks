@@ -30,6 +30,12 @@ export const WORD_COUNT = 13;
 export const PBKDF2_ITERATIONS = 210_000;
 export const KEY_BITS = 256;
 export const IV_BYTES = 12;
+/* A sealed plaintext is a whole number of these, so the stored length names a size band and not
+   the entry count. Four 320-byte bookmarks or three 400-byte ones land in the same band. */
+export const PAD_BUCKET_BYTES = 1024;
+/* The envelope's own marker. An old blob is a bare document and carries no marker, so it opens
+   exactly as it always did. */
+export const PAD_VERSION = 2;
 export const ACCOUNT_ID_BYTES = 16;
 /* 16 bytes, base64url, unpadded. */
 export const ACCOUNT_ID_LENGTH = 22;
@@ -324,13 +330,63 @@ function gcmParams(iv, associated) {
   return params;
 }
 
+/* Filler is drawn from the base64url alphabet: ASCII, never escaped by JSON, and uniform over
+   the 64 characters because 64 divides 256. It is inside the ciphertext, so its content carries
+   no meaning — only its length does, and that is decided by the bucket. */
+const PAD_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+function padFiller(length) {
+  if (length <= 0) return '';
+  const bytes = crypto.getRandomValues(new Uint8Array(length));
+  let filler = '';
+  for (const byte of bytes) filler += PAD_ALPHABET[byte % PAD_ALPHABET.length];
+  return filler;
+}
+
+/**
+ * The plaintext that actually gets sealed: the document inside a marked envelope, with a pad
+ * long enough that the serialised envelope is a whole number of `PAD_BUCKET_BYTES`.
+ *
+ * The marker is what keeps the format self-describing. A blob sealed before padding exists is
+ * a bare document with no marker and no `pad`, so `unwrap` hands it back untouched; a document
+ * that happened to own a `doc` or `pad` key cannot be mistaken for an envelope.
+ */
+function envelopePlaintext(value) {
+  const bareBytes = encoder.encode(
+    JSON.stringify({ v: PAD_VERSION, doc: value, pad: '' })
+  ).length;
+  const targetBytes = Math.ceil(bareBytes / PAD_BUCKET_BYTES) * PAD_BUCKET_BYTES;
+  const serialised = JSON.stringify({
+    v: PAD_VERSION,
+    doc: value,
+    pad: padFiller(targetBytes - bareBytes)
+  });
+  /* Length is exact rather than approximate: none of the filler is escaped. */
+  return encoder.encode(serialised);
+}
+
+/** The document inside a padded envelope, or the value itself when it is not one. */
+function unwrap(value) {
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    value.v === PAD_VERSION &&
+    typeof value.pad === 'string' &&
+    Object.prototype.hasOwnProperty.call(value, 'doc')
+  ) {
+    return value.doc;
+  }
+  return value;
+}
+
 /** Seal a JSON value under the vault key, with a fresh 12-byte IV every time. */
 export async function seal(key, value, associated) {
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ciphertext = await crypto.subtle.encrypt(
     gcmParams(iv, associated),
     key,
-    encoder.encode(JSON.stringify(value))
+    envelopePlaintext(value)
   );
   return { iv: toBase64Url(iv), ct: toBase64Url(new Uint8Array(ciphertext)) };
 }
@@ -358,7 +414,7 @@ export async function open(key, sealed, associated) {
   }
 
   try {
-    return JSON.parse(decoder.decode(plaintext));
+    return unwrap(JSON.parse(decoder.decode(plaintext)));
   } catch {
     throw new Error('bookmarks: a sealed value carries JSON');
   }
