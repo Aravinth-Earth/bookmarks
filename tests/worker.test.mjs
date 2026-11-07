@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 
 import worker from '../src/index.js';
 import { quiet } from './logs.mjs';
+import { withFetch, dnsQueries } from './dns.mjs';
 
 /* The proxy refusals here are about routing and destinations; their event lines are tested in
    events.test.mjs. */
@@ -229,16 +230,6 @@ function iconRequest({ host = ICON_HOST, hash = ICON_HASH } = {}) {
   return new Request(`https://b.332321.xyz/w/bookmarks/api/icon?h=${hash}`, {
     headers: host ? { 'x-icon-host': host } : {}
   });
-}
-
-async function withFetch(implementation, run) {
-  const original = globalThis.fetch;
-  globalThis.fetch = implementation;
-  try {
-    return await run();
-  } finally {
-    globalThis.fetch = original;
-  }
 }
 
 test('the icon service refuses a missing hostname, a non-DNS host or a wrong hash', async () => {
@@ -794,4 +785,132 @@ test('a title is read after a public redirect', async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { title: 'Moved Title' });
   assert.deepEqual(asked, [`https://${ICON_HOST}/`, 'https://www.example.com/']);
+});
+
+/* ------------------------------------------------- destinations decided by the answer */
+
+const DNS_PUBLIC_HOST = 'dns-public.public-host.com';
+const DNS_LOOPBACK_HOST = 'dns-loopback.public-host.com';
+const DNS_PRIVATE_HOST = 'dns-rfc1918.public-host.com';
+const DNS_METADATA_HOST = 'dns-link-local.public-host.com';
+
+test('a public-looking host that answers with a private address is refused', async () => {
+  const dns = {
+    [DNS_LOOPBACK_HOST]: { a: ['127.0.0.1'], aaaa: ['::1'] },
+    [DNS_PRIVATE_HOST]: { a: ['10.1.2.3'], aaaa: ['fd00::1'] },
+    [DNS_METADATA_HOST]: { a: ['169.254.169.254'], aaaa: [] }
+  };
+
+  for (const host of [DNS_LOOPBACK_HOST, DNS_PRIVATE_HOST, DNS_METADATA_HOST]) {
+    const { asked, implementation } = stubFetch({});
+
+    const icon = await withFetch(
+      implementation,
+      () => worker.fetch(iconFor(host), harness().env),
+      dns
+    );
+    assert.equal(icon.status, 400, host);
+    assert.deepEqual(await icon.json(), { error: 'blocked_host' }, host);
+
+    const title = await withFetch(
+      implementation,
+      () => worker.fetch(titleFor(host), harness().env),
+      dns
+    );
+    assert.equal(title.status, 400, host);
+    assert.deepEqual(await title.json(), { error: 'blocked_host' }, host);
+
+    assert.deepEqual(asked, [], `${host} is never contacted`);
+  }
+});
+
+test('a host whose answers are all public is fetched exactly as before', async () => {
+  const dns = { [DNS_PUBLIC_HOST]: { a: ['93.184.216.34'], aaaa: ['2606:4700:4700::1111'] } };
+  const { asked, implementation } = stubFetch({
+    [`https://${DNS_PUBLIC_HOST}/favicon.ico`]: pngResponse(),
+    [`https://${DNS_PUBLIC_HOST}/`]: htmlResponse(
+      '<html><head><title>Resolved &amp; Fine</title></head></html>'
+    )
+  });
+
+  const icon = await withFetch(
+    implementation,
+    () => worker.fetch(iconFor(DNS_PUBLIC_HOST), harness().env),
+    dns
+  );
+  assert.equal(icon.status, 200);
+  assert.equal(icon.headers.get('content-type'), 'image/png');
+  assert.equal(icon.headers.get('cache-control'), 'public, max-age=2592000, immutable');
+
+  const title = await withFetch(
+    implementation,
+    () => worker.fetch(titleFor(DNS_PUBLIC_HOST), harness().env),
+    dns
+  );
+  assert.equal(title.status, 200);
+  assert.deepEqual(await title.json(), { title: 'Resolved & Fine' });
+
+  assert.deepEqual(asked, [
+    `https://${DNS_PUBLIC_HOST}/favicon.ico`,
+    `https://${DNS_PUBLIC_HOST}/`
+  ]);
+});
+
+test('a resolution that cannot be read refuses rather than passes', async () => {
+  for (const kind of ['http500', 'garbage', 'status', 'noanswer', 'badaddress']) {
+    const host = `dns-${kind}.public-host.com`;
+    const { asked, implementation } = stubFetch({});
+
+    const response = await withFetch(
+      implementation,
+      () => worker.fetch(iconFor(host), harness().env),
+      { [host]: { kind } }
+    );
+
+    assert.equal(response.status, 400, kind);
+    assert.deepEqual(await response.json(), { error: 'blocked_host' }, kind);
+    assert.deepEqual(asked, [], `${kind} is never contacted`);
+  }
+});
+
+test('a redirect to a name that resolves private is not followed', async () => {
+  const hop = 'dns-private-hop.public-host.com';
+  const { asked, implementation } = stubFetch({
+    [`https://${ICON_HOST}/favicon.ico`]: redirectTo(`https://${hop}/favicon.ico`),
+    /* The chain ends with no icon, so the route tries the page for a declared one. */
+    [`https://${ICON_HOST}/`]: new Response(null, { status: 404 })
+  });
+
+  const response = await withFetch(
+    implementation,
+    () => worker.fetch(iconRequest(), harness().env),
+    { [hop]: { a: ['192.168.1.9'], aaaa: ['fe80::1'] } }
+  );
+
+  assert.equal(response.status, 404, 'the chain ends, as any refused hop does');
+  assert.ok(!asked.includes(`https://${hop}/favicon.ico`), `${hop} is never contacted`);
+});
+
+test('a verdict is resolved once for a burst of the same host', async () => {
+  const host = 'dns-cached.public-host.com';
+  const { implementation } = stubFetch({
+    [`https://${host}/favicon.ico`]: pngResponse
+  });
+
+  dnsQueries.length = 0;
+  for (let at = 0; at < 5; at += 1) {
+    const response = await withFetch(
+      implementation,
+      () => worker.fetch(iconFor(host), harness().env),
+      {}
+    );
+    assert.equal(response.status, 200, `request ${at + 1}`);
+  }
+
+  const asked = dnsQueries.filter((query) => query.name === host);
+  assert.deepEqual(
+    asked.map((query) => query.type).sort(),
+    ['a', 'aaaa'],
+    'one lookup pair for five requests'
+  );
 });

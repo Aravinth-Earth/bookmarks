@@ -1145,6 +1145,21 @@ test('signing in more than twenty times keeps the newest twenty places', async (
   assert.equal(last.body.places, 20);
 });
 
+test('the sign-in answer carries the account dates the owner reads', async () => {
+  const harness = object();
+  await provision(harness);
+  const created = (await harness.storage.get('account')).createdAt;
+
+  const first = await loginAs(harness, 'desktop');
+  assert.equal(first.body.createdAt, created, 'the creation date is the stored one, in milliseconds');
+  assert.equal(first.body.lastSeenAt, created, 'the sign-in that follows creation is that moment');
+
+  harness.advance(3 * 60 * 1000);
+  const second = await loginAs(harness, 'desktop');
+  assert.equal(second.body.createdAt, created, 'the creation date does not move');
+  assert.equal(second.body.lastSeenAt, created + 3 * 60 * 1000, 'the last-activity date does');
+});
+
 /* ---------------------------------------------------------------- operator view */
 
 test('admin stats carry dates, sizes and counts, and no secret or blob', async () => {
