@@ -104,47 +104,6 @@ function notFound(prefix) {
  */
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
 
-function safeEqual(left, right) {
-  if (typeof left !== 'string' || typeof right !== 'string' || left.length !== right.length) {
-    return false;
-  }
-  let difference = 0;
-  for (let at = 0; at < left.length; at += 1) {
-    difference |= left.charCodeAt(at) ^ right.charCodeAt(at);
-  }
-  return difference === 0;
-}
-
-async function createAccount(request, env) {
-  if (request.method !== 'POST') return json({ error: 'method' }, 405);
-
-  const header = request.headers.get('authorization') ?? '';
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  if (!env.PROVISION_TOKEN || !match || !safeEqual(match[1].trim(), env.PROVISION_TOKEN)) {
-    return json({ error: 'unauthorized' }, 401);
-  }
-
-  const body = await request.json().catch(() => null);
-  const accountId = body?.accountId;
-  const authSecret = body?.authSecret;
-  if (!ACCOUNT_ID.test(accountId ?? '') || typeof authSecret !== 'string') {
-    return json({ error: 'invalid' }, 400);
-  }
-
-  const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
-  const response = await stub.fetch(
-    new Request('https://vault/account', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ accountId, authSecret })
-    })
-  );
-  return new Response(response.body, {
-    status: response.status,
-    headers: response.headers
-  });
-}
-
 const ICON_PATH = '/icon';
 const ICON_MAX_BYTES = 64 * 1024;
 const ICON_PAGE_MAX_BYTES = 256 * 1024;
@@ -373,7 +332,6 @@ async function handleApi(request, env, url) {
 
   if (path === '/health') return json({ ok: true, version: VERSION });
   if (path === ICON_PATH) return handleIcon(request, url);
-  if (path === '/accounts') return createAccount(request, env);
 
   if (path.startsWith('/a/')) {
     const rest = path.slice('/a/'.length);
@@ -441,5 +399,6 @@ export default {
   }
 };
 
-/* The class the binding in wrangler.toml names. */
+/* The classes the bindings in wrangler.toml name. */
 export { Vault } from './vault.js';
+export { Registry } from './registry.js';

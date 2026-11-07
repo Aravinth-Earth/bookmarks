@@ -1,9 +1,9 @@
 /**
- * The Worker's own routing: the provisioning gate, the account path, and the asset passthrough.
+ * The Worker's own routing: the account path and the asset passthrough.
  *
- * The Durable Object has its own tests; this file covers the layer in front of it — in
- * particular that `/api/accounts` cannot be reached without the provisioning token, because
- * that one route is the difference between "one account" and "free anonymous storage".
+ * The Durable Object has its own tests; this file covers the layer in front of it. There is no
+ * admin route: an account is created by the first sync that names it, and the Registry caps how
+ * many may exist.
  */
 
 import test from 'node:test';
@@ -14,13 +14,11 @@ import worker from '../src/index.js';
 
 /* Synthetic fixtures: no account that exists anywhere is named by this file. */
 const ACCOUNT = 'A'.repeat(22);
-const TOKEN = 'provision-secret';
 const AUTH_SECRET = 'A'.repeat(43);
 
 function harness({ doStatus = 201, doBody = { ok: true } } = {}) {
   const calls = [];
   const env = {
-    PROVISION_TOKEN: TOKEN,
     VAULTS: {
       idFromName: (name) => ({ name }),
       get: (id) => ({
@@ -53,22 +51,6 @@ function api(path, options = {}) {
   return new Request(`https://www.332321.xyz/w/bookmarks/api${path}`, options);
 }
 
-function provision(body, token) {
-  return api('/accounts', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {})
-    },
-    body: JSON.stringify(body)
-  });
-}
-
-const VALID_ACCOUNT = {
-  accountId: ACCOUNT,
-  authSecret: AUTH_SECRET
-};
-
 test('health answers without any credential', async () => {
   const response = await worker.fetch(api('/health'), harness().env);
   assert.equal(response.status, 200);
@@ -78,47 +60,38 @@ test('health answers without any credential', async () => {
   assert.equal(typeof body.version, 'string');
 });
 
-test('account creation is closed without the provisioning token', async () => {
-  for (const token of [null, 'wrong-token', '']) {
-    const { env, calls } = harness();
-    const response = await worker.fetch(provision(VALID_ACCOUNT, token), env);
-
-    assert.equal(response.status, 401, `token ${JSON.stringify(token)}`);
-    assert.equal(calls.length, 0, 'nothing reaches the Durable Object');
-  }
-});
-
-test('the provisioning token is compared whole, not as a prefix', async () => {
+test('there is no admin route to create accounts', async () => {
   const { env, calls } = harness();
-  const response = await worker.fetch(provision(VALID_ACCOUNT, TOKEN.slice(0, 8)), env);
+  const response = await worker.fetch(
+    api('/accounts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT, authSecret: AUTH_SECRET })
+    }),
+    env
+  );
 
-  assert.equal(response.status, 401);
+  assert.equal(response.status, 404);
   assert.equal(calls.length, 0);
 });
 
-test('a malformed provisioning body is refused before the object is called', async () => {
-  for (const body of [
-    {},
-    { accountId: 'short', authSecret: VALID_ACCOUNT.authSecret },
-    { accountId: ACCOUNT, authSecret: 42 }
-  ]) {
-    const { env, calls } = harness();
-    const response = await worker.fetch(provision(body, TOKEN), env);
-    assert.equal(response.status, 400, JSON.stringify(body).slice(0, 60));
-    assert.equal(calls.length, 0);
-  }
-});
-
-test('a valid provisioning call reaches the named object at /account', async () => {
-  const { env, calls } = harness();
-  const response = await worker.fetch(provision(VALID_ACCOUNT, TOKEN), env);
+test('a first sync creates its account by reaching that object', async () => {
+  const { env, calls } = harness({ doStatus: 201, doBody: { ok: true } });
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/account`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT, authSecret: AUTH_SECRET })
+    }),
+    env
+  );
 
   assert.equal(response.status, 201);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].name, ACCOUNT);
   assert.equal(calls[0].path, '/account');
   assert.equal(calls[0].method, 'POST');
-  assert.deepEqual(JSON.parse(calls[0].body), VALID_ACCOUNT);
+  assert.deepEqual(JSON.parse(calls[0].body), { accountId: ACCOUNT, authSecret: AUTH_SECRET });
 });
 
 test('account paths are forwarded to that account and nothing else', async () => {

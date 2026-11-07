@@ -78,6 +78,26 @@ export class SyncClient {
     return session.payload;
   }
 
+  /**
+   * Create the account on the server. First write wins; a 409 means the account we wanted is
+   * the account that exists, so it is success from the caller's point of view.
+   */
+  async register(accountId, authSecret) {
+    const response = await this.request(`/a/${accountId}/account`, {
+      method: 'POST',
+      body: { accountId, authSecret }
+    });
+
+    if (response.status === 201) return { created: true };
+    if (response.status === 409) return { created: false };
+    if (response.status === 429) {
+      throw new SyncError('FULL', 'This server is not accepting new vaults.');
+    }
+    throw new SyncError('REGISTER_FAILED', 'Could not create the account.', {
+      status: response.status
+    });
+  }
+
   /** @returns {Promise<{version: number, iv: string, ct: string, updatedAt: number} | null>} */
   async pull() {
     this.requireSession();

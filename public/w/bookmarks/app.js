@@ -421,12 +421,13 @@ function markSynced() {
 }
 
 function handleSyncError(error) {
+  if (error?.code === 'FULL') {
+    setSyncStatus('Server full');
+    announce('This server is not accepting new vaults right now.', { duration: 6000 });
+    return;
+  }
   if (error?.code === 'NO_ACCOUNT') {
-    setSyncStatus('Not on the server');
-    announce(
-      'This vault is not registered on the server yet. Run scripts/create-account.mjs with your phrase, then turn sync on again.',
-      { duration: 9000 }
-    );
+    setSyncStatus('Could not create the account');
     return;
   }
   if (error?.code === 'LOCKED') {
@@ -462,7 +463,17 @@ async function syncNow() {
   try {
     if (!sync.signedIn) {
       setSyncStatus('Signing in…');
-      await sync.login(state.accountId, state.authSecret);
+      try {
+        await sync.login(state.accountId, state.authSecret);
+      } catch (error) {
+        if (error.code !== 'NO_ACCOUNT') throw error;
+
+        /* First sync on a new phrase: the account is created from the same secrets the login
+           would have used, so there is nothing to provision and no token to hold. */
+        setSyncStatus('Creating the account…');
+        await sync.register(state.accountId, state.authSecret);
+        await sync.login(state.accountId, state.authSecret);
+      }
     }
 
     const remote = await sync.pull();

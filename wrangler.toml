@@ -22,9 +22,19 @@ run_worker_first = true
 name = "VAULTS"
 class_name = "Vault"
 
+# One instance that caps how many accounts may exist, so open creation cannot fill the account
+# with free storage. The same job it does for splitter's rooms.
+[[durable_objects.bindings]]
+name = "REGISTRY"
+class_name = "Registry"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Vault"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Registry"]
 
 [[routes]]
 pattern = "www.332321.xyz/w/bookmarks/*"
@@ -54,6 +64,10 @@ zone_name = "332321.xyz"
 [[previews.durable_objects.bindings]]
 name = "VAULTS"
 class_name = "Vault"
+
+[[previews.durable_objects.bindings]]
+name = "REGISTRY"
+class_name = "Registry"
 
 [observability]
 enabled = true

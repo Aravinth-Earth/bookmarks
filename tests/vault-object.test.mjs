@@ -48,12 +48,38 @@ function object(overrides = {}) {
     storage: storage(),
     id: { name: overrides.name ?? ACCOUNT.accountId }
   };
+
+  const reserved = [];
+  let full = overrides.registryFull ?? false;
+
+  const env = {
+    REGISTRY: {
+      idFromName: (name) => ({ name }),
+      get: (id) => ({
+        fetch: async (request) => {
+          const body = await request.clone().json();
+          reserved.push(body.accountId);
+          return new Response(JSON.stringify(full ? { error: 'full' } : { ok: true }), {
+            status: full ? 429 : 200,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+      })
+    }
+  };
+
   let clock = overrides.start ?? 1_000_000;
-  const vault = new Vault(ctx, {}, { now: () => (overrides.now ? overrides.now() : clock) });
+  const vault = new Vault(ctx, env, { now: () => (overrides.now ? overrides.now() : clock) });
+
   return {
     vault,
     ctx,
+    env,
     storage: ctx.storage,
+    reserved,
+    setFull(value) {
+      full = value;
+    },
     advance(ms) {
       clock += ms;
     },
@@ -112,6 +138,35 @@ test('an account is provisioned exactly once', async () => {
     const response = await read(await harness.vault.fetch(request('/account', { body })));
     assert.equal(response.status, 400, JSON.stringify(body));
   }
+});
+
+test('a new account is refused when the registry is full', async () => {
+  const harness = object({ registryFull: true });
+  const response = await provision(harness);
+
+  assert.equal(response.status, 429);
+  assert.equal(response.body.error, 'full');
+  assert.equal(harness.storage.raw.has('account'), false);
+  assert.deepEqual(harness.reserved, [ACCOUNT.accountId]);
+});
+
+test('an existing account is unaffected by a full registry', async () => {
+  const harness = object();
+  assert.equal((await provision(harness)).status, 201);
+
+  harness.setFull(true);
+  const again = await provision(harness);
+
+  assert.equal(again.status, 409, 'the existing check comes before the reservation');
+  assert.equal(harness.reserved.length, 1);
+});
+
+test('the registry is asked once for a retried first sync', async () => {
+  const harness = object();
+  await provision(harness);
+  await provision(harness);
+
+  assert.deepEqual(harness.reserved, [ACCOUNT.accountId]);
 });
 
 test('a provisioning call cannot write into a differently named object', async () => {

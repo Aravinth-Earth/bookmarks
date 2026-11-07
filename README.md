@@ -20,8 +20,9 @@ sealed blob.
 ## Layout
 
 ```
-src/index.js                  the Worker: security headers, routing, the API
+src/index.js                  the Worker: security headers, routing, the API, the icon proxy
 src/vault.js                  one Durable Object per account: nonce, sessions, sealed vault
+src/registry.js               one Durable Object that caps how many accounts may exist
 public/w/bookmarks/crypto.js  phrase -> account id, key and auth secret; seal and open
 public/w/bookmarks/vault.js   this device's copy: one sealed blob, a bounded history
 public/w/bookmarks/bookmarks.js  the document: add, edit, delete, sort, filter, merge
@@ -29,7 +30,6 @@ public/w/bookmarks/sync.js    the client half: sign in, pull, push
 public/w/bookmarks/wordlist.js   the 1,296 words a phrase is drawn from
 tests/                        node --test, no dependencies
 scripts/check.mjs             the guards that run before a deploy
-scripts/create-account.mjs    provisions one account on the Worker
 ```
 
 ## Development
@@ -56,29 +56,23 @@ A branch build only uploads a preview version; it never takes production traffic
 
 ## Turning on sync
 
-The server stores one sealed blob per account and cannot read it. There is no public signup:
-an account is created once, with a provisioning token.
+The server stores one sealed blob per account and cannot read it. There is no signup form and
+no provisioning step: the first sync that names an account creates it, first write wins, from
+the same phrase-derived secrets the login uses.
 
-```sh
-# One time, per environment. Locally, .dev.vars already carries this.
-npx wrangler secret put PROVISION_TOKEN
+Open the app, create a vault (or unlock one), then Settings → **Sync**. The first run creates
+the account and pushes this device's vault; another device that enters the same phrase pulls it
+and merges.
 
-# Derive the account from the phrase and create it. --url defaults to
-# http://localhost:8792; the phrase is read from stdin so it never lands in
-# shell history.
-node scripts/create-account.mjs --url https://<your-worker-origin> < phrase.txt
-```
-
-Then open the app, go to Settings, and turn **Sync** on. The first run pushes this device's
-vault; another device that enters the same phrase pulls it and merges. Re-running the script
-for an existing account reports "already exists" and changes nothing.
+Creation is open but bounded: one Registry object caps how many accounts may exist — 50 by
+default, `MAX_ACCOUNTS` in `src/registry.js`, overridable by a var of the same name. At the cap
+the server answers `429 {error:"full"}`.
 
 ## Secrets
 
-The only secret is `PROVISION_TOKEN`, set on the Worker and never committed. `.dev.vars` holds
-a local development value and is gitignored. The vault key is derived in the browser and is
-not stored on the server at all; the auth secret it derives for the server cannot decrypt
-anything.
+There are none. No token is needed in any environment, and nothing in this repository is a
+credential. The vault key is derived in the browser and never reaches the server; the auth
+secret it derives can log in and cannot decrypt.
 
 ## Icons
 

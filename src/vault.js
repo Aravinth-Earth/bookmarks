@@ -125,6 +125,22 @@ export class Vault {
     const existing = await this.storage.get('account');
     if (existing) return json({ error: 'exists' }, 409);
 
+    /* The cap lives in one object, so creation is serialised against it. An existing account
+       never reaches this point, so a full registry cannot lock out the person who already has
+       one, and a retried first sync cannot consume a second slot. */
+    const registry = this.env?.REGISTRY;
+    if (registry) {
+      const stub = registry.get(registry.idFromName('registry'));
+      const reserved = await stub.fetch(
+        new Request('https://registry/reserve', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ accountId })
+        })
+      );
+      if (!reserved.ok) return json({ error: 'full' }, 429);
+    }
+
     await this.storage.put('account', {
       accountId,
       authSecret,
