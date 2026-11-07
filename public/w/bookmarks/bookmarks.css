@@ -697,59 +697,12 @@ body.modal-open {
     color: var(--text-secondary, #8b949e);
 }
 
-/* ------------------------------------------------------------- word chips */
-
-.phrase-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(6.2rem, 1fr));
-    gap: 0.35rem;
-    padding: var(--space-3, 0.75rem);
-    background: var(--bg-inset, #0d1117);
-    border: 1px solid var(--border, #21262d);
-    border-radius: var(--radius-lg, 8px);
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: var(--font-size-sm, 0.8rem);
-}
-
-.phrase-line {
-    margin: 0;
-    padding: 0.75rem;
-    background: var(--bg-inset, #0d1117);
-    border: 1px solid var(--border, #21262d);
-    border-radius: var(--radius-lg, 8px);
-    color: var(--text-primary, #c9d1d9);
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: var(--font-size-sm, 0.8rem);
-    line-height: 1.8;
-    /* A sentence is one horizontal line, not a column that wraps. It scrolls instead. */
-    white-space: nowrap;
-    overflow-x: auto;
-    /* One click selects the whole phrase, ready for Ctrl+C. */
-    user-select: all;
-    cursor: text;
-}
-
-.copy-button {
-    min-width: 8.8rem;
-}
-
-.copy-button.copied {
-    color: var(--success-text, #3fb950);
-    border-color: color-mix(in srgb, var(--success, #3fb950) 45%, var(--border, #21262d));
-}
+/* ---------------------------------------------------------- phrase actions */
 
 .phrase-actions {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2, 0.5rem);
-}
-
-.phrase-grid span {
-    padding: 0.15rem 0.4rem;
-    border-radius: var(--radius-sm, 4px);
-    background: var(--bg-elevated, #161b22);
-    color: var(--text-primary, #c9d1d9);
-    text-align: center;
 }
 
 .confirm-saved {
