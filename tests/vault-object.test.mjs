@@ -770,3 +770,91 @@ test('signing in more than twenty times keeps the newest twenty places', async (
   assert.equal(listed.body.count, 20);
   assert.equal(last.body.places, 20);
 });
+
+/* ---------------------------------------------------------------- operator view */
+
+test('admin stats carry dates, sizes and counts, and no secret or blob', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+
+  await harness.vault.fetch(
+    request('/vault', {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${session.body.token}` },
+      body: { baseVersion: 0, iv: IV, ct: CT }
+    })
+  );
+
+  const { status, body } = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(status, 200);
+  assert.deepEqual(Object.keys(body).sort(), [
+    'capChars',
+    'createdAt',
+    'ctChars',
+    'lastSeenAt',
+    'paidUntil',
+    'plan',
+    'readOnly',
+    'sessions',
+    'trialEndsAt',
+    'units',
+    'updatedAt',
+    'vaultVersion'
+  ]);
+
+  assert.equal(body.plan, 'free');
+  assert.equal(body.units, 0);
+  assert.equal(body.vaultVersion, 1);
+  assert.equal(body.ctChars, CT.length);
+  assert.equal(body.capChars, FREE_MAX_CT_CHARS);
+  assert.equal(body.sessions, 1);
+  assert.equal(body.readOnly, false);
+  assert.equal(typeof body.createdAt, 'number');
+  assert.equal(typeof body.updatedAt, 'number');
+
+  /* The answer is account metadata only: the blob, the auth secret, the account id and the
+     session token are each a way in, and none of them is here. */
+  const text = JSON.stringify(body);
+  for (const hidden of [CT, IV, ACCOUNT.authSecret, ACCOUNT.accountId, session.body.token]) {
+    assert.ok(!text.includes(hidden), 'the answer does not carry a secret or the blob');
+  }
+});
+
+test('admin stats say when the trial has run out, and an owner is not read-only', async () => {
+  const expired = object();
+  await provision(expired);
+  const open = await read(await expired.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(open.body.readOnly, false);
+
+  expired.advance(FREE_TRIAL_MS);
+  const shut = await read(await expired.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(shut.body.readOnly, true);
+
+  const owner = object({ ownerId: ACCOUNT.accountId });
+  await provision(owner);
+  await login(owner);
+  const owned = await read(await owner.vault.fetch(request('/admin-stats', { method: 'GET' })));
+
+  assert.equal(owned.body.plan, 'owner');
+  assert.equal(owned.body.units, OWNER_UNITS);
+  assert.equal(owned.body.capChars, OWNER_UNITS * UNIT_CT_CHARS);
+  assert.equal(owned.body.trialEndsAt, null);
+  assert.equal(owned.body.readOnly, false);
+});
+
+test('admin stats count live places only, and an empty object has no account', async () => {
+  const empty = object();
+  const missing = await read(await empty.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.error, 'no_account');
+  assert.deepEqual(Object.keys(missing.body), ['error']);
+
+  const harness = object();
+  await provision(harness);
+  await loginAs(harness, 'desktop');
+  harness.advance(31 * 24 * 60 * 60 * 1000);
+
+  const { body } = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(body.sessions, 0, 'an expired place that has not been pruned is not counted');
+});

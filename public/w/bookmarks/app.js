@@ -468,6 +468,37 @@ async function saveNow({ push = true } = {}) {
   if (savedOk && push) scheduleSync();
 }
 
+/* -------------------------------------------------------------- preferences */
+
+const SORT_MODES = new Set(['clicks', 'recent', 'name', 'lastClicked']);
+
+/**
+ * The only writer for the preferences that travel with the vault.
+ *
+ * The whole object is stamped so a merge can tell which device changed it last. A write that did
+ * not stamp would lose to any copy that did, so every preference change goes through here.
+ */
+function setPrefs(patch) {
+  state.document = {
+    ...state.document,
+    prefs: { ...(state.document.prefs ?? {}), ...patch, updatedAt: Date.now() }
+  };
+}
+
+/**
+ * Put the document's preferences on the controls. Called on entry and after every merge: a
+ * preference that arrived in a merge has to reach the select and the view, otherwise the control
+ * shows a value the document does not hold until the next reload. A vault with no stored view
+ * keeps the one this browser last used.
+ */
+function applyPrefs() {
+  const prefs = state.document?.prefs ?? {};
+  sortInput.value = SORT_MODES.has(prefs.sort) ? prefs.sort : 'clicks';
+  if (VIEWS.has(prefs.view)) currentView = prefs.view;
+  writePref(VIEW_KEY, currentView);
+  applyAppearance();
+}
+
 /* ---------------------------------------------------------------------- sync */
 
 function syncEnabled() {
@@ -716,6 +747,9 @@ async function syncNow() {
       if (fingerprint(merged) !== fingerprint(state.document)) {
         state.document = merged;
         absorbed = true;
+        /* The merge may have carried a newer sort or view from the other device; the controls
+           have to show it before the list is built, or they show the state they replaced. */
+        applyPrefs();
         render();
         await saveNow({ push: false });
       }
@@ -737,6 +771,7 @@ async function syncNow() {
         const { document: merged } = mergeDocuments(state.document, conflictDocument);
         state.document = merged;
         absorbed = true;
+        applyPrefs();
         render();
         await saveNow({ push: false });
       }
@@ -809,16 +844,8 @@ function enter({ accountId, authSecret, key, version, sealed, document: vaultDoc
   appView.hidden = false;
   showLockError('');
 
-  sortInput.value = vaultDocument.prefs?.sort ?? 'clicks';
+  applyPrefs();
   searchInput.value = '';
-
-  /* The listing preference travels with the vault, so the second device opens the way the first
-     one was left. localStorage stays as the pre-paint value for a returning visit. */
-  if (isView(vaultDocument.prefs?.view)) {
-    currentView = vaultDocument.prefs.view;
-    writePref(VIEW_KEY, currentView);
-  }
-  applyAppearance();
 
   render();
 
@@ -944,7 +971,7 @@ async function offerServerVault() {
   });
   if (!load) return;
 
-  state.document = { ...state.document, prefs: { ...state.document.prefs, sync: true } };
+  setPrefs({ sync: true });
   render();
   await saveNow({ push: false });
   await syncNow();
@@ -2096,10 +2123,7 @@ function openSettings() {
               if (remembered) await store.remember(state.accountId, remembered.keyBytes, secret);
             }
 
-            state.document = {
-              ...state.document,
-              prefs: { ...state.document.prefs, sync: enable }
-            };
+            setPrefs({ sync: enable });
             render();
             await saveNow({ push: false });
 
@@ -2228,10 +2252,7 @@ function bindEvents() {
   searchInput.addEventListener('input', render);
 
   sortInput.addEventListener('change', () => {
-    state.document = {
-      ...state.document,
-      prefs: { ...state.document.prefs, sort: sortInput.value }
-    };
+    setPrefs({ sort: sortInput.value });
     render();
     saveNow();
   });

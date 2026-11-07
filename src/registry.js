@@ -73,6 +73,11 @@ export class Registry {
 
     if (path === '/reserve' && request.method === 'POST') return this.reserve(request);
     if (path === '/release' && request.method === 'POST') return this.release(request);
+    /* Operator route: the ids the cap is counted from, for a Worker bound to this object. */
+    if (path === '/admin-list' && request.method === 'GET') {
+      const accounts = (await this.storage.get('accounts')) ?? [];
+      return json({ ids: accounts.slice(), count: accounts.length, max: this.max() });
+    }
     if (path === '/stats' && request.method === 'GET') {
       const accounts = (await this.storage.get('accounts')) ?? [];
       return json({ count: accounts.length, max: this.max() });

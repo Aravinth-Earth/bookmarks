@@ -167,3 +167,34 @@ test('an oversized reserve body is refused', async () => {
   assert.equal(response.status, 413);
   assert.equal(storage.raw.has('accounts'), false);
 });
+
+test('the admin list reports the ids the cap is counted from', async () => {
+  const { registry } = harness({ MAX_ACCOUNTS: '3' });
+  for (const seed of [1, 2, 3]) {
+    await registry.fetch(reserve({ accountId: accountId(seed) }));
+  }
+
+  const response = await registry.fetch(
+    new Request('https://registry/admin-list', { method: 'GET' })
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body, {
+    ids: [accountId(1), accountId(2), accountId(3)],
+    count: 3,
+    max: 3
+  });
+});
+
+test('the admin list is a GET route, starts empty and answers a POST with 404', async () => {
+  const { registry } = harness();
+
+  const empty = await registry.fetch(new Request('https://registry/admin-list', { method: 'GET' }));
+  assert.deepEqual(await empty.json(), { ids: [], count: 0, max: MAX_ACCOUNTS });
+
+  const posted = await registry.fetch(
+    new Request('https://registry/admin-list', { method: 'POST' })
+  );
+  assert.equal(posted.status, 404);
+});

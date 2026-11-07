@@ -100,8 +100,9 @@ function notFound(prefix) {
  * exception. Only GETs read; every write is a POST or PUT with a JSON body.
  *
  * `/a/<accountId>/…` is forwarded to that account's Durable Object, which is where the nonce,
- * the session and the sealed vault live. `/accounts` is the one admin-only route, and it is
- * what creates an object in the first place.
+ * the session and the sealed vault live. That object also has operator routes, but they are
+ * reachable only through a Durable Object binding: a public `/a/<id>/admin-…` path is a 404
+ * and never reaches the object.
  */
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
 
@@ -478,8 +479,13 @@ async function handleApi(request, env, url) {
     const accountId = rest.slice(0, slash);
     if (!ACCOUNT_ID.test(accountId)) return json({ error: 'bad_account' }, 400);
 
+    /* The object's operator routes answer only a Worker bound to it; through the public API
+       they do not exist. */
+    const forward = rest.slice(slash);
+    if (forward.startsWith('/admin-')) return json({ error: 'not_found' }, 404);
+
     const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
-    const target = new URL(`https://vault${rest.slice(slash)}`, 'https://vault');
+    const target = new URL(`https://vault${forward}`, 'https://vault');
     return stub.fetch(new Request(target, request));
   }
 

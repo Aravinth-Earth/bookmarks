@@ -11,7 +11,6 @@
  */
 
 const CACHE_NAME = 'bookmarks-v38';
-
 const SHELL = [
   '/w/bookmarks/',
   '/w/bookmarks/index.html',
