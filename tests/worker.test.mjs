@@ -12,8 +12,10 @@ import { createHash } from 'node:crypto';
 
 import worker from '../src/index.js';
 
-const ACCOUNT = 'TcDVkYwhQ4qi7lOyIR8OdQ';
+/* Synthetic fixtures: no account that exists anywhere is named by this file. */
+const ACCOUNT = 'A'.repeat(22);
 const TOKEN = 'provision-secret';
+const AUTH_SECRET = 'A'.repeat(43);
 
 function harness({ doStatus = 201, doBody = { ok: true } } = {}) {
   const calls = [];
@@ -64,7 +66,7 @@ function provision(body, token) {
 
 const VALID_ACCOUNT = {
   accountId: ACCOUNT,
-  authSecret: 'Gaos_uER3VT3TFbI_q_8gbDYdAEp3q3CSviR6cONsA4'
+  authSecret: AUTH_SECRET
 };
 
 test('health answers without any credential', async () => {

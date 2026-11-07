@@ -53,14 +53,22 @@ an account is created once, with a provisioning token.
 # One time, per environment. Locally, .dev.vars already carries this.
 npx wrangler secret put PROVISION_TOKEN
 
-# Derive the account from the phrase and create it. The phrase is read from stdin
-# so it never lands in shell history.
-node scripts/create-account.mjs --url https://www.332321.xyz < phrase.txt
+# Derive the account from the phrase and create it. --url defaults to
+# http://localhost:8792; the phrase is read from stdin so it never lands in
+# shell history.
+node scripts/create-account.mjs --url https://<your-worker-origin> < phrase.txt
 ```
 
 Then open the app, go to Settings, and turn **Sync** on. The first run pushes this device's
 vault; another device that enters the same phrase pulls it and merges. Re-running the script
 for an existing account reports "already exists" and changes nothing.
+
+## Secrets
+
+The only secret is `PROVISION_TOKEN`, set on the Worker and never committed. `.dev.vars` holds
+a local development value and is gitignored. The vault key is derived in the browser and is
+not stored on the server at all; the auth secret it derives for the server cannot decrypt
+anything.
 
 ## Icons
 
