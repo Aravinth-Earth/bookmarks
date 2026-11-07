@@ -112,6 +112,11 @@ Each route class is counted per source, and a source that has spent a class's ce
 answered `429 {"error":"rate_limited"}` with a `retry-after` header and no other effect: no
 storage write and no outbound fetch happens for it.
 
+The counters live at the edge location that answers a request, so the ceiling applies per
+location: a caller whose requests are answered by several locations can reach a multiple of it
+within one window, and a caller kept on one location is held to the number exactly. The
+counters are a brake on one source spending the service, not a quota.
+
 | Class | Routes | Ceiling per source |
 |---|---|---|
 | Sign-in | `/account`, `/challenge`, `/login` | 10 per minute |

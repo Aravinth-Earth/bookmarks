@@ -185,6 +185,9 @@ const ICON_TYPES = new Set([
  * are the ones a caller may spend least of. Each binding is a [[ratelimits]] entry in
  * wrangler.toml with the same name, limit and period; `npm run check` fails when they differ.
  */
+/* Counters are held by the edge location that answers a request, so each number is a ceiling
+   per location rather than a global one. One source held on a single location is limited
+   exactly; one spread across locations can reach a multiple of it. */
 export const LIMITS = {
   signin: { binding: 'SIGNIN_LIMIT', limit: 10, period: 60 },
   fetch: { binding: 'FETCH_LIMIT', limit: 30, period: 10 },
