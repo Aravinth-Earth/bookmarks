@@ -105,6 +105,29 @@ npx wrangler secret put OWNER_ACCOUNT_ID   # paste the id from Settings
 The id routes requests to the account and cannot log in. If the account already exists as free,
 the next login upgrades it to the owner plan. No one can become the owner by arriving first.
 
+## Request limits
+
+Each route class is counted per source, and a source that has spent a class's ceiling is
+answered `429 {"error":"rate_limited"}` with a `retry-after` header and no other effect: no
+storage write and no outbound fetch happens for it.
+
+| Class | Routes | Ceiling per source |
+|---|---|---|
+| Sign-in | `/account`, `/challenge`, `/login` | 10 per minute |
+| Fetch | `/icon`, `/title` | 30 per ten seconds |
+| Vault | `/vault`, `/sessions`, `/logout` | 60 per minute |
+
+Sign-in and fetch are the two classes that write storage or contact another host; the vault
+class is the app's own traffic and is the most permissive of the three.
+
+The source is the caller's address, counted as a SHA-256 digest and never stored raw. The
+counts are Cloudflare's rate limiting bindings (`[[ratelimits]]` in `wrangler.toml`), so they
+are held per Cloudflare location and are approximate. `npm run check` fails when the thresholds
+in that file and the `LIMITS` table in `src/index.js` disagree.
+
+A challenge is valid for 60 seconds, and asking for one again during that time returns the same
+nonce. A sign-in that is already in progress therefore completes whatever else arrives.
+
 ## Secrets
 
 `OWNER_ACCOUNT_ID` is the only configured value, and it is optional: it names the account that

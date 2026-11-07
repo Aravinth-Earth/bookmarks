@@ -291,11 +291,22 @@ export class Vault {
     return json({ ok: true, created: true, plan, trialEndsAt }, 201);
   }
 
+  /**
+   * One live nonce at a time.
+   *
+   * Asking again while a nonce is still valid answers with that same nonce and writes nothing,
+   * so a request from anywhere else cannot invalidate a sign-in that is already in progress.
+   * The nonce is spent by the first login that presents it and expires 60 seconds after it was
+   * minted; the next request after either mints a new one.
+   */
   async challenge(request) {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
 
     const account = await this.storage.get('account');
     if (!account) return json({ error: 'no_account' }, 404);
+
+    const live = await this.storage.get('nonce');
+    if (live && live.expiresAt > this.now()) return json({ nonce: live.value });
 
     const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
     await this.storage.put('nonce', { value: nonce, expiresAt: this.now() + NONCE_TTL_MS });
