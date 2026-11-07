@@ -128,6 +128,207 @@ const USER_AGENT = 'Bookmarks/0.1 (+https://www.332321.xyz/w/bookmarks/)';
 /* A hostname, not a URL: no scheme, no port, no path, no IP literal, no single label. */
 const HOSTNAME = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
 
+/* At most three redirects are followed, so a chain cannot be used to keep asking.
+   A fourth Location is the end of the chain. */
+const MAX_REDIRECTS = 3;
+
+/* ---------------------------------------------------------- destination policy */
+
+/**
+ * Where the icon and title proxies may be sent.
+ *
+ * Both routes take a hostname from the caller and fetch it, so the destination is checked at
+ * the first hop and again after every redirect. The Workers runtime has no resolver in the
+ * request path: `node:dns` is unavailable to a Worker, and a query to a public resolver would
+ * describe a different connection than the one the runtime opens. No resolution is performed
+ * or claimed here. What can be decided from the name is decided: IP literals, which the URL
+ * parser has already normalised before this sees them; names reserved for private use;
+ * wildcard resolvers that carry an address inside the name (nip.io and its relatives);
+ * cloud metadata-service names; and any dotted quad embedded in a longer name.
+ *
+ * A public-looking name whose own DNS answer is a private address is the one case a name check
+ * cannot see.
+ */
+const PRIVATE_SUFFIXES = [
+  '.internal',
+  '.local',
+  '.localhost',
+  '.localdomain',
+  '.home.arpa',
+  '.lan',
+  '.intranet',
+  '.corp',
+  '.private',
+  '.home',
+  '.test',
+  '.invalid',
+  '.example',
+  '.svc'
+];
+
+/* Hosts whose whole purpose is to answer with an address written in the name. */
+const WILDCARD_HOSTS = [
+  '.nip.io',
+  '.sslip.io',
+  '.xip.io',
+  '.traefik.me',
+  '.lvh.me',
+  '.localtest.me',
+  '.vcap.me',
+  '.localhost.direct'
+];
+
+/* Names of the metadata services that answer from inside a network, not the public internet. */
+const METADATA_HOSTS = new Set([
+  'metadata',
+  'instance-data',
+  'metadata.goog',
+  'metadata.google.internal',
+  'metadata.azure.internal',
+  'metadata.tencentyun.com',
+  'metadata.oraclecloud.com',
+  'kubernetes.default.svc'
+]);
+
+/** Four decimal octets, or null. A URL has already normalised octets, so plain decimal is enough. */
+function parseIpv4(host) {
+  const parts = host.split('.');
+  if (parts.length !== 4) return null;
+
+  const octets = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const value = Number(part);
+    if (value > 255) return null;
+    octets.push(value);
+  }
+  return octets;
+}
+
+/** Private, loopback, link-local, CGNAT, documentation, multicast or reserved IPv4. */
+function ipv4Refused([a, b, c]) {
+  return (
+    a === 0 || /* "this network", and 0.0.0.0 itself */
+    a === 10 || /* private */
+    a === 127 || /* loopback */
+    (a === 100 && b >= 64 && b <= 127) || /* carrier-grade NAT */
+    (a === 169 && b === 254) || /* link-local, where cloud metadata lives */
+    (a === 172 && b >= 16 && b <= 31) || /* private */
+    (a === 192 && b === 0 && (c === 0 || c === 2)) || /* protocol assignments, documentation */
+    (a === 192 && b === 168) || /* private */
+    (a === 198 && (b === 18 || b === 19)) || /* benchmarking */
+    (a === 198 && b === 51 && c === 100) || /* documentation */
+    (a === 203 && b === 0 && c === 113) || /* documentation */
+    a >= 224 /* multicast, reserved, broadcast */
+  );
+}
+
+/** Sixteen bytes of an IPv6 literal, or null. Accepts `::`, a full form and a dotted-quad tail. */
+function ipv6Bytes(text) {
+  let value = text.toLowerCase();
+
+  const embedded = value.match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (embedded) {
+    const octets = embedded.slice(1).map(Number);
+    if (octets.some((octet) => octet > 255)) return null;
+    const high = ((octets[0] << 8) | octets[1]).toString(16);
+    const low = ((octets[2] << 8) | octets[3]).toString(16);
+    value = `${value.slice(0, -embedded[0].length)}${high}:${low}`;
+  }
+
+  const halves = value.split('::');
+  if (halves.length > 2) return null;
+
+  const left = halves[0] === '' ? [] : halves[0].split(':');
+  const right = halves.length === 2 && halves[1] !== '' ? halves[1].split(':') : [];
+  const missing = 8 - left.length - right.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+
+  const groups = [...left, ...Array(halves.length === 2 ? missing : 0).fill('0'), ...right];
+  if (groups.length !== 8) return null;
+
+  const bytes = [];
+  for (const group of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+    const word = Number.parseInt(group, 16);
+    bytes.push(word >> 8, word & 0xff);
+  }
+  return bytes;
+}
+
+/** Loopback, unspecified, unique-local, link-local, multicast, documentation, or a tunnel. */
+function ipv6Refused(bytes) {
+  const first = bytes[0];
+  const second = bytes[1];
+  const zero = (from, to) => bytes.slice(from, to).every((byte) => byte === 0);
+  const ipv4At = (at) => ipv4Refused(bytes.slice(at, at + 4));
+
+  if (zero(0, 16)) return true; /* :: */
+  if (zero(0, 15) && bytes[15] === 1) return true; /* ::1 */
+  if ((first & 0xfe) === 0xfc) return true; /* fc00::/7, unique local */
+  if (first === 0xfe && (second & 0xc0) === 0x80) return true; /* fe80::/10, link-local */
+  if (first === 0xff) return true; /* multicast */
+  if (first === 0x20 && second === 0x02) return true; /* 6to4, an IPv4 address inside the name */
+
+  if (first === 0x20 && second === 0x01) {
+    if (bytes[2] === 0x0d && bytes[3] === 0xb8) return true; /* documentation */
+    if (zero(2, 8)) return true; /* Teredo */
+  }
+
+  if (first === 0x01 && second === 0x00 && zero(2, 8)) return true; /* 100::/64 discard */
+
+  /* IPv4-mapped (::ffff:0:0/96) and IPv4-compatible (::/96) addresses are their IPv4 address. */
+  if (zero(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff) return ipv4At(12);
+  if (zero(0, 12)) return ipv4At(12);
+
+  /* NAT64 carries an IPv4 address in the last four bytes too. */
+  if (first === 0x00 && second === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b && zero(4, 12)) {
+    return ipv4At(12);
+  }
+
+  return false;
+}
+
+/**
+ * True when a destination must not be contacted.
+ *
+ * Accepts a URL's `hostname` (an IPv6 literal still carries its brackets) or a header value.
+ * A trailing dot is dropped, because `example.com.` names the same host as `example.com`, and
+ * the suffix rules would otherwise miss it.
+ */
+function destinationRefused(hostname) {
+  const host = String(hostname)
+    .toLowerCase()
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .replace(/\.$/, '');
+  if (host === '') return true;
+
+  if (host.includes(':')) {
+    const bytes = ipv6Bytes(host);
+    return bytes === null || ipv6Refused(bytes);
+  }
+
+  const literal = parseIpv4(host);
+  if (literal) return ipv4Refused(literal);
+
+  if (METADATA_HOSTS.has(host)) return true;
+
+  for (const suffix of [...PRIVATE_SUFFIXES, ...WILDCARD_HOSTS]) {
+    if (host === suffix.slice(1) || host.endsWith(suffix)) return true;
+  }
+
+  /* A private dotted quad can also sit in the middle of a longer name, as wildcard resolvers
+     publish it. Any four-label window that parses as a refused address refuses the host. */
+  const labels = host.split('.');
+  for (let at = 0; at + 4 <= labels.length; at += 1) {
+    const embedded = parseIpv4(labels.slice(at, at + 4).join('.'));
+    if (embedded && ipv4Refused(embedded)) return true;
+  }
+
+  return false;
+}
+
 function toBase64Url(bytes) {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -271,59 +472,74 @@ function iconTypeOf(response) {
 }
 
 /**
- * Follow a short redirect chain by hand.
+ * Fetch one URL, following at most MAX_REDIRECTS redirects by hand.
  *
- * `wikipedia.org` serves its icon from `en.wikipedia.org`, so redirects must be followed. They
- * are followed here rather than by the runtime because the local runtime does not complete this
- * chain, and because each hop is checked: https only, at most three of them.
+ * `redirect: 'follow'` lets a page answer with a Location that reaches a host the caller was
+ * never allowed to name, and the runtime would not check it. Every hop is therefore checked
+ * before it is asked: https only, and a destination the same rules accept. A refused hop ends
+ * the chain with `null`, which the caller treats as no answer.
+ *
+ * `wikipedia.org` serves its icon from `en.wikipedia.org`, so redirects are still followed by
+ * hand; the local runtime does not complete that chain on its own.
+ *
+ * Returns the response and the URL it came from, so a relative href resolves against where the
+ * page actually ended up.
  */
-async function followToImage(target, signal) {
-  let current = target;
+async function fetchChain(target, init, signal) {
+  let current = new URL(target);
 
-  for (let hop = 0; hop < 4; hop += 1) {
-    const response = await fetch(current, {
-      headers: {
-        accept: 'image/*',
-        'user-agent': USER_AGENT
-      },
-      redirect: 'manual',
-      signal
-    });
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    if (current.protocol !== 'https:' || destinationRefused(current.hostname)) return null;
 
-    if (response.status < 300 || response.status >= 400) return response;
+    const response = await fetch(current.toString(), { ...init, redirect: 'manual', signal });
+
+    if (response.status < 300 || response.status >= 400) return { response, url: current };
 
     const location = response.headers.get('location');
-    if (!location) return response;
+    if (!location) return null;
 
-    const next = new URL(location, current);
-    if (next.protocol !== 'https:') return null;
+    if (response.body) await response.body.cancel().catch(() => {});
 
-    current = next.toString();
+    try {
+      current = new URL(location, current);
+    } catch {
+      return null;
+    }
   }
 
   return null;
 }
 
+async function followToImage(target, signal) {
+  const step = await fetchChain(
+    target,
+    { headers: { accept: 'image/*', 'user-agent': USER_AGENT } },
+    signal
+  );
+  return step ? step.response : null;
+}
+
 /**
  * Find the icon a page declares, for the half of the web that does not serve `/favicon.ico`.
  * Only the first `<link rel="...icon...">` is used; the href is resolved against the page and
- * must be https.
+ * must be https, at a destination the same rules accept.
  */
 async function discoverIcon(hostname, signal) {
   const pageUrl = `https://${hostname}/`;
 
-  let page;
+  let step;
   try {
-    page = await fetch(pageUrl, {
-      headers: { accept: 'text/html', 'user-agent': USER_AGENT },
-      redirect: 'follow',
+    step = await fetchChain(
+      pageUrl,
+      { headers: { accept: 'text/html', 'user-agent': USER_AGENT } },
       signal
-    });
+    );
   } catch {
     return null;
   }
 
-  if (!page.ok) return null;
+  if (!step || !step.response.ok) return null;
+  const page = step.response;
   const pageType = (page.headers.get('content-type') ?? '').toLowerCase();
   if (!pageType.includes('text/html')) return null;
 
@@ -337,8 +553,9 @@ async function discoverIcon(hostname, signal) {
   if (!href) return null;
 
   try {
-    const url = new URL(href, pageUrl);
-    return url.protocol === 'https:' ? url.toString() : null;
+    const url = new URL(href, step.url);
+    if (url.protocol !== 'https:' || destinationRefused(url.hostname)) return null;
+    return url.toString();
   } catch {
     return null;
   }
@@ -360,6 +577,7 @@ async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
 
   const hostname = (request.headers.get('x-icon-host') ?? '').trim();
   if (!HOSTNAME.test(hostname)) return json({ error: 'bad_host' }, 400);
+  if (destinationRefused(hostname)) return json({ error: 'blocked_host' }, 400);
 
   const claimed = url.searchParams.get('h') ?? '';
   if (claimed !== (await hostHash(hostname))) return json({ error: 'bad_hash' }, 400);
@@ -469,18 +687,19 @@ function decodeEntities(text) {
  * arbitrary URL on someone's server; the answer is one short string and nothing else.
  */
 async function fetchPageTitle(hostname, signal) {
-  let page;
+  let step;
   try {
-    page = await fetch(`https://${hostname}/`, {
-      headers: { accept: 'text/html', 'user-agent': USER_AGENT },
-      redirect: 'follow',
+    step = await fetchChain(
+      `https://${hostname}/`,
+      { headers: { accept: 'text/html', 'user-agent': USER_AGENT } },
       signal
-    });
+    );
   } catch {
     return null;
   }
 
-  if (!page.ok) return null;
+  if (!step || !step.response.ok) return null;
+  const page = step.response;
   const type = (page.headers.get('content-type') ?? '').toLowerCase();
   if (!type.includes('text/html')) return null;
 
@@ -505,6 +724,7 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
 
   const hostname = (request.headers.get('x-page-host') ?? '').trim();
   if (!HOSTNAME.test(hostname)) return json({ error: 'bad_host' }, 400);
+  if (destinationRefused(hostname)) return json({ error: 'blocked_host' }, 400);
 
   const claimed = url.searchParams.get('h') ?? '';
   if (claimed !== (await hostHash(hostname))) return json({ error: 'bad_hash' }, 400);

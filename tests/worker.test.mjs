@@ -538,3 +538,255 @@ test('a page larger than the read cap still yields its title, and a page without
   assert.equal(none.status, 404);
   assert.equal((await none.json()).error, 'no_title');
 });
+
+/* ------------------------------------------------- destinations both proxies refuse */
+
+const sha256 = (value) => createHash('sha256').update(value).digest('base64url');
+
+function iconFor(host) {
+  return iconRequest({ host, hash: sha256(host) });
+}
+
+function titleFor(host) {
+  return titleRequest({ host, hash: sha256(host) });
+}
+
+const redirectTo = (location) =>
+  new Response(null, { status: 302, headers: { location } });
+
+const pngResponse = () =>
+  new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+    headers: { 'content-type': 'image/png' }
+  });
+
+const htmlResponse = (body) =>
+  new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+
+/* A stub that records every URL and insists each one was followed by hand. */
+function stubFetch(routes) {
+  const asked = [];
+  const implementation = async (url, init) => {
+    asked.push(String(url));
+    assert.equal(init?.redirect, 'manual', `${url} is followed by hand`);
+    const route = routes[String(url)];
+    if (route === undefined) throw new Error(`unexpected ${url}`);
+    return typeof route === 'function' ? route() : route;
+  };
+  return { asked, implementation };
+}
+
+test('both proxies refuse names that lead into a network', async () => {
+  /* Refused because the shape is not a DNS name at all. */
+  const byShape = ['localhost', '127.0.0.1', '169.254.169.254', '[::1]'];
+
+  /* Refused by name: reserved suffixes, metadata services, wildcard resolvers and a private
+     address written inside an otherwise ordinary name. */
+  const byName = [
+    'printer.local',
+    'wiki.internal',
+    'metadata.google.internal',
+    'metadata.goog',
+    'metadata.tencentyun.com',
+    'kubernetes.default.svc',
+    '127.0.0.1.nip.io',
+    '10.0.0.1.sslip.io',
+    'app.192.168.1.5.nip.io',
+    '10.0.0.1.example.com'
+  ];
+
+  for (const host of [...byShape, ...byName]) {
+    const expected = byName.includes(host) ? 'blocked_host' : 'bad_host';
+    const { asked, implementation } = stubFetch({});
+
+    const icon = await withFetch(implementation, () => worker.fetch(iconFor(host), harness().env));
+    assert.equal(icon.status, 400, host);
+    assert.equal((await icon.json()).error, expected, host);
+
+    const title = await withFetch(implementation, () =>
+      worker.fetch(titleFor(host), harness().env)
+    );
+    assert.equal(title.status, 400, host);
+    assert.equal((await title.json()).error, expected, host);
+
+    assert.deepEqual(asked, [], `${host} is never contacted`);
+  }
+});
+
+/* Every refused address class, reached through a Location rather than the header. */
+const REFUSED_LOCATIONS = [
+  'https://127.0.0.1/favicon.ico',
+  'https://[::1]/favicon.ico',
+  'https://[::ffff:127.0.0.1]/favicon.ico',
+  'https://10.1.2.3/favicon.ico',
+  'https://172.16.0.9/favicon.ico',
+  'https://192.168.0.10/favicon.ico',
+  'https://169.254.169.254/latest/meta-data/',
+  'https://100.64.0.1/favicon.ico',
+  'https://224.0.0.1/favicon.ico',
+  'https://0.0.0.0/favicon.ico',
+  'https://3232235521/favicon.ico',
+  'https://metadata.google.internal/favicon.ico',
+  'https://printer.local./favicon.ico',
+  'https://10.0.0.1.example.com/favicon.ico',
+  'https://127.0.0.1.nip.io/favicon.ico'
+];
+
+test('an icon redirect is not followed into a private, loopback or metadata address', async () => {
+  for (const location of REFUSED_LOCATIONS) {
+    const { asked, implementation } = stubFetch({
+      [`https://${ICON_HOST}/favicon.ico`]: redirectTo(location),
+      [`https://${ICON_HOST}/`]: redirectTo(location)
+    });
+
+    const response = await withFetch(implementation, () =>
+      worker.fetch(iconRequest(), harness().env)
+    );
+
+    assert.equal(response.status, 404, location);
+    for (const url of asked) {
+      assert.equal(new URL(url).hostname, ICON_HOST, `${location} is never contacted: ${url}`);
+    }
+  }
+});
+
+test('a title redirect is not followed into a private, loopback or metadata address', async () => {
+  for (const location of [...REFUSED_LOCATIONS, 'http://example.com/']) {
+    const { asked, implementation } = stubFetch({
+      [`https://${ICON_HOST}/`]: redirectTo(location)
+    });
+
+    const response = await withFetch(implementation, () =>
+      worker.fetch(titleRequest(), harness().env)
+    );
+
+    assert.equal(response.status, 404, location);
+    assert.equal((await response.json()).error, 'no_title', location);
+    for (const url of asked) {
+      assert.equal(new URL(url).hostname, ICON_HOST, `${location} is never contacted: ${url}`);
+    }
+  }
+});
+
+test('a page-declared icon at a refused destination is not fetched', async () => {
+  for (const href of [
+    'https://10.0.0.1/i.png',
+    'http://example.com/i.png',
+    '//169.254.169.254/i.png',
+    'https://[::1]/i.png'
+  ]) {
+    const { asked, implementation } = stubFetch({
+      [`https://${ICON_HOST}/favicon.ico`]: new Response(null, { status: 404 }),
+      [`https://${ICON_HOST}/`]: htmlResponse(
+        `<html><head><link rel="icon" href="${href}"></head></html>`
+      )
+    });
+
+    const response = await withFetch(implementation, () =>
+      worker.fetch(iconRequest(), harness().env)
+    );
+
+    assert.equal(response.status, 404, href);
+    for (const url of asked) {
+      assert.equal(new URL(url).hostname, ICON_HOST, `${href} is never contacted: ${url}`);
+    }
+  }
+});
+
+test('three redirects are followed and a fourth stops the chain', async () => {
+  const followed = stubFetch({
+    [`https://${ICON_HOST}/favicon.ico`]: redirectTo('https://a.example.com/favicon.ico'),
+    'https://a.example.com/favicon.ico': redirectTo('/icons/b.png'),
+    'https://a.example.com/icons/b.png': redirectTo('https://b.example.com/favicon.ico'),
+    'https://b.example.com/favicon.ico': pngResponse()
+  });
+
+  const icon = await withFetch(followed.implementation, () =>
+    worker.fetch(iconRequest(), harness().env)
+  );
+  assert.equal(icon.status, 200, 'three hops are allowed');
+  assert.deepEqual(followed.asked, [
+    `https://${ICON_HOST}/favicon.ico`,
+    'https://a.example.com/favicon.ico',
+    'https://a.example.com/icons/b.png',
+    'https://b.example.com/favicon.ico'
+  ]);
+
+  const stopped = stubFetch({
+    [`https://${ICON_HOST}/favicon.ico`]: redirectTo('https://a.example.com/favicon.ico'),
+    [`https://${ICON_HOST}/`]: new Response(null, { status: 404 }),
+    'https://a.example.com/favicon.ico': redirectTo('/icons/b.png'),
+    'https://a.example.com/icons/b.png': redirectTo('https://b.example.com/favicon.ico'),
+    'https://b.example.com/favicon.ico': redirectTo('https://c.example.com/favicon.ico'),
+    'https://c.example.com/favicon.ico': pngResponse()
+  });
+
+  const cut = await withFetch(stopped.implementation, () =>
+    worker.fetch(iconRequest(), harness().env)
+  );
+  assert.equal(cut.status, 404, 'a fourth redirect is not followed');
+  assert.equal(
+    stopped.asked.filter((url) => url.endsWith('/favicon.ico')).at(-1),
+    'https://b.example.com/favicon.ico'
+  );
+  assert.ok(!stopped.asked.includes('https://c.example.com/favicon.ico'));
+});
+
+test('ordinary public hosts still get their icon and title, unchanged', async () => {
+  for (const host of ['example.com', 'itsfoss.com', 'github.com', 'wikipedia.org']) {
+    const { asked, implementation } = stubFetch({
+      [`https://${host}/favicon.ico`]: pngResponse(),
+      [`https://${host}/`]: htmlResponse(
+        '<html><head><title>Example &amp; Co</title></head></html>'
+      )
+    });
+
+    const icon = await withFetch(implementation, () => worker.fetch(iconFor(host), harness().env));
+    assert.equal(icon.status, 200, host);
+    assert.equal(icon.headers.get('content-type'), 'image/png');
+    assert.equal(icon.headers.get('cache-control'), 'public, max-age=2592000, immutable');
+    assert.equal(icon.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal((await icon.arrayBuffer()).byteLength, 4);
+
+    const title = await withFetch(implementation, () =>
+      worker.fetch(titleFor(host), harness().env)
+    );
+    assert.equal(title.status, 200, host);
+    assert.deepEqual(await title.json(), { title: 'Example & Co' });
+    assert.match(title.headers.get('cache-control'), /max-age=604800/);
+
+    assert.deepEqual(asked, [`https://${host}/favicon.ico`, `https://${host}/`]);
+  }
+});
+
+test('a redirect to another public host, by name or by address, is still followed', async () => {
+  const { asked, implementation } = stubFetch({
+    [`https://${ICON_HOST}/favicon.ico`]: redirectTo('https://www.example.com/favicon.ico'),
+    'https://www.example.com/favicon.ico': redirectTo('https://93.184.216.34/favicon.ico'),
+    'https://93.184.216.34/favicon.ico': redirectTo('https://[2606:4700:4700::1111]/favicon.ico'),
+    'https://[2606:4700:4700::1111]/favicon.ico': pngResponse()
+  });
+
+  const icon = await withFetch(implementation, () =>
+    worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(icon.status, 200);
+  assert.equal(asked.length, 4);
+});
+
+test('a title is read after a public redirect', async () => {
+  const { asked, implementation } = stubFetch({
+    [`https://${ICON_HOST}/`]: redirectTo('https://www.example.com/'),
+    'https://www.example.com/': htmlResponse(
+      '<html><head><title>Moved Title</title></head></html>'
+    )
+  });
+
+  const response = await withFetch(implementation, () =>
+    worker.fetch(titleRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { title: 'Moved Title' });
+  assert.deepEqual(asked, [`https://${ICON_HOST}/`, 'https://www.example.com/']);
+});
