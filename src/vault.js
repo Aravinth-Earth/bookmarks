@@ -25,6 +25,10 @@ const OWNER_RECHECK_MS = 365 * 24 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 3;
 const NONCE_TTL_MS = 60_000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/* An account that is created and then never signed in to or written is holding a slot it is not
+   using. The alarm releases it after this long, so one abandoned creation cannot occupy the cap
+   for the whole trial. Signing in or writing a vault counts as use and cancels the release. */
+export const UNUSED_RELEASE_MS = 24 * 60 * 60 * 1000;
 /* A session's last-seen stamp is written only when it is this stale, so an ordinary read or
    write does not each cost a storage write. */
 const LAST_SEEN_STEP_MS = 60 * 60 * 1000;
@@ -173,7 +177,18 @@ export class Vault {
     return json({ error: 'not_found' }, 404);
   }
 
-  /** One-time provisioning, called by the Worker with the provisioning token already checked. */
+  /**
+   * Create the account, gated on a proof of the secret it will store.
+   *
+   * A request without `proof` writes nothing. It stores a single-use nonce and answers 428 with
+   * `{ error: 'proof_required', nonce, expiresAt }`; the caller signs `${accountId}\n${nonce}`
+   * with the auth secret — the same HMAC `/login` verifies — and presents that proof with the
+   * same body. Only that second request may write the account.
+   *
+   * An account that already exists is never written again and never overwritten. Its proof is
+   * checked against the stored secret, and a wrong one answers exactly like a failed login, so
+   * this route cannot be used to re-claim an id with a different secret.
+   */
   async createAccount(request) {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
 
@@ -192,8 +207,47 @@ export class Vault {
       return json({ error: 'mismatch' }, 400);
     }
 
+    const proof = body.value?.proof;
+    if (typeof proof !== 'string' || proof === '') {
+      /* Nothing is written yet: the caller has a secret but has not shown it knows the phrase
+         that secret belongs to. */
+      const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+      const expiresAt = this.now() + NONCE_TTL_MS;
+      await this.storage.put('create-nonce', { value: nonce, expiresAt });
+      return json({ error: 'proof_required', nonce, expiresAt }, 428);
+    }
+
+    const challenge = await this.storage.get('create-nonce');
+    if (!challenge || challenge.expiresAt <= this.now()) {
+      /* A spent or stale nonce cannot be retried; offer a fresh one and the caller re-signs. */
+      await this.storage.delete('create-nonce');
+      const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+      const expiresAt = this.now() + NONCE_TTL_MS;
+      await this.storage.put('create-nonce', { value: nonce, expiresAt });
+      return json({ error: 'proof_required', nonce, expiresAt }, 428);
+    }
+    /* Single use, spent whether the proof is right or wrong, exactly as `/login` spends its own. */
+    await this.storage.delete('create-nonce');
+
     const existing = await this.storage.get('account');
-    if (existing) return json({ error: 'exists' }, 409);
+    /* For an existing account the proof is checked against the secret it was created with, so
+       presenting the same id with a different secret can never re-claim it. */
+    const expected = existing ? existing.authSecret : authSecret;
+    if (!(await verifyProof(expected, accountId, challenge.value, proof))) {
+      return json({ error: 'bad_proof' }, 401);
+    }
+
+    if (existing) {
+      return json(
+        {
+          ok: true,
+          created: false,
+          plan: existing.plan ?? 'free',
+          trialEndsAt: existing.trialEndsAt ?? null
+        },
+        200
+      );
+    }
 
     /* The cap lives in one object, so creation is serialised against it. An existing account
        never reaches this point, so a full registry cannot lock out the person who already has
@@ -229,11 +283,12 @@ export class Vault {
       paidUntil: null
     });
 
-    if (plan === 'free' && typeof this.storage.setAlarm === 'function') {
-      await this.storage.setAlarm(trialEndsAt);
+    if (typeof this.storage.setAlarm === 'function') {
+      /* Whichever comes first: the unused-account release or the end of the trial. */
+      await this.storage.setAlarm(Math.min(trialEndsAt, now + UNUSED_RELEASE_MS));
     }
 
-    return json({ ok: true, plan, trialEndsAt }, 201);
+    return json({ ok: true, created: true, plan, trialEndsAt }, 201);
   }
 
   async challenge(request) {
@@ -494,6 +549,19 @@ export class Vault {
       return;
     }
 
+    /* An account nobody signed in to and nobody wrote to is only holding a slot. Release it
+       after the idle window instead of reserving the cap for the whole trial. */
+    if (await this.isUnused(account)) {
+      const releaseAt = (account.createdAt ?? 0) + UNUSED_RELEASE_MS;
+      if (now < releaseAt) {
+        await this.storage.setAlarm(releaseAt);
+        return;
+      }
+      await this.releaseSlot(account.accountId);
+      await this.storage.deleteAll();
+      return;
+    }
+
     const trialEnds = account.trialEndsAt ?? 0;
     if (now < trialEnds) {
       await this.storage.setAlarm(trialEnds);
@@ -506,6 +574,16 @@ export class Vault {
 
     await this.releaseSlot(account.accountId);
     await this.storage.deleteAll();
+  }
+
+  /**
+   * Created and never used: no sign-in, no vault. `lastSeenAt` moves on the first login, which
+   * is what separates an abandoned creation from a device that simply has not written yet.
+   */
+  async isUnused(account) {
+    if ((account.lastSeenAt ?? 0) > (account.createdAt ?? 0)) return false;
+    if (await this.storage.get('vault')) return false;
+    return (await this.storage.list({ prefix: 'session:' })).size === 0;
   }
 
   /** Give the account's slot back, so the cap frees itself as trials end. */

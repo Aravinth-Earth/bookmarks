@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { SyncClient, SyncError, clientKind } from '../public/w/bookmarks/sync.js';
-import { deriveAccount } from '../public/w/bookmarks/crypto.js';
+import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
 
 const ACCOUNT = await deriveAccount(WORDLIST.slice(0, 13).join(' '));
@@ -56,6 +56,82 @@ test('a server that cannot answer is an error, not "no vault"', async () => {
     () => new SyncClient({ fetch: broken.fetch }).accountExists(ACCOUNT.accountId),
     (error) => error instanceof SyncError && error.code === 'CHALLENGE_FAILED'
   );
+});
+
+test('registering asks for a nonce, proves the secret and resends', async () => {
+  const nonce = 'nonce-value';
+  const calls = [];
+  const fetch = async (_url, options = {}) => {
+    const body = JSON.parse(options.body);
+    calls.push(body);
+    const headers = { 'content-type': 'application/json' };
+
+    if (body.proof === undefined) {
+      return new Response(
+        JSON.stringify({ error: 'proof_required', nonce, expiresAt: 2_000 }),
+        { status: 428, headers }
+      );
+    }
+    return new Response(JSON.stringify({ ok: true, created: true }), { status: 201, headers });
+  };
+
+  const result = await new SyncClient({ fetch }).register(ACCOUNT.accountId, ACCOUNT.authSecret);
+
+  assert.deepEqual(result, { created: true });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].proof, undefined, 'the first request writes nothing');
+  assert.equal(
+    calls[1].proof,
+    await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, nonce),
+    'the proof signs the server nonce with the account secret'
+  );
+});
+
+test('a creation of an account that already exists is success, not a second account', async () => {
+  let at = 0;
+  const fetch = async () => {
+    at += 1;
+    const headers = { 'content-type': 'application/json' };
+    if (at === 1) {
+      return new Response(JSON.stringify({ error: 'proof_required', nonce: 'n', expiresAt: 2_000 }), {
+        status: 428,
+        headers
+      });
+    }
+    return new Response(JSON.stringify({ ok: true, created: false }), { status: 200, headers });
+  };
+
+  const result = await new SyncClient({ fetch }).register(ACCOUNT.accountId, ACCOUNT.authSecret);
+  assert.deepEqual(result, { created: false });
+});
+
+test('a proof that arrived after its nonce was replaced is retried once', async () => {
+  const nonces = ['first', 'second'];
+  let at = 0;
+  const proofs = [];
+  const fetch = async (_url, options = {}) => {
+    const body = JSON.parse(options.body);
+    const headers = { 'content-type': 'application/json' };
+    if (body.proof === undefined) {
+      const nonce = nonces[at];
+      return new Response(JSON.stringify({ error: 'proof_required', nonce, expiresAt: 2_000 }), {
+        status: 428,
+        headers
+      });
+    }
+    proofs.push(body.proof);
+    if (at === 0) {
+      at = 1;
+      return new Response(JSON.stringify({ error: 'bad_proof' }), { status: 401, headers });
+    }
+    return new Response(JSON.stringify({ ok: true, created: true }), { status: 201, headers });
+  };
+
+  const result = await new SyncClient({ fetch }).register(ACCOUNT.accountId, ACCOUNT.authSecret);
+
+  assert.deepEqual(result, { created: true });
+  assert.equal(proofs.length, 2);
+  assert.notEqual(proofs[0], proofs[1], 'the retry signs the fresh nonce');
 });
 
 test('signing in says which kind of device this is', async () => {
