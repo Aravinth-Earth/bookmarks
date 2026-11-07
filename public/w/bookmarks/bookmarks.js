@@ -406,7 +406,7 @@ export function mergeDocuments(local, remote, now = Date.now) {
       schema: SCHEMA,
       bookmarks,
       tombstones: keptTombstones,
-      prefs: { ...local.prefs, ...remote.prefs }
+      prefs: newerPrefs(local.prefs, remote.prefs)
     },
     statistics
   };
@@ -414,6 +414,33 @@ export function mergeDocuments(local, remote, now = Date.now) {
 
 function mergeOne(left, right) {
   return mergeBookmark(left, right);
+}
+
+/**
+ * The whole preferences object from whichever side wrote it last.
+ *
+ * Preferences are changed on one settings screen and stored together, so the object moves as a
+ * unit rather than field by field: a device that changed the sort also set the view it was
+ * showing at the same moment, and mixing two devices' fields would produce a state neither of
+ * them had.
+ * `updatedAt` is the stamp the page writes on every change. A vault written before the stamp
+ * existed carries none and loses to a stamped copy; with no stamp on either side the local
+ * object is kept, so an older device can still open and sync.
+ */
+export function newerPrefs(local, remote) {
+  const left = local ?? {};
+  const right = remote ?? {};
+  const leftAt = prefStamp(left);
+  const rightAt = prefStamp(right);
+
+  if (rightAt === null) return { ...left };
+  if (leftAt === null) return { ...right };
+  return { ...(rightAt > leftAt ? right : left) };
+}
+
+function prefStamp(prefs) {
+  const stamp = prefs.updatedAt;
+  return typeof stamp === 'number' && Number.isFinite(stamp) ? stamp : null;
 }
 
 /**
