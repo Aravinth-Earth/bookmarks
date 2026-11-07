@@ -1,0 +1,39 @@
+name: ci
+
+# The mechanical gate every PR has to pass before a review is worth asking for.
+# Workers Builds is the deploy path (merge to main); this is the build check.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      - name: guards — no third-party, no overclaiming copy, whole word list
+        run: npm run check
+
+      - name: tests — node:test
+        run: npm test
+
+      - name: wrangler configuration resolves and bundles
+        run: npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/dry-run"

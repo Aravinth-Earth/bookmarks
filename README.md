@@ -41,8 +41,15 @@ npm run check     # guards over public/
 npm run dev       # wrangler dev, then open the printed URL
 ```
 
-A merged commit on `main` is a release: Workers Builds deploys it. There is no manual
-`wrangler deploy`, and a branch build only uploads a preview.
+A merged commit on `main` is a release: Workers Builds is connected to this repository, so a
+merge to `main` builds and deploys. A manual `wrangler deploy` is break-glass only; prove what
+is live with
+
+```sh
+curl -s https://www.332321.xyz/w/bookmarks/api/health   # {"ok":true,"version":"0.1.0"}
+```
+
+A branch build only uploads a preview version; it never takes production traffic.
 
 ## Turning on sync
 
