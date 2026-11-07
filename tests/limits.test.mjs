@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 
 import worker, { LIMITS } from '../src/index.js';
 import { quiet } from './logs.mjs';
+import { withFetch } from './dns.mjs';
 
 /* The refusals here are about the counter, not the line the refusal writes. */
 quiet();
@@ -88,16 +89,6 @@ const ICON_HASH = createHash('sha256').update(ICON_HOST).digest('base64url');
 
 const ICON = { path: `/icon?h=${ICON_HASH}`, headers: { 'x-icon-host': ICON_HOST } };
 const TITLE = { path: `/title?h=${ICON_HASH}`, headers: { 'x-page-host': ICON_HOST } };
-
-async function withFetch(implementation, run) {
-  const original = globalThis.fetch;
-  globalThis.fetch = implementation;
-  try {
-    return await run();
-  } finally {
-    globalThis.fetch = original;
-  }
-}
 
 async function upstreamMiss() {
   return new Response(null, { status: 404 });

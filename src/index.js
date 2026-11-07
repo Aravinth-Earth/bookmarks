@@ -268,16 +268,22 @@ const MAX_REDIRECTS = 3;
  * Where the icon and title proxies may be sent.
  *
  * Both routes take a hostname from the caller and fetch it, so the destination is checked at
- * the first hop and again after every redirect. The Workers runtime has no resolver in the
- * request path: `node:dns` is unavailable to a Worker, and a query to a public resolver would
- * describe a different connection than the one the runtime opens. No resolution is performed
- * or claimed here. What can be decided from the name is decided: IP literals, which the URL
- * parser has already normalised before this sees them; names reserved for private use;
- * wildcard resolvers that carry an address inside the name (nip.io and its relatives);
- * cloud metadata-service names; and any dotted quad embedded in a longer name.
+ * the first hop and again after every redirect. Two checks are made, cheapest first:
  *
- * A public-looking name whose own DNS answer is a private address is the one case a name check
- * cannot see.
+ * 1. The name. IP literals, which the URL parser has already normalised before this sees them;
+ *    names reserved for private use; wildcard resolvers that carry an address inside the name
+ *    (nip.io and its relatives); cloud metadata-service names; and any dotted quad embedded in
+ *    a longer name.
+ * 2. The answer. A public-looking name can have an A or AAAA record for loopback, RFC1918,
+ *    link-local, CGNAT, multicast or a metadata service, and the runtime would connect to it
+ *    without complaint. Every host is therefore resolved over DNS over HTTPS before it is
+ *    fetched, and refused when any returned address is one the literal rules already refuse.
+ *
+ * The resolution is a separate query from the connection the runtime opens, so the answer that
+ * was checked and the address that is connected to are not guaranteed to be the same one: a
+ * record that changes between the lookup and the fetch (DNS rebinding) can still reach an
+ * address this code never saw. Closing that needs a fetch pinned to the checked address, which
+ * the Workers fetch API does not expose. The window is narrowed, not closed.
  */
 const PRIVATE_SUFFIXES = [
   '.internal',
@@ -305,7 +311,11 @@ const WILDCARD_HOSTS = [
   '.lvh.me',
   '.localtest.me',
   '.vcap.me',
-  '.localhost.direct'
+  '.localhost.direct',
+  /* Public wildcard resolvers: every label under them answers with loopback. `local.gd` serves
+     a public address at its apex today, but no label under it is a real destination. */
+  '.localho.st',
+  '.local.gd'
 ];
 
 /* Names of the metadata services that answer from inside a network, not the public internet. */
@@ -457,6 +467,129 @@ function destinationRefused(hostname) {
   }
 
   return false;
+}
+
+/* ----------------------------------------------------- destination resolution */
+
+/* The resolver the proxies ask before a fetch. The runtime has no resolver in the request path,
+   so the name is turned into addresses here, over DNS over HTTPS with JSON answers. */
+const DOH_ENDPOINT = 'https://cloudflare-dns.com/dns-query';
+
+/* A verdict is reused for a minute, so a burst for one host resolves once. The table holds at
+   most a hundred hosts; expired entries are dropped on write, and the oldest insertion is
+   evicted when the table is full. */
+const DNS_TTL_MS = 60_000;
+const DNS_CACHE_MAX = 100;
+
+/** host -> { refused, expires }. Insertion order is the eviction order. */
+const dnsVerdicts = new Map();
+
+/** True when a resolved address is private, or is not an address at all. */
+function addressRefused(address) {
+  const literal = parseIpv4(address);
+  if (literal) return ipv4Refused(literal);
+
+  const bytes = ipv6Bytes(address);
+  return bytes === null || ipv6Refused(bytes);
+}
+
+/**
+ * The addresses one DoH answer names, `[]` when the name has no record of that type, or null
+ * when the answer cannot be read and the destination therefore cannot be vouched for.
+ *
+ * Fail closed: a non-200 status, a body that is not a DNS answer, a `Status` other than 0 (a
+ * name that does not exist, a failing resolver) and an `Answer` that is not an array are all
+ * null. `Status` 0 with no `Answer` at all is NODATA for the type asked, which is normal for a
+ * name with only an A or only an AAAA record; it is the two answers together that must name at
+ * least one address.
+ */
+async function dohAddresses(host, type, signal) {
+  let response;
+  try {
+    response = await fetch(`${DOH_ENDPOINT}?name=${encodeURIComponent(host)}&type=${type}`, {
+      headers: { accept: 'application/dns-json' },
+      redirect: 'manual',
+      signal
+    });
+  } catch {
+    return null;
+  }
+
+  if (response.status !== 200) {
+    if (response.body) await response.body.cancel().catch(() => {});
+    return null;
+  }
+
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    return null;
+  }
+
+  if (!body || typeof body !== 'object' || body.Status !== 0) return null;
+  if (body.Answer === undefined) return [];
+  if (!Array.isArray(body.Answer)) return null;
+
+  const recordType = type === 'A' ? 1 : 28;
+  const addresses = [];
+  for (const answer of body.Answer) {
+    if (!answer || typeof answer !== 'object' || answer.type !== recordType) continue;
+    if (typeof answer.data !== 'string') return null;
+    addresses.push(answer.data);
+  }
+  return addresses;
+}
+
+/** Resolve a hostname and answer whether it must not be contacted. */
+async function lookupRefused(host, signal) {
+  const [v4, v6] = await Promise.all([
+    dohAddresses(host, 'A', signal),
+    dohAddresses(host, 'AAAA', signal)
+  ]);
+
+  /* A lookup cut short by the request's own deadline is that request's timeout, not a verdict
+     about the host; the route answers it the way it answers any fetch that ran out of time. */
+  if ((v4 === null || v6 === null) && signal?.aborted) throw new Error('aborted');
+  if (v4 === null || v6 === null) return true;
+
+  const addresses = [...v4, ...v6];
+  /* No address at all is nothing to vouch for. */
+  if (addresses.length === 0) return true;
+
+  return addresses.some(addressRefused);
+}
+
+/**
+ * Whether a hostname must not be fetched because of what it resolves to.
+ *
+ * An address literal is decided by the literal rules alone; there is nothing to look up. Every
+ * other name is resolved, and the verdict — allowed or refused — is remembered for DNS_TTL_MS.
+ * A resolution that cannot be completed refuses: a check that did not happen cannot vouch for
+ * the destination.
+ */
+async function resolvesRefused(hostname, signal) {
+  const host = String(hostname)
+    .toLowerCase()
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .replace(/\.$/, '');
+  if (host === '') return true;
+  if (parseIpv4(host) || host.includes(':')) return destinationRefused(host);
+
+  const cached = dnsVerdicts.get(host);
+  if (cached && cached.expires > Date.now()) return cached.refused;
+
+  const refused = await lookupRefused(host, signal);
+
+  const now = Date.now();
+  for (const [name, entry] of dnsVerdicts) {
+    if (entry.expires <= now) dnsVerdicts.delete(name);
+  }
+  if (dnsVerdicts.size >= DNS_CACHE_MAX) dnsVerdicts.delete(dnsVerdicts.keys().next().value);
+  dnsVerdicts.set(host, { refused, expires: now + DNS_TTL_MS });
+
+  return refused;
 }
 
 function toBase64Url(bytes) {
@@ -620,6 +753,9 @@ async function fetchChain(target, init, signal) {
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     if (current.protocol !== 'https:' || destinationRefused(current.hostname)) return null;
+    /* A public name can answer with a private address; the answer is checked before the fetch,
+       on the first hop and on every redirect. */
+    if (await resolvesRefused(current.hostname, signal)) return null;
 
     const response = await fetch(current.toString(), { ...init, redirect: 'manual', signal });
 
@@ -739,6 +875,11 @@ async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
      read has finished or thrown: a host that answers with headers and then trickles its body
      would otherwise keep the invocation alive with no bound. */
   try {
+    /* The name checks above cannot see a public-looking name that answers with a private
+       address. The lookup is part of this request, and its refusal keeps the shape the name
+       check already answers. */
+    if (await resolvesRefused(hostname, abort.signal)) return proxyRefused('blocked_host');
+
     let upstream = await followToImage(`https://${hostname}/favicon.ico`, abort.signal);
     let type = upstream ? iconTypeOf(upstream) : null;
 
@@ -893,6 +1034,9 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   const timer = setTimeout(() => abort.abort(), timeoutMs);
 
   try {
+    /* Same lookup as the icon route: the name is not enough to vouch for the destination. */
+    if (await resolvesRefused(hostname, abort.signal)) return proxyRefused('blocked_host');
+
     const title = await fetchPageTitle(hostname, abort.signal);
     return title ? cachedJson({ title }, 604_800) : json({ error: 'no_title' }, 404);
   } catch {
