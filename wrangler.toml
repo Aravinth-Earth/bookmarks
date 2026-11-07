@@ -41,6 +41,16 @@ new_sqlite_classes = ["Vault"]
 tag = "v2"
 new_sqlite_classes = ["Registry"]
 
+# The app's own origin. IndexedDB belongs to a host, not a path, so serving the app here keeps
+# its remembered key out of reach of every other page on www.
+[[routes]]
+pattern = "b.332321.xyz/*"
+zone_name = "332321.xyz"
+
+[[routes]]
+pattern = "b.332321.xyz"
+zone_name = "332321.xyz"
+
 [[routes]]
 pattern = "www.332321.xyz/w/bookmarks/*"
 zone_name = "332321.xyz"

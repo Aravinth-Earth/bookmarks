@@ -11,15 +11,16 @@
  */
 
 const CANONICAL = '/w/bookmarks';
+/* The app's own host. Anything under the old www path is sent here, so the app is never used
+   on an origin that other site pages can read storage from. */
+const APP_HOST = 'b.332321.xyz';
 const PREVIEW = '/w/bookmarks-preview';
 const API_PREFIX = `${CANONICAL}/api`;
 const VERSION = '0.1.0';
 
-/* In production the route is scoped to /w/bookmarks/*, so these two files are served by the
-   static site and never reach this Worker. Under `wrangler dev` there is no zone and every path
-   arrives here, so they are proxied from the canonical origin to keep local identical. The
-   allowlist is the guard: production cannot reach this branch, and widening it would still only
-   proxy two stylesheets. */
+/* The two site stylesheets the app uses. They live on www; on the app's own host they are
+   proxied from there, so the browser still sees a same-origin request and the CSP needs no
+   exception. The allowlist is the guard: only these two paths are ever fetched. */
 const SITE_STYLESHEETS = new Set(['/css/tokens.css', '/css/themes.css']);
 
 /* The same policy the rest of the site's Worker-served apps carry, and the reason no inline
@@ -352,6 +353,21 @@ async function handleApi(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    /* The app moved to its own host. Anything still pointed at the old path is sent there so
+       no one keeps using the copy that shares storage with the rest of the site. */
+    if (
+      url.hostname === 'www.332321.xyz' &&
+      (url.pathname === CANONICAL || url.pathname.startsWith(`${CANONICAL}/`))
+    ) {
+      const target = new URL(url);
+      target.hostname = APP_HOST;
+      return new Response(null, {
+        status: 301,
+        headers: { location: target.toString(), 'cache-control': 'no-store' }
+      });
+    }
+
     const prefix =
       url.pathname === PREVIEW || url.pathname.startsWith(`${PREVIEW}/`) ? PREVIEW : CANONICAL;
 
@@ -365,7 +381,10 @@ export default {
     if (url.pathname === CANONICAL) return redirect(url, `${CANONICAL}/`);
 
     if (SITE_STYLESHEETS.has(url.pathname)) {
-      return fetch(`https://www.332321.xyz${url.pathname}`);
+      const upstream = await fetch(`https://www.332321.xyz${url.pathname}`);
+      const headers = new Headers(upstream.headers);
+      headers.set('cache-control', 'public, max-age=86400');
+      return new Response(upstream.body, { status: upstream.status, headers });
     }
 
     if (url.pathname === API_PREFIX || url.pathname.startsWith(`${API_PREFIX}/`)) {

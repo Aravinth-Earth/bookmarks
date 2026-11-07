@@ -1456,6 +1456,24 @@ function openSettings() {
     applyAppearance();
   });
 
+  /* On its own origin the app can no longer inherit the site's saved theme, so it carries the
+     same ten names and the same key. */
+  const THEMES = [
+    'current', 'light', 'amber', 'teal', 'charcoal',
+    'greenish', 'colorful', 'sunset', 'nord', 'cyberpunk'
+  ];
+  const themeSelect = el('select', {}, THEMES.map((name) => el('option', { value: name, text: name })));
+  themeSelect.value = document.documentElement.dataset.theme || 'current';
+  themeSelect.addEventListener('change', () => {
+    const value = THEMES.includes(themeSelect.value) ? themeSelect.value : 'current';
+    try {
+      localStorage.setItem('site-theme', value);
+    } catch {
+      /* The choice applies for this session only. */
+    }
+    document.documentElement.dataset.theme = value;
+  });
+
   const item = (title, detail, onClick, { danger = false } = {}) => {
     const button = el('button', {
       class: `settings-item${danger ? ' button-danger' : ''}`,
@@ -1476,6 +1494,10 @@ function openSettings() {
       el('label', { class: 'field' }, [
         el('span', { class: 'field-label', text: 'Text size' }),
         sizeSelect
+      ]),
+      el('label', { class: 'field' }, [
+        el('span', { class: 'field-label', text: 'Theme' }),
+        themeSelect
       ]),
       el('h3', { class: 'settings-heading', text: 'Export' }),
       el('div', { class: 'settings-list' }, [

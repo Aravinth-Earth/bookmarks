@@ -1,7 +1,7 @@
 # Bookmarks
 
 An end-to-end encrypted, local-first bookmark vault, served at
-<https://www.332321.xyz/w/bookmarks/>.
+<https://b.332321.xyz/w/bookmarks/>.
 
 The vault is sealed in the browser with AES-256-GCM under a key derived from a 13-word phrase.
 The Worker holds one ciphertext blob per account and cannot read any of it. Adding, editing,
@@ -32,6 +32,15 @@ tests/                        node --test, no dependencies
 scripts/check.mjs             the guards that run before a deploy
 ```
 
+## Hosting
+
+The app is served from **b.332321.xyz**, its own origin. IndexedDB belongs to a host, not a
+path, so the remembered key cannot be read by any other page on the site. The old
+`www.332321.xyz/w/bookmarks/` path redirects here.
+
+The host needs one proxied DNS record in the Cloudflare zone (an AAAA to `100::`, or a CNAME to
+the apex); the Worker route does the rest.
+
 ## Development
 
 ```sh
@@ -46,7 +55,7 @@ merge to `main` builds and deploys. A manual `wrangler deploy` is break-glass on
 is live with
 
 ```sh
-curl -s https://www.332321.xyz/w/bookmarks/api/health   # {"ok":true,"version":"0.1.0"}
+curl -s https://b.332321.xyz/w/bookmarks/api/health   # {"ok":true,"version":"0.1.0"}
 ```
 
 If a merge does not appear live within five minutes, check the build in the Cloudflare dashboard

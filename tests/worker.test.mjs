@@ -48,7 +48,7 @@ function harness({ doStatus = 201, doBody = { ok: true } } = {}) {
 }
 
 function api(path, options = {}) {
-  return new Request(`https://www.332321.xyz/w/bookmarks/api${path}`, options);
+  return new Request(`https://b.332321.xyz/w/bookmarks/api${path}`, options);
 }
 
 test('health answers without any credential', async () => {
@@ -119,7 +119,7 @@ test('an unknown API path is a 404', async () => {
 
 test('the app is served through the assets binding with the security headers', async () => {
   const response = await worker.fetch(
-    new Request('https://www.332321.xyz/w/bookmarks/'),
+    new Request('https://b.332321.xyz/w/bookmarks/'),
     harness().env
   );
 
@@ -131,12 +131,12 @@ test('the app is served through the assets binding with the security headers', a
 
 test('the bare path redirects to the slashed one', async () => {
   const response = await worker.fetch(
-    new Request('https://www.332321.xyz/w/bookmarks'),
+    new Request('https://b.332321.xyz/w/bookmarks'),
     harness().env
   );
 
   assert.equal(response.status, 301);
-  assert.equal(response.headers.get('location'), 'https://www.332321.xyz/w/bookmarks/');
+  assert.equal(response.headers.get('location'), 'https://b.332321.xyz/w/bookmarks/');
 });
 
 /* --------------------------------------------------------------- icon service */
@@ -145,7 +145,7 @@ const ICON_HOST = 'example.com';
 const ICON_HASH = createHash('sha256').update(ICON_HOST).digest('base64url');
 
 function iconRequest({ host = ICON_HOST, hash = ICON_HASH } = {}) {
-  return new Request(`https://www.332321.xyz/w/bookmarks/api/icon?h=${hash}`, {
+  return new Request(`https://b.332321.xyz/w/bookmarks/api/icon?h=${hash}`, {
     headers: host ? { 'x-icon-host': host } : {}
   });
 }
@@ -176,7 +176,7 @@ test('the icon service refuses a missing hostname, a non-DNS host or a wrong has
   }
 
   const noHost = await worker.fetch(
-    new Request('https://www.332321.xyz/w/bookmarks/api/icon?h=x'),
+    new Request('https://b.332321.xyz/w/bookmarks/api/icon?h=x'),
     harness().env
   );
   assert.equal(noHost.status, 400);
@@ -329,4 +329,31 @@ test('a redirect that leaves https is not followed', async () => {
   );
 
   assert.equal(response.status, 404);
+});
+
+test('the old www path redirects to the app host', async () => {
+  const response = await worker.fetch(
+    new Request('https://www.332321.xyz/w/bookmarks/'),
+    harness().env
+  );
+
+  assert.equal(response.status, 301);
+  assert.equal(response.headers.get('location'), 'https://b.332321.xyz/w/bookmarks/');
+});
+
+test('the site stylesheets are proxied with a cache header', async () => {
+  const asked = [];
+
+  const response = await withFetch(
+    async (url) => {
+      asked.push(url);
+      return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
+    },
+    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'text/css');
+  assert.match(response.headers.get('cache-control'), /max-age=86400/);
+  assert.deepEqual(asked, ['https://www.332321.xyz/css/tokens.css']);
 });
