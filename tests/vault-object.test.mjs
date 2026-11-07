@@ -633,3 +633,140 @@ test('an oversized body is refused before it is parsed', async () => {
   );
   assert.equal(hugeLogin.status, 413);
 });
+
+/* ------------------------------------------------------------- connected places */
+
+async function loginAs(harness, client) {
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  return read(await harness.vault.fetch(request('/login', { body: { proof, client } })));
+}
+
+async function places(harness, token) {
+  return read(
+    await harness.vault.fetch(
+      request('/sessions', { method: 'GET', headers: { authorization: `Bearer ${token}` } })
+    )
+  );
+}
+
+test('the place list needs a session', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const anonymous = await read(await harness.vault.fetch(request('/sessions', { method: 'GET' })));
+  assert.equal(anonymous.status, 401);
+  assert.equal(anonymous.body.error, 'unauthorized');
+
+  const { body } = await loginAs(harness, 'desktop');
+  /* Deliberately one character off, and never the same character: a token that differs
+     by nothing is not a forged token, it is the real one. */
+  const forged = `${body.token[0] === 'A' ? 'B' : 'A'}${body.token.slice(1)}`;
+  const refused = await places(harness, forged);
+  assert.equal(refused.status, 401, 'a token one character off is not a session');
+});
+
+test('each sign-in is one place, and this one is marked', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const first = await loginAs(harness, 'desktop');
+  const second = await loginAs(harness, 'mobile');
+
+  assert.equal(first.body.places, 1, 'the login answer carries the count');
+  assert.equal(second.body.places, 2);
+
+  const listed = await places(harness, second.body.token);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.count, 2);
+  assert.equal(listed.body.sessions.length, 2);
+  assert.deepEqual(
+    listed.body.sessions.map((session) => session.client).sort(),
+    ['desktop', 'mobile']
+  );
+  assert.equal(
+    listed.body.sessions.filter((session) => session.current).length,
+    1,
+    'exactly one place is this one'
+  );
+  assert.equal(listed.body.sessions.find((session) => session.current).client, 'mobile');
+
+  /* A hash is what would let a caller act as another place, so it must not be in the answer. */
+  for (const session of listed.body.sessions) {
+    assert.deepEqual(Object.keys(session).sort(), [
+      'client',
+      'createdAt',
+      'current',
+      'expiresAt',
+      'lastSeenAt'
+    ]);
+  }
+  const text = JSON.stringify(listed.body);
+  assert.ok(!text.includes(first.body.token), 'the other session token never comes back');
+  assert.ok(!text.includes('hash'));
+});
+
+test('a client that declares nothing usable is recorded as unknown', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const odd = await loginAs(harness, 'toaster');
+  const listed = await places(harness, odd.body.token);
+
+  assert.equal(listed.body.sessions[0].client, 'unknown');
+
+  const quiet = await loginAs(harness, undefined);
+  const again = await places(harness, quiet.body.token);
+  assert.equal(again.body.sessions.filter((session) => session.client === 'unknown').length, 2);
+});
+
+test('a place that expires leaves the list, and the others stay', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const old = await loginAs(harness, 'desktop');
+  harness.advance(29 * 24 * 60 * 60 * 1000);
+  const fresh = await loginAs(harness, 'mobile');
+  harness.advance(2 * 24 * 60 * 60 * 1000);
+
+  const listed = await places(harness, fresh.body.token);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.count, 1);
+  assert.equal(listed.body.sessions[0].client, 'mobile');
+
+  const dead = await places(harness, old.body.token);
+  assert.equal(dead.status, 401, 'the expired token is refused too');
+});
+
+test('a place shows when it was last active, not only when it signed in', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const { body } = await loginAs(harness, 'desktop');
+  const signedInAt = (await places(harness, body.token)).body.sessions[0].createdAt;
+
+  harness.advance(2 * 60 * 60 * 1000);
+  /* Any authenticated call refreshes the stamp; a read of an empty account is enough. */
+  await harness.vault.fetch(
+    request('/vault', { method: 'GET', headers: { authorization: `Bearer ${body.token}` } })
+  );
+
+  const listed = (await places(harness, body.token)).body.sessions[0];
+  assert.equal(listed.createdAt, signedInAt, 'the sign-in time does not move');
+  assert.ok(listed.lastSeenAt > listed.createdAt, 'the last-seen time does');
+});
+
+test('signing in more than twenty times keeps the newest twenty places', async () => {
+  const harness = object();
+  await provision(harness);
+
+  let last = null;
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    harness.advance(1000);
+    last = await loginAs(harness, 'desktop');
+  }
+
+  const listed = await places(harness, last.body.token);
+  assert.equal(listed.body.count, 20);
+  assert.equal(last.body.places, 20);
+});
