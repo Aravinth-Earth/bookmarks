@@ -95,8 +95,10 @@ When a free trial ends the server copy becomes read-only for a week and is then 
 bookmarks stay on the device throughout**, and a sealed backup can be exported at any time. The
 Registry releases the slot on deletion, so the cap frees itself.
 
-The limit is bytes, not bookmarks: the vault is sealed, and the server cannot count entries
-without breaking the encryption.
+The limit is bytes, not bookmarks: the vault is sealed, and the server cannot read it. Sealed
+blobs are padded to whole 1 KiB buckets before sealing, so the stored length names a size band —
+the nearest kilobyte — rather than the exact number of entries, and an edit does not show as a
+step until it crosses a bucket.
 
 ### Naming the owner
 
