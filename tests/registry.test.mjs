@@ -153,3 +153,17 @@ test('releasing an unknown id is harmless, an invalid one is refused', async () 
   const invalid = await json(await registry.fetch(release({ accountId: 'short' })));
   assert.equal(invalid.status, 400);
 });
+
+test('an oversized reserve body is refused', async () => {
+  const { registry, storage } = harness();
+  const response = await registry.fetch(
+    new Request('https://registry/reserve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'a'.repeat(5000)
+    })
+  );
+
+  assert.equal(response.status, 413);
+  assert.equal(storage.raw.has('accounts'), false);
+});

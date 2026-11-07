@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   FREE_MAX_CT_CHARS,
   FREE_TRIAL_MS,
+  MAX_VAULT_BODY,
   OWNER_UNITS,
   READ_ONLY_GRACE_MS,
   UNIT_CT_CHARS,
@@ -413,9 +414,12 @@ test('an unknown route is a 404, not a crash', async () => {
 
 const DAY = 24 * 60 * 60 * 1000;
 
-test('the configured owner id gets the owner plan and never expires', async () => {
+test('the configured owner id gets the owner plan only after a proven login', async () => {
   const harness = object({ ownerId: ACCOUNT.accountId });
   await provision(harness);
+
+  /* A leaked owner id must not be enough: creation always starts free. */
+  assert.equal((await harness.storage.get('account')).plan, 'free');
 
   const session = await login(harness);
   assert.equal(session.body.plan, 'owner');
@@ -600,4 +604,32 @@ test('a paid account is capped by the units it holds', async () => {
 
   assert.equal(response.status, 413);
   assert.equal(response.body.limit, UNIT_CT_CHARS);
+});
+
+test('an oversized body is refused before it is parsed', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  assert.equal(session.status, 200, JSON.stringify(session.body));
+
+  const hugeVault = await read(
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${session.body.token}` },
+        body: { baseVersion: 0, iv: IV, ct: 'a'.repeat(MAX_VAULT_BODY) }
+      })
+    )
+  );
+  assert.equal(hugeVault.status, 413);
+  assert.equal(hugeVault.body.error, 'too_large');
+
+  /* A login body is only reached after a challenge, so one has to exist to test the cap. */
+  await harness.vault.fetch(request('/challenge'));
+  const hugeLogin = await read(
+    await harness.vault.fetch(
+      request('/login', { body: { proof: 'a'.repeat(5 * 1024) } })
+    )
+  );
+  assert.equal(hugeLogin.status, 413);
 });

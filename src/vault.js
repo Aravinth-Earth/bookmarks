@@ -35,6 +35,53 @@ const SESSION_HASH = 43;
 
 const encoder = new TextEncoder();
 
+const MAX_SMALL_BODY = 4 * 1024;
+export const MAX_VAULT_BODY = 4 * 1024 * 1024;
+
+/**
+ * Read a JSON body up to `max` bytes, refusing it before the parser sees it.
+ *
+ * `content-length` is checked first because a refusal that reads nothing is the cheap one, but
+ * it is never trusted: the body is counted as it arrives and reading stops at the cap, so an
+ * unbounded body cannot be buffered.
+ *
+ * @returns {Promise<{value?: object, tooLarge?: true, invalid?: true}>}
+ */
+async function readJson(request, max) {
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > max) return { tooLarge: true };
+  if (!request.body) return { value: null };
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel();
+      return { tooLarge: true };
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+
+  try {
+    return { value: JSON.parse(new TextDecoder().decode(bytes)) };
+  } catch {
+    return { invalid: true };
+  }
+}
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -118,9 +165,11 @@ export class Vault {
   async createAccount(request) {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
 
-    const body = await request.json().catch(() => null);
-    const accountId = body?.accountId;
-    const authSecret = body?.authSecret;
+    const body = await readJson(request, MAX_SMALL_BODY);
+    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+
+    const accountId = body.value?.accountId;
+    const authSecret = body.value?.authSecret;
 
     if (!ACCOUNT_ID.test(accountId ?? '') || !AUTH_SECRET.test(authSecret ?? '')) {
       return json({ error: 'invalid' }, 400);
@@ -150,12 +199,12 @@ export class Vault {
       if (!reserved.ok) return json({ error: 'full' }, 429);
     }
 
-    /* Ownership is named, never positional: whoever holds the phrase for the configured id is
-       the owner, and no one can become the owner by simply arriving first. */
+    /* Creation always starts free. Ownership is only granted after a successful proof of the
+       phrase, so a leaked owner id cannot be used to pre-create the account and claim the plan. */
     const now = this.now();
-    const plan = this.env?.OWNER_ACCOUNT_ID === accountId ? 'owner' : 'free';
-    const trialEndsAt = plan === 'free' ? now + FREE_TRIAL_MS : null;
-    const units = plan === 'owner' ? OWNER_UNITS : 0;
+    const plan = 'free';
+    const trialEndsAt = now + FREE_TRIAL_MS;
+    const units = 0;
 
     await this.storage.put('account', {
       accountId,
@@ -207,8 +256,10 @@ export class Vault {
        replayed and a guess cannot be retried against the same challenge. */
     await this.storage.delete('nonce');
 
-    const body = await request.json().catch(() => null);
-    const proof = body?.proof;
+    const body = await readJson(request, MAX_SMALL_BODY);
+    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+
+    const proof = body.value?.proof;
     const ok =
       typeof proof === 'string' && proof.length > 0
         ? await verifyProof(account.authSecret, account.accountId, nonce.value, proof)
@@ -273,10 +324,11 @@ export class Vault {
       return json({ error: 'trial_ended' }, 402);
     }
 
-    const body = await request.json().catch(() => null);
-    if (!body || typeof body !== 'object') return json({ error: 'invalid' }, 400);
+    const body = await readJson(request, MAX_VAULT_BODY);
+    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+    if (!body.value || typeof body.value !== 'object') return json({ error: 'invalid' }, 400);
 
-    const { baseVersion, iv, ct } = body;
+    const { baseVersion, iv, ct } = body.value;
     if (!Number.isInteger(baseVersion) || baseVersion < 0) {
       return json({ error: 'bad_version' }, 400);
     }

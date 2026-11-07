@@ -14,6 +14,42 @@ const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
 /* A var of the same name can override this without a code change. */
 export const MAX_ACCOUNTS = 50;
 
+const MAX_BODY = 4 * 1024;
+
+async function readJson(request, max = MAX_BODY) {
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > max) return { tooLarge: true };
+  if (!request.body) return { value: null };
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel();
+      return { tooLarge: true };
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+
+  try {
+    return { value: JSON.parse(new TextDecoder().decode(bytes)) };
+  } catch {
+    return { invalid: true };
+  }
+}
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -46,8 +82,10 @@ export class Registry {
   }
 
   async reserve(request) {
-    const body = await request.json().catch(() => null);
-    const accountId = body?.accountId;
+    const body = await readJson(request);
+    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+
+    const accountId = body.value?.accountId;
 
     if (!ACCOUNT_ID.test(accountId ?? '')) return json({ error: 'invalid' }, 400);
 
@@ -70,8 +108,10 @@ export class Registry {
    * harmless.
    */
   async release(request) {
-    const body = await request.json().catch(() => null);
-    const accountId = body?.accountId;
+    const body = await readJson(request);
+    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+
+    const accountId = body.value?.accountId;
 
     if (!ACCOUNT_ID.test(accountId ?? '')) return json({ error: 'invalid' }, 400);
 
