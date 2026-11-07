@@ -168,6 +168,53 @@ test('the bare path redirects to the slashed one', async () => {
   assert.equal(response.headers.get('location'), 'https://b.332321.xyz/w/bookmarks/');
 });
 
+/* A preview path on either host is now an unknown path: the asset tree has no such directory,
+   so the binding answers 404 and the Worker's own "Not found" page is returned. On www it is
+   not redirected either, because the redirect covers the canonical prefix only. */
+test('the preview path is an unknown path, on the app host and on www', async () => {
+  const asked = [];
+  const env = {
+    ASSETS: {
+      fetch: async (request) => {
+        const { pathname } = new URL(request.url);
+        asked.push(pathname);
+        if (pathname === '/w/bookmarks/' || pathname.startsWith('/w/bookmarks/')) {
+          return new Response('<!doctype html><title>app</title>', {
+            headers: { 'content-type': 'text/html' }
+          });
+        }
+        return new Response('not found', {
+          status: 404,
+          headers: { 'content-type': 'text/plain' }
+        });
+      }
+    }
+  };
+
+  for (const host of ['b.332321.xyz', 'www.332321.xyz']) {
+    for (const path of ['/w/bookmarks-preview', '/w/bookmarks-preview/']) {
+      const response = await worker.fetch(new Request(`https://${host}${path}`), env);
+
+      assert.equal(response.status, 404, `${host}${path}`);
+      assert.equal(response.headers.get('location'), null, `${host}${path} is not redirected`);
+
+      const body = await response.text();
+      assert.match(body, /Not found/, `${host}${path} gets the app's 404 page`);
+      assert.doesNotMatch(body, /title>app/, `${host}${path} is not the app`);
+      assert.match(response.headers.get('content-security-policy'), /default-src 'self'/);
+      assert.equal(asked.at(-1), path, `${host}${path} reaches the assets unchanged`);
+    }
+  }
+
+  /* The sibling path the loop above must not be confused with. */
+  const canonical = await worker.fetch(
+    new Request('https://b.332321.xyz/w/bookmarks/'),
+    env
+  );
+  assert.equal(canonical.status, 200);
+  assert.match(await canonical.text(), /title>app/);
+});
+
 /* --------------------------------------------------------------- icon service */
 
 const ICON_HOST = 'example.com';
