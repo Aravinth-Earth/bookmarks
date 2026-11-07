@@ -14,12 +14,19 @@ import assert from 'node:assert/strict';
 
 import {
   HISTORY_LIMIT,
+  REMEMBER_LIFETIME_MS,
   createVault,
   indexedDbAdapter
 } from '../public/w/bookmarks/vault.js';
+import { keyFromBytes, open, proveAuth, seal } from '../public/w/bookmarks/crypto.js';
 
 const ACCOUNT_A = 'accountAaccountAaccoun';
 const ACCOUNT_B = 'accountBaccountBaccoun';
+
+/* 32 random bytes, base64url: the material a remembered record used to hold as text. */
+function secretText() {
+  return Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+}
 
 function memoryAdapter() {
   const map = new Map();
@@ -58,6 +65,19 @@ test('a fresh device holds no document and reports version zero', async () => {
   assert.deepEqual(await vault.load(ACCOUNT_A), { sealed: null, version: 0, updatedAt: null });
   assert.deepEqual(await vault.history(), []);
   assert.equal(await vault.readRemembered(), null);
+  assert.equal(await vault.hasVault(), false);
+});
+
+test('a device with a sealed document says so before any phrase is entered', async () => {
+  const vault = createVault(memoryAdapter(), { now: clock() });
+  await vault.save(ACCOUNT_A, sealedAt(1), 1);
+  assert.equal(await vault.hasVault(), true);
+
+  await vault.forget();
+  assert.equal(await vault.hasVault(), true, 'locking does not remove the sealed document');
+
+  await vault.clear();
+  assert.equal(await vault.hasVault(), false);
 });
 
 test('a saved document loads back with its version, account and timestamp', async () => {
@@ -113,30 +133,132 @@ test('history keeps the previous versions newest first and stops at the limit', 
   await assert.rejects(() => vault.readHistory(999), /no history/);
 });
 
-test('the remembered key round-trips and forget clears only that record', async () => {
-  const vault = createVault(memoryAdapter(), { now: clock() });
-  await vault.save(ACCOUNT_A, sealedAt(1), 1);
+test('a remembered device stores keys, never the bytes that made them', async () => {
+  const adapter = memoryAdapter();
+  const vault = createVault(adapter, { now: clock() });
 
-  await vault.remember(ACCOUNT_A, 'key-bytes', 'auth-secret');
+  const vaultKey = await keyFromBytes(secretText());
+  const document = { bookmarks: [{ id: 'one' }] };
+  const sealed = await seal(vaultKey, document, ACCOUNT_A);
+
+  await vault.remember(ACCOUNT_A, vaultKey, secretText());
+
+  const record = adapter.raw.get('remembered');
+  assert.deepEqual(Object.keys(record).sort(), ['accountId', 'authKey', 'key', 'savedAt']);
+  assert.equal(record.keyBytes, undefined, 'the old key field is gone');
+  assert.equal(record.authSecret, undefined, 'no readable auth secret is stored');
+
+  assert.ok(record.key instanceof CryptoKey, 'the vault key is a CryptoKey');
+  assert.equal(record.key.type, 'secret');
+  assert.equal(record.key.algorithm.name, 'AES-GCM');
+  assert.equal(record.key.extractable, false, 'the vault key cannot be exported');
+
+  assert.ok(record.authKey instanceof CryptoKey, 'the auth secret is a CryptoKey');
+  assert.equal(record.authKey.algorithm.name, 'HMAC');
+  assert.equal(record.authKey.extractable, false, 'the auth key cannot be exported');
+
+  await assert.rejects(() => crypto.subtle.exportKey('raw', record.key), /not extractable/i);
+  await assert.rejects(() => crypto.subtle.exportKey('raw', record.authKey), /not extractable/i);
+
+  /* Stored and used are the same thing: the record still opens the document it sealed. */
   const remembered = await vault.readRemembered();
-  assert.equal(remembered.accountId, ACCOUNT_A);
-  assert.equal(remembered.keyBytes, 'key-bytes');
-  assert.equal(remembered.authSecret, 'auth-secret');
-  assert.equal(remembered.savedAt, 1_002);
-
-  await assert.rejects(() => vault.remember(ACCOUNT_A, '', 'auth-secret'), /key bytes/);
-  await assert.rejects(() => vault.remember(ACCOUNT_A, 'key-bytes', ''), /auth secret/);
+  assert.deepEqual(await open(remembered.key, sealed, ACCOUNT_A), document);
 
   await vault.forget();
   assert.equal(await vault.readRemembered(), null);
-  assert.equal((await vault.load(ACCOUNT_A)).version, 1, 'the vault itself is untouched');
+  assert.equal((await vault.load(ACCOUNT_A)).version, 0, 'the vault itself is untouched');
+});
+
+test('a record written before keys were stored migrates without the phrase', async () => {
+  const adapter = memoryAdapter();
+  const keyBytes = secretText();
+  const authSecret = secretText();
+  const vaultKey = await keyFromBytes(keyBytes);
+  const document = { bookmarks: [{ id: 'one', url: 'https://example.com' }] };
+  const sealed = await seal(vaultKey, document, ACCOUNT_A);
+
+  /* Exactly the shape the old build wrote. */
+  adapter.raw.set('remembered', { accountId: ACCOUNT_A, keyBytes, authSecret, savedAt: 1_001 });
+
+  const vault = createVault(adapter, { now: () => 1_002 });
+  const remembered = await vault.readRemembered();
+
+  assert.equal(remembered.accountId, ACCOUNT_A);
+  assert.ok(remembered.key instanceof CryptoKey);
+  assert.ok(remembered.authKey instanceof CryptoKey);
+  assert.equal(remembered.key.extractable, false);
+  assert.deepEqual(await open(remembered.key, sealed, ACCOUNT_A), document);
+
+  /* The auth key signs what the old text signed, so sync keeps working. */
+  assert.equal(
+    await proveAuth(remembered.authKey, ACCOUNT_A, 'nonce'),
+    await proveAuth(authSecret, ACCOUNT_A, 'nonce')
+  );
+
+  const stored = adapter.raw.get('remembered');
+  assert.deepEqual(Object.keys(stored).sort(), ['accountId', 'authKey', 'key', 'savedAt']);
+  assert.equal(stored.keyBytes, undefined);
+  assert.equal(stored.authSecret, undefined);
+  assert.equal(stored.savedAt, 1_001, 'the migration does not restart the clock');
+});
+
+test('a record without an auth secret migrates its key and reports no auth key', async () => {
+  const adapter = memoryAdapter();
+  const keyBytes = secretText();
+  const vaultKey = await keyFromBytes(keyBytes);
+  const sealed = await seal(vaultKey, { bookmarks: [] }, ACCOUNT_A);
+
+  adapter.raw.set('remembered', { accountId: ACCOUNT_A, keyBytes, savedAt: 1_001 });
+
+  const vault = createVault(adapter, { now: () => 1_002 });
+  const remembered = await vault.readRemembered();
+
+  assert.ok(remembered.key instanceof CryptoKey);
+  assert.equal(remembered.authKey, undefined);
+  assert.deepEqual(await open(remembered.key, sealed, ACCOUNT_A), { bookmarks: [] });
+  assert.deepEqual(Object.keys(adapter.raw.get('remembered')).sort(), [
+    'accountId',
+    'key',
+    'savedAt'
+  ]);
+});
+
+test('a remembered device expires: the phrase is asked for again and the record is gone', async () => {
+  const adapter = memoryAdapter();
+  let at = 1_000;
+  const vault = createVault(adapter, { now: () => at });
+  await vault.save(ACCOUNT_A, sealedAt(1), 1);
+  await vault.remember(ACCOUNT_A, await keyFromBytes(secretText()), secretText());
+  assert.equal((await vault.readRemembered()).savedAt, 1_000);
+
+  at += REMEMBER_LIFETIME_MS - 1;
+  assert.ok(await vault.readRemembered(), 'one millisecond short of the lifetime still opens');
+
+  at += 1;
+  assert.equal(await vault.readRemembered(), null);
+  assert.equal(adapter.raw.has('remembered'), false, 'the expired record is deleted');
+  assert.equal((await vault.load(ACCOUNT_A)).version, 1, 'the vault is not deleted');
+});
+
+test('an expired record written in the old shape is deleted, not migrated', async () => {
+  const adapter = memoryAdapter();
+  adapter.raw.set('remembered', {
+    accountId: ACCOUNT_A,
+    keyBytes: secretText(),
+    authSecret: secretText(),
+    savedAt: 1_000
+  });
+
+  const vault = createVault(adapter, { now: () => 1_000 + REMEMBER_LIFETIME_MS });
+  assert.equal(await vault.readRemembered(), null);
+  assert.equal(adapter.raw.has('remembered'), false);
 });
 
 test('clear removes the vault, its history and the remembered key', async () => {
   const vault = createVault(memoryAdapter(), { now: clock() });
   await vault.save(ACCOUNT_A, sealedAt(1), 1);
   await vault.save(ACCOUNT_A, sealedAt(2), 2);
-  await vault.remember(ACCOUNT_A, 'key-bytes', 'auth-secret');
+  await vault.remember(ACCOUNT_A, await keyFromBytes(secretText()), secretText());
 
   await vault.clear();
 

@@ -38,9 +38,15 @@
                 </label>
 
                 <label class="remember">
-                    <input id="remember" type="checkbox" checked>
+                    <input id="remember" type="checkbox" aria-describedby="remember-hint">
                     <span>Stay unlocked on this device</span>
                 </label>
+                <p id="remember-hint" class="field-hint remember-hint">
+                    Ticking this stores this vault's key and a sign-in secret in this browser for
+                    30 days, so it can reopen the vault without the phrase. The key cannot be read
+                    out by a script, but a copied browser profile can use it. Unticked, the phrase
+                    is asked for on every open.
+                </p>
 
                 <p id="lock-device-note" class="field-hint" hidden></p>
 

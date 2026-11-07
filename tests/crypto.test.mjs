@@ -22,12 +22,16 @@ import {
   PBKDF2_ITERATIONS,
   WORD_COUNT,
   accountIdFromPhrase,
+  authKeyFromBytes,
+  deriveAccount,
   deriveAuthSecret,
   deriveVaultKey,
   generatePhrase,
+  keyFromBytes,
   normalizePhrase,
   open,
   phraseProblem,
+  proveAuth,
   seal
 } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
@@ -166,4 +170,58 @@ test('a phrase problem names what to fix, not what the parser saw', async () => 
   /* A real phrase has nothing to report. */
   assert.equal(phraseProblem(WORDLIST.slice(0, 13).join(' ')), null);
   assert.equal(phraseProblem('  '), 'The phrase has 13 words.');
+});
+
+test('one derivation returns keys that cannot be exported, and the text the server is given', async () => {
+  const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(PHRASE_A);
+
+  assert.equal(accountId, await accountIdFromPhrase(PHRASE_A));
+  assert.equal(authSecret, await deriveAuthSecret(PHRASE_A), 'the account secret is unchanged');
+
+  assert.ok(vaultKey instanceof CryptoKey);
+  assert.equal(vaultKey.algorithm.name, 'AES-GCM');
+  assert.equal(vaultKey.extractable, false);
+  assert.ok(authKey instanceof CryptoKey);
+  assert.equal(authKey.algorithm.name, 'HMAC');
+  assert.equal(authKey.extractable, false);
+
+  await assert.rejects(() => crypto.subtle.exportKey('raw', vaultKey), /not extractable/i);
+  await assert.rejects(() => crypto.subtle.exportKey('raw', authKey), /not extractable/i);
+  assert.equal('vaultKeyBytes' in (await deriveAccount(PHRASE_A)), false, 'no raw key is returned');
+});
+
+test('a proof from a stored key is the proof from the secret it was made from', async () => {
+  const { vaultKey, authKey, authSecret } = await deriveAccount(PHRASE_A);
+  const accountId = await accountIdFromPhrase(PHRASE_A);
+
+  const fromText = await proveAuth(authSecret, accountId, 'nonce-one');
+  assert.match(fromText, BASE64URL_43);
+
+  /* The remembered record holds the key, so this is the path a reload takes. */
+  assert.equal(await proveAuth(authKey, accountId, 'nonce-one'), fromText);
+  assert.equal(await proveAuth(await authKeyFromBytes(authSecret), accountId, 'nonce-one'), fromText);
+  assert.notEqual(await proveAuth(authKey, accountId, 'nonce-two'), fromText);
+  assert.notEqual(await proveAuth(authKey, await accountIdFromPhrase(PHRASE_B), 'nonce-one'), fromText);
+
+  await assert.rejects(() => proveAuth(vaultKey, accountId, 'nonce-one'), /HMAC/);
+  await assert.rejects(() => proveAuth(authKey, accountId, ''), /nonce/);
+});
+
+test('remembered material is only ever a non-extractable key', async () => {
+  const { vaultKey } = await deriveAccount(PHRASE_A);
+  assert.equal(await keyFromBytes(vaultKey), vaultKey, 'a CryptoKey passes through');
+
+  const raw = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+  const imported = await keyFromBytes(raw);
+  assert.ok(imported instanceof CryptoKey);
+  assert.equal(imported.extractable, false);
+  await assert.rejects(() => crypto.subtle.exportKey('raw', imported), /not extractable/i);
+
+  /* The refusals stay meaningful next to the acceptance above. */
+  await assert.rejects(() => keyFromBytes(''), /base64url/);
+  await assert.rejects(
+    () => keyFromBytes(Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString('base64url')),
+    /256 bits/
+  );
+  await assert.rejects(() => keyFromBytes({}), /base64url/);
 });

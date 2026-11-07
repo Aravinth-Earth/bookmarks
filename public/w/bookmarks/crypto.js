@@ -71,6 +71,10 @@ async function sha256(text) {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(text)));
 }
 
+function isCryptoKey(value) {
+  return typeof CryptoKey === 'function' && value instanceof CryptoKey;
+}
+
 /** A fresh phrase, uniform over the list, joined by single spaces. */
 export function generatePhrase() {
   const words = [];
@@ -208,11 +212,15 @@ export async function deriveAuthSecret(input) {
  * Everything one phrase derives, from a single PBKDF2 pass. The app calls this once per unlock
  * instead of deriving each value separately.
  *
- * `vaultKeyBytes` exists only for the opt-in "remember this device" path, which stores it in
- * IndexedDB so a daily-driver tab does not ask for 13 words on every open. It is never sent
- * anywhere. When the option is off, the bytes are dropped and only the non-extractable key lives.
+ * `vaultKey` and `authKey` are non-extractable CryptoKeys: they can seal, open and sign, and no
+ * script can read them back as bytes. They are also the only form the "stay unlocked" record
+ * stores, because IndexedDB structured-clones a CryptoKey and keeps it usable while keeping it
+ * unexportable.
  *
- * @returns {Promise<{accountId: string, vaultKey: CryptoKey, vaultKeyBytes: string, authSecret: string}>}
+ * `authSecret` is the base64url plaintext. It exists only because creating an account on the
+ * server sends it once; nothing writes it to this device.
+ *
+ * @returns {Promise<{accountId: string, vaultKey: CryptoKey, authKey: CryptoKey, authSecret: string}>}
  */
 export async function deriveAccount(input) {
   const normalized = normalizePhrase(input);
@@ -222,14 +230,14 @@ export async function deriveAccount(input) {
     hkdf(bits, salt, `${LABELS.key}enc`),
     hkdf(bits, salt, `${LABELS.auth}secret`)
   ]);
-  const vaultKey = await crypto.subtle.importKey('raw', keyBits, 'AES-GCM', false, [
-    'encrypt',
-    'decrypt'
+  const [vaultKey, authKey] = await Promise.all([
+    crypto.subtle.importKey('raw', keyBits, 'AES-GCM', false, ['encrypt', 'decrypt']),
+    crypto.subtle.importKey('raw', authBits, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
   ]);
   return {
     accountId,
     vaultKey,
-    vaultKeyBytes: toBase64Url(keyBits),
+    authKey,
     authSecret: toBase64Url(authBits)
   };
 }
@@ -240,20 +248,21 @@ export async function deriveAccount(input) {
  * spent. The account is inside the signed text so a proof cannot be replayed against another
  * account even if a nonce were somehow reused.
  *
+ * `authSecret` is either the base64url secret a phrase derives or the non-extractable HMAC
+ * CryptoKey a remembered device holds. Both sign the same text, so a reload keeps signing in.
+ *
  * @returns {Promise<string>} base64url, 43 characters
  */
 export async function proveAuth(authSecret, accountId, nonce) {
   if (typeof nonce !== 'string' || nonce === '') {
     throw new Error('bookmarks: a proof needs a nonce');
   }
-  const keyBytes = fromBase64Url(authSecret, 'the auth secret');
-  const key = await crypto.subtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
+  const key = isCryptoKey(authSecret)
+    ? authSecret
+    : await authKeyFromBytes(authSecret);
+  if (key.algorithm?.name !== 'HMAC') {
+    throw new Error('bookmarks: a proof is signed with an HMAC key');
+  }
   const signature = await crypto.subtle.sign(
     'HMAC',
     key,
@@ -263,13 +272,37 @@ export async function proveAuth(authSecret, accountId, nonce) {
 }
 
 /**
- * Rebuild the vault key from remembered bytes, or throw.
- *
- * The bytes are base64url as `deriveAccount` returns them. They are used once per page load to
- * import a non-extractable key; nothing keeps them in memory afterwards.
+ * The auth secret as the key that signs proofs, non-extractable and 256 bits. A CryptoKey is
+ * returned as it is, so a remembered record can be passed straight through; base64url text is
+ * imported, which is what a record written before the record stored keys still carries.
  */
-export async function keyFromBytes(bytes) {
-  const raw = fromBase64Url(bytes, 'the remembered key');
+export async function authKeyFromBytes(secret) {
+  if (isCryptoKey(secret)) {
+    if (secret.algorithm?.name !== 'HMAC') {
+      throw new Error('bookmarks: an auth key signs HMAC');
+    }
+    return secret;
+  }
+  const raw = fromBase64Url(secret, 'the auth secret');
+  if (raw.length * 8 !== KEY_BITS) {
+    throw new Error(`bookmarks: an auth secret is ${KEY_BITS} bits`);
+  }
+  return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+}
+
+/**
+ * The vault key from remembered material: a non-extractable CryptoKey passes through, and
+ * base64url bytes are imported into one. The bytes are the shape older records stored; they are
+ * used once and never kept, so an upgrade leaves no readable key behind.
+ */
+export async function keyFromBytes(material) {
+  if (isCryptoKey(material)) {
+    if (material.algorithm?.name !== 'AES-GCM') {
+      throw new Error('bookmarks: a remembered key is an AES-GCM key');
+    }
+    return material;
+  }
+  const raw = fromBase64Url(material, 'the remembered key');
   if (raw.length * 8 !== KEY_BITS) {
     throw new Error(`bookmarks: a remembered key is ${KEY_BITS} bits`);
   }
