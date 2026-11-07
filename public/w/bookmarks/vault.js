@@ -3,12 +3,14 @@
  *
  * One sealed document, the version it was sealed at, a short history of the versions before it,
  * and the remembered key when the user asked this device to stay unlocked. Nothing here is
- * plaintext: the document arrives already sealed, and this module never sees the key that
- * sealed it.
+ * plaintext: the document arrives already sealed, and the remembered record holds only
+ * non-extractable CryptoKeys, which IndexedDB can store and no script can read back as bytes.
  *
  * Storage sits behind a four-method adapter so the logic is testable under `node --test`, where
  * IndexedDB does not exist. `indexedDbAdapter()` is the only browser-specific part.
  */
+
+import { authKeyFromBytes, keyFromBytes } from './crypto.js';
 
 export const DB_NAME = 'bookmarks';
 export const DB_VERSION = 1;
@@ -16,6 +18,10 @@ export const STORE = 'vault';
 /* Five previous versions is enough to undo a bad import or a mistaken clear, and small enough
    that the whole store stays a few hundred kilobytes. */
 export const HISTORY_LIMIT = 5;
+/* A remembered device is a convenience with an expiry, not a permanent key: after thirty days
+   the phrase is asked for again, so a browser profile copied once stops being a way in. */
+export const REMEMBER_LIFETIME_DAYS = 30;
+export const REMEMBER_LIFETIME_MS = REMEMBER_LIFETIME_DAYS * 24 * 60 * 60 * 1000;
 
 const DOCUMENT = 'document';
 const REMEMBERED = 'remembered';
@@ -103,22 +109,84 @@ export function createVault(adapter, { now = () => Date.now() } = {}) {
     return record;
   }
 
-  async function remember(accountId, keyBytes, authSecret) {
-    if (typeof keyBytes !== 'string' || keyBytes === '') {
-      throw new Error('bookmarks: a remembered key carries the key bytes');
+  /**
+   * Keep this device unlocked: the vault key and the key that signs login proofs, both
+   * non-extractable.
+   *
+   * `vaultKey` and `authSecret` may be CryptoKeys or the base64url text the older record
+   * stored; either way what lands in the adapter is a pair of CryptoKeys, so a copy of the
+   * profile yields keys that sign and decrypt but cannot be exported or read.
+   */
+  async function remember(accountId, vaultKey, authSecret) {
+    if (vaultKey === undefined || vaultKey === null || vaultKey === '') {
+      throw new Error('bookmarks: a remembered key carries the vault key');
     }
-    if (typeof authSecret !== 'string' || authSecret === '') {
-      throw new Error('bookmarks: a remembered device carries the auth secret');
+    if (authSecret === undefined || authSecret === null || authSecret === '') {
+      throw new Error('bookmarks: a remembered device carries the auth key');
     }
-    await adapter.put(REMEMBERED, { accountId, keyBytes, authSecret, savedAt: now() });
+    const [key, authKey] = await Promise.all([
+      keyFromBytes(vaultKey),
+      authKeyFromBytes(authSecret)
+    ]);
+    await adapter.put(REMEMBERED, { accountId, key, authKey, savedAt: now() });
   }
 
+  function isFresh(savedAt) {
+    if (typeof savedAt !== 'number' || !Number.isFinite(savedAt)) return false;
+    return now() - savedAt < REMEMBER_LIFETIME_MS;
+  }
+
+  /**
+   * The remembered record, or null.
+   *
+   * A record past its lifetime is deleted and reports nothing, so the phrase is asked for
+   * again. A record written before keys were stored carries `keyBytes` and `authSecret` as
+   * base64url text; it is imported into non-extractable keys, written back in the new shape,
+   * and the old fields go with the write. An upgrade keeps working without the phrase.
+   */
   async function readRemembered() {
-    return (await adapter.get(REMEMBERED)) ?? null;
+    const record = await adapter.get(REMEMBERED);
+    if (!record) return null;
+
+    if (!isFresh(record.savedAt)) {
+      await adapter.delete(REMEMBERED);
+      return null;
+    }
+
+    if (record.key !== undefined) return record;
+
+    /* The pre-key shape. A record from before sync exists has no auth secret; the app asks
+       for the phrase once and stores the key it derives. */
+    if (typeof record.keyBytes !== 'string' || record.keyBytes === '') {
+      await adapter.delete(REMEMBERED);
+      return null;
+    }
+
+    let key;
+    let authKey = null;
+    try {
+      key = await keyFromBytes(record.keyBytes);
+      if (typeof record.authSecret === 'string' && record.authSecret !== '') {
+        authKey = await authKeyFromBytes(record.authSecret);
+      }
+    } catch {
+      await adapter.delete(REMEMBERED);
+      return null;
+    }
+
+    const migrated = { accountId: record.accountId, key, savedAt: record.savedAt };
+    if (authKey) migrated.authKey = authKey;
+    await adapter.put(REMEMBERED, migrated);
+    return migrated;
   }
 
   async function forget() {
     await adapter.delete(REMEMBERED);
+  }
+
+  /** Whether a sealed document is on this device, answerable before any phrase is entered. */
+  async function hasVault() {
+    return Boolean(await adapter.get(DOCUMENT));
   }
 
   /** Wipe this device: the sealed document, its history and the remembered key. */
@@ -136,6 +204,7 @@ export function createVault(adapter, { now = () => Date.now() } = {}) {
     remember,
     readRemembered,
     forget,
+    hasVault,
     clear
   };
 }

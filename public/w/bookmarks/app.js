@@ -18,7 +18,7 @@ import {
   togglePin,
   updateBookmark
 } from './bookmarks.js';
-import { deriveAccount, generatePhrase, keyFromBytes, open, phraseProblem, seal } from './crypto.js';
+import { deriveAccount, generatePhrase, open, phraseProblem, seal } from './crypto.js';
 import { createVault, indexedDbAdapter } from './vault.js';
 import {
   exportBrowserBookmarks,
@@ -687,6 +687,10 @@ function handleSyncError(error) {
     setSyncStatus('Could not create the account');
     return;
   }
+  if (error?.code === 'NEED_PHRASE') {
+    setSyncStatus('Phrase needed to create the account');
+    return;
+  }
   if (error?.code === 'LOCKED') {
     setSyncStatus('Locked out');
     return;
@@ -728,8 +732,13 @@ async function syncNow() {
         if (error.code !== 'NO_ACCOUNT') throw error;
 
         /* First sync on a new phrase: the account is created from the same secrets the login
-           would have used, so there is nothing to provision and no token to hold. */
+           would have used, so there is nothing to provision and no token to hold. A remembered
+           device holds the signing key, not the secret the server is given, so it cannot create
+           the account without the phrase once. */
         setSyncStatus('Creating the account…');
+        if (typeof state.authSecret !== 'string') {
+          throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
+        }
         await sync.register(state.accountId, state.authSecret);
         session = await sync.login(state.accountId, state.authSecret);
       }
@@ -869,17 +878,22 @@ async function tryRemembered() {
   } catch {
     return showLock('', { hasVault: false });
   }
-  if (!remembered) return showLock('', { hasVault: false });
+  if (!remembered) {
+    /* No remembered key does not mean no vault: the record may have expired, or the box was
+       never ticked. The sentence under the field says which, so the phrase is not a surprise. */
+    const onDevice = await store.hasVault().catch(() => false);
+    return showLock('', { hasVault: onDevice });
+  }
 
   try {
-    const key = await keyFromBytes(remembered.keyBytes);
+    const key = remembered.key;
     const stored = await store.load(remembered.accountId);
     if (!stored.sealed) throw new Error('the remembered key has no vault');
 
     const vaultDocument = await open(key, stored.sealed, remembered.accountId);
     enter({
       accountId: remembered.accountId,
-      authSecret: remembered.authSecret,
+      authSecret: remembered.authKey ?? null,
       key,
       version: stored.version,
       sealed: stored.sealed,
@@ -909,13 +923,13 @@ async function handleUnlock(event) {
   unlockButton.textContent = 'Unlocking…';
 
   try {
-    const { accountId, vaultKey, vaultKeyBytes, authSecret } = await deriveAccount(phrase);
+    const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
     const stored = await store.load(accountId);
     const vaultDocument = stored.sealed
       ? await open(vaultKey, stored.sealed, accountId)
       : createDocument();
 
-    if (rememberInput.checked) await store.remember(accountId, vaultKeyBytes, authSecret);
+    if (rememberInput.checked) await store.remember(accountId, vaultKey, authKey);
     else await store.forget();
 
     enter({
@@ -1121,12 +1135,12 @@ function openCreateModal() {
 }
 
 async function createNewVault(phrase, remember) {
-  const { accountId, vaultKey, vaultKeyBytes, authSecret } = await deriveAccount(phrase);
+  const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
   const vaultDocument = createDocument();
   const sealed = await seal(vaultKey, vaultDocument, accountId);
 
   await store.save(accountId, sealed, 1);
-  if (remember) await store.remember(accountId, vaultKeyBytes, authSecret);
+  if (remember) await store.remember(accountId, vaultKey, authKey);
   else await store.forget();
 
   enter({ accountId, authSecret, key: vaultKey, version: 1, sealed, document: vaultDocument });
@@ -1173,13 +1187,13 @@ async function handleRestore() {
   }
 
   try {
-    const { accountId, vaultKey, vaultKeyBytes, authSecret } = await deriveAccount(phrase);
+    const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
     const vaultDocument = await open(vaultKey, sealed, accountId);
     const stored = await store.load(accountId);
 
     const version = Math.max(stored.version, 0) + 1;
     await store.save(accountId, sealed, version);
-    if (rememberInput.checked) await store.remember(accountId, vaultKeyBytes, authSecret);
+    if (rememberInput.checked) await store.remember(accountId, vaultKey, authKey);
     else await store.forget();
 
     enter({ accountId, authSecret, key: vaultKey, version, sealed, document: vaultDocument });
@@ -1928,9 +1942,10 @@ async function handleImport() {
 /* ------------------------------------------------------------------ settings */
 
 /**
- * A remembered device written before sync existed carries the vault key but not the auth
- * secret. It is asked for the phrase once, and the answer is kept the way the key is kept.
- * The account id is derived from the phrase, so a wrong phrase simply derives another vault.
+ * A remembered device can sign in, but the account secret it would send to be registered is
+ * only derivable from the phrase. It is asked for once, and the answer is kept the way the keys
+ * are kept. The account id is derived from the phrase, so a wrong phrase simply derives another
+ * vault.
  */
 function promptForSyncPhrase() {
   return new Promise((resolve) => {
@@ -1956,7 +1971,7 @@ function promptForSyncPhrase() {
       body: [
         el('p', {
           class: 'modal-note',
-          text: 'This device was remembered before sync existed. Enter the phrase once so it can sign in. It is not stored on the server, and the key it derives stays in this browser.'
+          text: 'Enter the phrase once so this device can complete the sign-in. It is not stored on the server; what stays in this browser is a key that signs in, not the secret itself.'
         }),
         el('label', { class: 'field' }, [
           el('span', { class: 'field-label', text: 'Your 13-word phrase' }),
@@ -2114,13 +2129,13 @@ function openSettings() {
             const enable = !syncEnabled();
             modal.close();
 
-            if (enable && !state.authSecret) {
+            if (enable && typeof state.authSecret !== 'string') {
               const secret = await promptForSyncPhrase();
               if (!secret) return;
 
               state.authSecret = secret;
               const remembered = await store.readRemembered();
-              if (remembered) await store.remember(state.accountId, remembered.keyBytes, secret);
+              if (remembered) await store.remember(state.accountId, remembered.key, secret);
             }
 
             setPrefs({ sync: enable });
