@@ -49,6 +49,9 @@ is live with
 curl -s https://www.332321.xyz/w/bookmarks/api/health   # {"ok":true,"version":"0.1.0"}
 ```
 
+If a merge does not appear live within five minutes, check the build in the Cloudflare dashboard
+before doing anything else — a hand deploy is not the first response to a slow build.
+
 A branch build only uploads a preview version; it never takes production traffic.
 
 ## Turning on sync
