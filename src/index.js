@@ -714,11 +714,13 @@ async function proxyRefused(reason) {
  *
  * The hostname travels in a header, not the query string, and the URL carries only its SHA-256.
  * That keeps the domain out of the request path — which is the part Cloudflare's logs record —
- * while still giving the edge a deterministic cache key per host. The hash is re-derived here,
- * so a caller cannot ask for a host that does not match the key it is cached under.
+ * and gives every host one stable URL. The hash is re-derived here, so a caller cannot name a
+ * host under a key that host does not produce.
  *
- * The Worker is the only party that contacts the bookmarked site, once, and every other user is
- * served the cached bytes. No hostname is logged by this code.
+ * The Worker is the only party that contacts the bookmarked site: it asks the host for
+ * `/favicon.ico`, then for the icon the page declares, following redirects. A host that answers
+ * with neither is asked again a week later, and only while the vault still has no icon for it.
+ * No hostname is logged by this code.
  */
 async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   if (request.method !== 'GET') return json({ error: 'method' }, 405);
