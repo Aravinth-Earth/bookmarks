@@ -19,6 +19,7 @@ import {
   deleteBookmark,
   filterBookmarks,
   mergeDocuments,
+  newerPrefs,
   normalizeUrl,
   recordClick,
   sortBookmarks,
@@ -298,6 +299,46 @@ test('a tombstone older than the limit is pruned', () => {
 test('mergeDocuments refuses a document that is not one', () => {
   assert.throws(() => mergeDocuments({}, doc(), at(T1)), /schema/);
   assert.throws(() => mergeDocuments(doc(), { schema: 1 }, at(T1)), /bookmarks and tombstones/);
+});
+
+test('newerPrefs takes the stamped side, and the later stamp when both carry one', () => {
+  const legacy = { iconOnly: false };
+  const older = { iconOnly: false, sort: 'name', view: 'list', updatedAt: T1 };
+  const newer = { iconOnly: false, sort: 'lastClicked', view: 'pills', updatedAt: T2 };
+
+  assert.deepEqual(newerPrefs(legacy, older), older, 'a stamped copy beats an unstamped one');
+  assert.deepEqual(newerPrefs(older, legacy), older, 'and it beats it from either side');
+  assert.deepEqual(newerPrefs(older, newer), newer, 'the later stamp wins');
+  assert.deepEqual(newerPrefs(newer, older), newer, 'whichever side it is on');
+  assert.deepEqual(
+    newerPrefs(older, { ...older }),
+    older,
+    'an equal stamp keeps the local copy'
+  );
+  assert.deepEqual(
+    newerPrefs({ iconOnly: false, sort: 'name' }, { iconOnly: true }),
+    { iconOnly: false, sort: 'name' },
+    'with no stamp on either side the local copy is kept'
+  );
+  assert.deepEqual(newerPrefs(undefined, newer), newer, 'a document with no prefs takes the other');
+});
+
+test('a preference changed on this device survives a merge with an older server copy', () => {
+  const localPrefs = { iconOnly: false, sort: 'clicks', updatedAt: T2 };
+  const remotePrefs = { iconOnly: false, sort: 'name', updatedAt: T1 };
+  const local = { ...doc([record({ id: 'a' })]), prefs: localPrefs };
+  const remote = { ...doc([record({ id: 'a' })]), prefs: remotePrefs };
+
+  const { document: kept } = mergeDocuments(local, remote, at(T3));
+  assert.equal(kept.prefs.sort, 'clicks', 'the newer local sort is not replaced');
+  assert.equal(kept.prefs.updatedAt, T2, 'the stamp travels with it');
+
+  const newerRemote = {
+    ...doc([record({ id: 'a' })]),
+    prefs: { iconOnly: false, sort: 'lastClicked', updatedAt: T3 }
+  };
+  const { document: absorbed } = mergeDocuments(local, newerRemote, at(T3));
+  assert.equal(absorbed.prefs.sort, 'lastClicked', 'a newer change on the server reaches here');
 });
 
 test('no operation mutates the document it was given', () => {
