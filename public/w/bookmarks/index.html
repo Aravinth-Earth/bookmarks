@@ -17,7 +17,7 @@
     <main id="main" class="shell">
         <header class="masthead">
             <h1>Bookmarks</h1>
-            <p class="lede">One vault, sealed in this browser. The server only ever holds a sealed blob.</p>
+            <p class="lede">One vault, sealed in this browser. The server holds a sealed copy and an account record, never a bookmark.</p>
         </header>
 
         <section id="lock-view" class="lock" hidden>
@@ -34,7 +34,7 @@
                         spellcheck="false"
                         aria-describedby="phrase-hint"
                         required></textarea>
-                    <span id="phrase-hint" class="field-hint">Thirteen words, separated by spaces. Nothing is sent anywhere.</span>
+                    <span id="phrase-hint" class="field-hint">Thirteen words, separated by spaces. The phrase is never sent anywhere.</span>
                 </label>
 
                 <label class="remember">

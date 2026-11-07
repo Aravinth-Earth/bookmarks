@@ -1,13 +1,14 @@
 /**
  * Bookmarks — the favicon path, without a request from this page to any bookmarked site.
  *
- * The Worker fetches `https://<host>/favicon.ico` once, caches it at the edge, and serves it
+ * The Worker fetches `https://<host>/favicon.ico`, or the icon the page declares, and serves it
  * back from our own origin. Because it is same-origin, the page can read the bytes; because it
  * can read them, the image can be downscaled and stored inside the sealed vault. After that the
- * icon is offline, and no third party ever learns that this vault contains that site.
+ * icon is offline, and the host is asked again only if the icon is still missing a week later.
  *
- * The hostname travels in a header and the query string carries only its SHA-256, so the domain
- * never appears in a URL that platform logs record.
+ * The site learns that this Worker asked it for an icon, at that moment. The hostname travels
+ * in a header; the query string carries only its SHA-256, an unsalted digest that a list of
+ * hostnames can match.
  */
 
 const API = '/w/bookmarks/api/icon';
