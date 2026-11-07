@@ -519,7 +519,9 @@ a:focus-visible {
     font-size: var(--font-size-xs, 0.7rem);
 }
 
-.row.icon-only .row-label {
+/* The name sits beside the tile inside the link, so hiding it leaves the tile on its own. The
+   link keeps its accessible name from aria-label. */
+.row.icon-only .row-name {
     display: none;
 }
 
@@ -701,10 +703,6 @@ a:focus-visible {
 }
 
 .list[data-view='pills'] .row-actions {
-    display: none;
-}
-
-.list[data-view='pills'] .row.icon-only .row-label {
     display: none;
 }
 

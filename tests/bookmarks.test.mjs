@@ -147,6 +147,21 @@ test('updateBookmark changes only what it is given, and re-checks a changed URL'
   );
 });
 
+test('updateBookmark sets and clears hideLabel in one patch', () => {
+  const { document, bookmark } = seed();
+  const hidden = updateBookmark(document, bookmark.id, { hideLabel: true }, at(T2));
+  const after = hidden.bookmarks[0];
+
+  assert.equal(after.hideLabel, true);
+  assert.equal(after.name, bookmark.name, 'the name is untouched');
+  assert.equal(after.clickCount, bookmark.clickCount, 'the count is untouched');
+  assert.equal(after.updatedAt, iso(T2));
+  assert.equal(hidden.bookmarks.length, 1);
+
+  const shown = updateBookmark(hidden, bookmark.id, { hideLabel: false }, at(T3));
+  assert.equal(shown.bookmarks[0].hideLabel, false);
+});
+
 test('updateBookmark ignores a field it does not own', () => {
   const { document, bookmark } = seed();
   const updated = updateBookmark(document, bookmark.id, { id: 'hijacked', schema: 9 }, at(T2));
