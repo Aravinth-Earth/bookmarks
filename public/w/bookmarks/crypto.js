@@ -330,17 +330,15 @@ function gcmParams(iv, associated) {
   return params;
 }
 
-/* Filler is drawn from the base64url alphabet: ASCII, never escaped by JSON, and uniform over
-   the 64 characters because 64 divides 256. It is inside the ciphertext, so its content carries
-   no meaning — only its length does, and that is decided by the bucket. */
-const PAD_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-
+/* Filler is base64url of fresh random bytes, cut to length: ASCII, never escaped by JSON, and
+   uniform over the alphabet because the encoding does the selecting — no byte is reduced modulo
+   anything, so no character is favoured. It sits inside the ciphertext, so its content carries no
+   meaning; only its length does, and the bucket decides that. */
 function padFiller(length) {
   if (length <= 0) return '';
-  const bytes = crypto.getRandomValues(new Uint8Array(length));
-  let filler = '';
-  for (const byte of bytes) filler += PAD_ALPHABET[byte % PAD_ALPHABET.length];
-  return filler;
+  const bytes = new Uint8Array(Math.ceil((length * 3) / 4) + 4);
+  crypto.getRandomValues(bytes);
+  return toBase64Url(bytes).slice(0, length);
 }
 
 /**
