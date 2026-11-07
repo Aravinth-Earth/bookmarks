@@ -51,6 +51,10 @@ let syncBusy = false;
 let syncQueued = false;
 let syncTimer = 0;
 let syncLabel = '';
+/* Icon fetching: four hosts at a time, and the vault saved every fifth batch rather than each. */
+const ICON_BATCH = 4;
+const ICON_SAVE_EVERY = 5;
+let iconsBusy = false;
 let lastSyncedAt = 0;
 let plan = null;
 let units = 0;
@@ -1230,46 +1234,76 @@ async function fetchAndStoreIcon(id, hostname) {
   saveNow();
 }
 
-async function fetchMissingIcons() {
+async function fetchMissingIcons({ announceDone = true } = {}) {
+  if (iconsBusy) return 0;
+
   const missing = state.document.bookmarks.filter((bookmark) => !bookmark.icon);
   if (missing.length === 0) {
-    announce('Every bookmark already has an icon.');
-    return;
+    if (announceDone) announce('Every bookmark already has an icon.');
+    return 0;
   }
 
+  /* One request per host. A library repeats a few domains, and the Worker caches per hash, so
+     asking once per bookmark only buys the same answer twice inside this page. */
+  const byHost = new Map();
+  for (const bookmark of missing) {
+    const ids = byHost.get(bookmark.hostname);
+    if (ids) ids.push(bookmark.id);
+    else byHost.set(bookmark.hostname, [bookmark.id]);
+  }
+
+  const hosts = [...byHost.keys()];
   let done = 0;
   let added = 0;
+  let unsavedBatches = 0;
 
-  /* Four at a time: enough to finish a library quickly, few enough that the Worker is not the
-     thing that floods someone's server. */
-  for (let at = 0; at < missing.length; at += 4) {
-    const batch = missing.slice(at, at + 4);
-    const fetched = await Promise.all(
-      batch.map(async (bookmark) => [
-        bookmark.id,
-        await fetchIcon(bookmark.hostname, { fresh: true }).catch(() => null)
-      ])
-    );
+  iconsBusy = true;
+  try {
+    /* Four at a time: enough to finish a library quickly, few enough that the Worker is not the
+       thing that floods someone's server. */
+    for (let at = 0; at < hosts.length; at += ICON_BATCH) {
+      const batch = hosts.slice(at, at + ICON_BATCH);
+      const fetched = await Promise.all(
+        batch.map(async (hostname) => [
+          hostname,
+          await fetchIcon(hostname, { fresh: true }).catch(() => null)
+        ])
+      );
 
-    const icons = fetched.filter(([, icon]) => typeof icon === 'string');
-    if (icons.length > 0) {
-      let next = state.document;
-      for (const [id, icon] of icons) {
-        if (next.bookmarks.some((bookmark) => bookmark.id === id && !bookmark.icon)) {
-          next = updateBookmark(next, id, { icon }, Date.now);
+      const filled = fetched.filter(([, icon]) => typeof icon === 'string');
+      if (filled.length > 0) {
+        let next = state.document;
+        for (const [hostname, icon] of filled) {
+          for (const id of byHost.get(hostname) ?? []) {
+            if (next.bookmarks.some((bookmark) => bookmark.id === id && !bookmark.icon)) {
+              next = updateBookmark(next, id, { icon }, Date.now);
+              added += 1;
+            }
+          }
+        }
+        state.document = next;
+        render();
+
+        /* Saving after every four icons would push the whole sealed blob fifty times for one
+           import; this keeps the loss window small without that. */
+        unsavedBatches += 1;
+        if (unsavedBatches >= ICON_SAVE_EVERY) {
+          await saveNow();
+          unsavedBatches = 0;
         }
       }
-      state.document = next;
-      added += icons.length;
-      render();
-      await saveNow();
+
+      done += batch.length;
+      setVaultStatus(`Fetching icons… ${done}/${hosts.length}`);
     }
 
-    done += batch.length;
-    setVaultStatus(`Fetching icons… ${done}/${missing.length}`);
+    if (unsavedBatches > 0) await saveNow();
+    if (announceDone) announce(`Added ${added} icon${added === 1 ? '' : 's'}.`);
+    return added;
+  } finally {
+    iconsBusy = false;
+    updateStatusLine();
   }
-
-  announce(`Added ${added} icon${added === 1 ? '' : 's'}.`);
 }
 
 async function removeAllIcons() {
@@ -1544,6 +1578,13 @@ async function handleImport() {
   render();
   await saveNow();
   announce(`Imported ${parsed.document.bookmarks.length} bookmarks.`);
+
+  /* An imported file carries no icons of its own — the legacy URLs point at a third party and
+     are deliberately not used — so the same fetch the Settings action runs starts here, without
+     being asked for. */
+  if (state.document.bookmarks.some((bookmark) => !bookmark.icon)) {
+    fetchMissingIcons();
+  }
 }
 
 /* ------------------------------------------------------------------ settings */
