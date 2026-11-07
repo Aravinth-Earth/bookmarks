@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <title>Bookmarks</title>
+    <meta name="description" content="An end-to-end encrypted bookmark vault that keeps working offline. The vault is sealed in this browser and the server cannot read it.">
+    <script src="/w/bookmarks/theme.js"></script>
+    <link rel="stylesheet" href="/css/tokens.css">
+    <link rel="stylesheet" href="/css/themes.css">
+    <link rel="stylesheet" href="/w/bookmarks/bookmarks.css">
+</head>
+<body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <main id="main" class="shell">
+        <header class="masthead">
+            <h1>Bookmarks</h1>
+            <p class="lede">One vault, sealed in this browser. The server only ever holds a sealed blob.</p>
+        </header>
+
+        <section id="lock-view" class="lock" hidden>
+            <form id="lock-form" class="lock-form" novalidate>
+                <label class="field">
+                    <span class="field-label">Your 13-word phrase</span>
+                    <textarea
+                        id="phrase"
+                        class="phrase-input"
+                        rows="3"
+                        autocomplete="off"
+                        autocapitalize="none"
+                        autocorrect="off"
+                        spellcheck="false"
+                        aria-describedby="phrase-hint"
+                        required></textarea>
+                    <span id="phrase-hint" class="field-hint">Thirteen words, separated by spaces. Nothing is sent anywhere.</span>
+                </label>
+
+                <label class="remember">
+                    <input id="remember" type="checkbox" checked>
+                    <span>Stay unlocked on this device</span>
+                </label>
+
+                <p id="lock-error" class="form-error" role="alert" hidden></p>
+
+                <div class="lock-actions">
+                    <button id="unlock-button" class="button button-primary" type="submit">Unlock</button>
+                    <button id="new-vault-button" class="button button-quiet" type="button">New vault</button>
+                    <button id="restore-button" class="button button-quiet" type="button">Restore a backup</button>
+                </div>
+            </form>
+
+            <p class="lock-note">
+                There is no recovery. The phrase is the only key: lose it and the vault cannot be
+                opened by anyone, including whoever runs this server.
+            </p>
+        </section>
+
+        <section id="app-view" class="app" hidden aria-label="Bookmark vault">
+            <div class="toolbar">
+                <label class="search">
+                    <span class="visually-hidden">Search bookmarks</span>
+                    <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M10.5 4a6.5 6.5 0 0 1 5.1 10.5l4.2 4.2-1.4 1.4-4.2-4.2A6.5 6.5 0 1 1 10.5 4Zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z"/>
+                    </svg>
+                    <input
+                        id="search"
+                        type="search"
+                        placeholder="Search"
+                        autocomplete="off"
+                        spellcheck="false">
+                </label>
+
+                <label class="sort">
+                    <span class="visually-hidden">Sort bookmarks</span>
+                    <select id="sort">
+                        <option value="clicks">Most used</option>
+                        <option value="lastClicked">Recently used</option>
+                        <option value="recent">Recently added</option>
+                        <option value="name">Name</option>
+                    </select>
+                </label>
+
+                <label class="view">
+                    <span class="visually-hidden">View</span>
+                    <select id="view" title="Pills for browsing, List to edit or delete">
+                        <option value="pills">Pills</option>
+                        <option value="list">List</option>
+                    </select>
+                </label>
+
+                <button id="add-toggle" class="button add-toggle" type="button" aria-expanded="false" aria-controls="add-form">+ Add</button>
+
+                <button id="settings-button" class="button button-quiet" type="button">Settings</button>
+            </div>
+
+            <form id="add-form" class="add" novalidate hidden>
+                <label class="field field-grow">
+                    <span class="field-label">Address</span>
+                    <input
+                        id="add-url"
+                        type="text"
+                        inputmode="url"
+                        placeholder="example.com"
+                        autocomplete="off"
+                        autocapitalize="none"
+                        spellcheck="false"
+                        required>
+                </label>
+                <label class="field field-grow">
+                    <span class="field-label">Name <em>optional</em></span>
+                    <input
+                        id="add-name"
+                        type="text"
+                        placeholder="Example"
+                        autocomplete="off"
+                        maxlength="120">
+                </label>
+                <div class="add-actions">
+                    <button class="button button-primary add-button" type="submit">Add</button>
+                    <button id="add-cancel" class="button button-quiet" type="button">Cancel</button>
+                </div>
+            </form>
+
+            <p id="vault-status" class="vault-status" role="status" aria-live="polite"></p>
+
+            <ul id="list" class="list" aria-label="Bookmarks"></ul>
+
+            <p id="empty" class="empty" hidden></p>
+        </section>
+    </main>
+
+    <div id="modal-root"></div>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <script type="module" src="/w/bookmarks/app.js"></script>
+</body>
+</html>

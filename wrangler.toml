@@ -1,0 +1,59 @@
+# Bookmarks — a sealed vault served on the public site's own origin.
+#
+# The page and the API share one prefix, and the Worker answers both, so the security headers
+# cannot be bypassed by fetching a static file directly. Same shape as /w/expense-splitter/.
+name = "bookmarks"
+main = "src/index.js"
+compatibility_date = "2026-10-30"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+html_handling = "auto-trailing-slash"
+# A missing page has to link back to whichever prefix served it.
+not_found_handling = "none"
+# Assets would otherwise be served before the Worker, and the page would lose the CSP/HSTS
+# headers the rest of the site sets.
+run_worker_first = true
+
+# One Durable Object per account: the nonce, the session, the sealed vault and its last three
+# versions. SQLite-backed, matching the other app on this zone.
+[[durable_objects.bindings]]
+name = "VAULTS"
+class_name = "Vault"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Vault"]
+
+[[routes]]
+pattern = "www.332321.xyz/w/bookmarks/*"
+zone_name = "332321.xyz"
+
+# A wildcard route does not match the slash-less path, so the bare canonical path needs its own.
+[[routes]]
+pattern = "www.332321.xyz/w/bookmarks"
+zone_name = "332321.xyz"
+
+# The preview route serves the SAME asset tree as the canonical path (the Worker rewrites the
+# prefix), so a branch build can be exercised without touching what visitors see.
+[[routes]]
+pattern = "www.332321.xyz/w/bookmarks-preview/*"
+zone_name = "332321.xyz"
+
+[[routes]]
+pattern = "www.332321.xyz/w/bookmarks-preview"
+zone_name = "332321.xyz"
+
+# Workers Builds runs `npx wrangler preview` for every branch push, and that command refuses to
+# run without this block -- an empty one is enough.
+[previews]
+
+# A Preview gets its own object namespace, so a branch can exercise sync without touching the
+# data production holds.
+[[previews.durable_objects.bindings]]
+name = "VAULTS"
+class_name = "Vault"
+
+[observability]
+enabled = true
