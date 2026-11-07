@@ -43,7 +43,7 @@ test('the initial comes from the name, then the host, and never from "www."', ()
 test('a stored colour wins, and its foreground is readable', () => {
   const light = tileFor({ hostname: 'example.com', name: 'E', color: '#ffff00' });
   assert.equal(light.background, '#ffff00');
-  assert.equal(light.foreground, '#101414', 'dark text on a light tile');
+  assert.equal(light.foreground, '#000000', 'dark text on a light tile');
 
   const dark = tileFor({ hostname: 'example.com', name: 'E', color: '#101020' });
   assert.equal(dark.background, '#101020');
@@ -68,4 +68,30 @@ test('every palette pair carries readable contrast, and luminance is ordered', (
   assert.ok(Math.abs(luminance('#ffffff') - 1) < 1e-9);
   assert.ok(luminance('#ffff00') > luminance('#808080'));
   assert.equal(luminance('nonsense'), 0);
+});
+
+test('every seed colour gets the readable foreground, mid-tones included', async () => {
+  const lin = (channel) => {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  };
+  const lumOf = (hex) => {
+    const [red, green, blue] = hex.match(/[0-9a-f]{2}/gi).map((pair) => Number.parseInt(pair, 16));
+    return 0.2126 * lin(red) + 0.7152 * lin(green) + 0.0722 * lin(blue);
+  };
+  const ratio = (left, right) => {
+    const [high, low] = [lumOf(left), lumOf(right)].sort((a, b) => b - a);
+    return (high + 0.05) / (low + 0.05);
+  };
+
+  /* A sweep of seeds, including the mid-tones where a naive threshold picks white and fails. */
+  const seeds = ['#000000', '#101020', '#3c654f', '#6b4a8f', '#808080', '#9a9a9a', '#ffcc00', '#ffffff'];
+  for (const seed of seeds) {
+    const { foreground } = tileFor({ hostname: 'example.com', name: 'E', color: seed });
+    const reachable = ratio(seed, foreground);
+    assert.ok(reachable >= 4.5, `${seed} with ${foreground} is ${reachable.toFixed(2)}:1`);
+  }
+
+  /* The crossing point itself: a mid grey is better with ink than with white. */
+  assert.equal(foregroundFor('#808080'), '#000000');
 });

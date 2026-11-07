@@ -553,18 +553,16 @@ a:focus-visible {
     gap: 0.35rem;
     padding: 0.28rem 0.65rem;
     border-radius: var(--radius-full, 999px);
-    /* The site's colour is the seed, not the surface: mixing it into the theme's own elevated
-       background keeps every pill inside whichever theme is active, including the light ones. */
-    background: var(--bg-elevated, #161b22);
-    background: color-mix(in srgb, var(--tile-seed) 26%, var(--bg-elevated, #161b22));
-    border: 1px solid color-mix(in srgb, var(--tile-seed) 34%, var(--border, #21262d));
-    color: var(--text-primary, #c9d1d9);
+    /* The site's own colour, at full strength: the pill is a label for that site, and mixing it
+       into the surface turned every pill the same grey. Full strength also means the foreground
+       chosen from that same colour is guaranteed to sit on it. */
+    background: var(--tile-seed, var(--bg-elevated, #161b22));
+    border: 1px solid color-mix(in srgb, var(--tile-seed) 74%, #000);
+    color: var(--tile-fg, var(--text-primary, #c9d1d9));
 }
 
 .list[data-view='pills'] .row:hover {
-    background: var(--bg-elevated, #161b22);
-    background: color-mix(in srgb, var(--tile-seed) 38%, var(--bg-elevated, #161b22));
-    filter: none;
+    filter: brightness(1.12);
 }
 
 .list[data-view='pills'] .row-link {
@@ -606,8 +604,10 @@ a:focus-visible {
     width: 1.3rem;
     height: 1.3rem;
     background: transparent;
-    color: var(--text-primary, #c9d1d9);
-    color: color-mix(in srgb, var(--tile-seed) 68%, var(--text-primary, #c9d1d9));
+    /* On a saturated pill the letter has to follow the pill's own foreground, or a light site
+       colour leaves it invisible. */
+    color: var(--tile-fg, var(--text-primary, #c9d1d9));
+    color: color-mix(in srgb, var(--tile-fg, #ffffff) 92%, transparent);
     font-size: 0.85em;
 }
 
@@ -624,7 +624,8 @@ a:focus-visible {
 }
 
 .list[data-view='pills'] .clicks {
-    color: var(--text-muted, #6e7681);
+    color: var(--tile-fg, var(--text-primary, #c9d1d9));
+    color: color-mix(in srgb, var(--tile-fg, #ffffff) 74%, transparent);
     font-size: 0.8em;
 }
 
