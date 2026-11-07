@@ -722,14 +722,25 @@ async function handleUnlock(event) {
 }
 
 function openCreateModal() {
-  const phrase = generatePhrase();
-  const words = phrase.split(' ');
+  let phrase = generatePhrase();
+  let words = phrase.split(' ');
+  let gridVisible = true;
 
-  const grid = el('div', { class: 'phrase-grid' }, words.map((word) => el('span', { text: word })));
+  const grid = el('div', { class: 'phrase-grid' });
   const copyButton = el('button', {
     class: 'button button-quiet',
     type: 'button',
     text: 'Copy phrase'
+  });
+  const oneLineButton = el('button', {
+    class: 'button button-quiet',
+    type: 'button',
+    text: 'Show the phrase as one line'
+  });
+  const regenerateButton = el('button', {
+    class: 'button button-quiet',
+    type: 'button',
+    text: 'Generate another'
   });
   const saved = el('input', { type: 'checkbox' });
   const createButton = el('button', {
@@ -739,36 +750,66 @@ function openCreateModal() {
     disabled: true
   });
 
+  function renderPhrase() {
+    if (gridVisible) {
+      grid.replaceChildren(...words.map((word) => el('span', { text: word })));
+    } else {
+      grid.replaceChildren(el('span', { text: phrase }));
+    }
+  }
+
+  function showOneLine() {
+    gridVisible = false;
+    oneLineButton.textContent = 'Show the phrase as a grid';
+    renderPhrase();
+  }
+
+  /** Select the whole phrase, so the clipboard fallback is one keypress away. */
+  function selectPhrase() {
+    showOneLine();
+    const span = grid.firstElementChild;
+    if (!span) return;
+    const range = document.createRange();
+    range.selectNodeContents(span);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  renderPhrase();
+
   copyButton.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(phrase);
       copyButton.textContent = 'Copied';
     } catch {
-      copyButton.textContent = 'Select the words and copy';
+      selectPhrase();
+      copyButton.textContent = 'Press Ctrl+C';
     }
-    setTimeout(() => (copyButton.textContent = 'Copy phrase'), 2200);
+    setTimeout(() => (copyButton.textContent = 'Copy phrase'), 2400);
+  });
+
+  oneLineButton.addEventListener('click', () => {
+    gridVisible = !gridVisible;
+    oneLineButton.textContent = gridVisible
+      ? 'Show the phrase as one line'
+      : 'Show the phrase as a grid';
+    renderPhrase();
+  });
+
+  regenerateButton.addEventListener('click', () => {
+    phrase = generatePhrase();
+    words = phrase.split(' ');
+    gridVisible = true;
+    oneLineButton.textContent = 'Show the phrase as one line';
+    copyButton.textContent = 'Copy phrase';
+    saved.checked = false;
+    createButton.disabled = true;
+    renderPhrase();
   });
 
   saved.addEventListener('change', () => {
     createButton.disabled = !saved.checked;
-  });
-
-  const oneLineButton = el('button', {
-    class: 'button button-quiet',
-    type: 'button',
-    text: 'Show the phrase as one line'
-  });
-  let gridVisible = true;
-
-  oneLineButton.addEventListener('click', () => {
-    gridVisible = !gridVisible;
-    if (gridVisible) {
-      grid.replaceChildren(...words.map((word) => el('span', { text: word })));
-      oneLineButton.textContent = 'Show the phrase as one line';
-    } else {
-      grid.replaceChildren(el('span', { text: phrase }));
-      oneLineButton.textContent = 'Show the phrase as a grid';
-    }
   });
 
   const modal = openModal({
@@ -776,9 +817,10 @@ function openCreateModal() {
     body: [
       el('p', {
         class: 'modal-note',
-        text: 'These thirteen words are the vault. They are shown once and are not stored anywhere. Write them down or put them in a password manager before continuing.'
+        text: 'These thirteen words are the vault. They are shown once and are not stored anywhere. Copy them, or write them down, before continuing.'
       }),
       grid,
+      el('div', { class: 'phrase-actions' }, [copyButton, oneLineButton, regenerateButton]),
       el('p', {
         class: 'modal-note',
         text: 'There is no recovery. Anyone with these words can read the vault; anyone without them, including this server, cannot.'
@@ -786,10 +828,9 @@ function openCreateModal() {
       el('label', { class: 'confirm-saved' }, [
         saved,
         el('span', { text: 'I have saved these thirteen words somewhere safe.' })
-      ]),
-      oneLineButton
+      ])
     ],
-    actions: [copyButton, createButton]
+    actions: [createButton]
   });
 
   createButton.addEventListener('click', async () => {
