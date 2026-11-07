@@ -12,6 +12,8 @@
  * `now` is injectable so expiry and lockout are testable without waiting.
  */
 
+import { logEvent } from './events.js';
+
 /* One paid unit is about ten bookmarks; 10 units is about a hundred. The cap is bytes because
    the server cannot count entries in a sealed vault. */
 export const UNIT_CT_CHARS = 14_000;
@@ -193,17 +195,28 @@ export class Vault {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
 
     const body = await readJson(request, MAX_SMALL_BODY);
-    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+    if (body.tooLarge) {
+      /* The body was refused before it was parsed, so there is no account id to name. */
+      await logEvent('create_refused', { route: 'signin', reason: 'too_large' });
+      return json({ error: 'too_large' }, 413);
+    }
 
     const accountId = body.value?.accountId;
     const authSecret = body.value?.authSecret;
 
     if (!ACCOUNT_ID.test(accountId ?? '') || !AUTH_SECRET.test(authSecret ?? '')) {
+      /* Whatever was presented is not an account id or a secret, and is not written down. */
+      await logEvent('create_refused', { route: 'signin', reason: 'invalid' });
       return json({ error: 'invalid' }, 400);
     }
     /* The object's own name is the account id, so a provisioning call cannot write one
        account's secret into another account's object. */
     if (this.ctx.id?.name && this.ctx.id.name !== accountId) {
+      await logEvent('create_refused', {
+        route: 'signin',
+        reason: 'mismatch',
+        account: accountId
+      });
       return json({ error: 'mismatch' }, 400);
     }
 
@@ -234,6 +247,11 @@ export class Vault {
        presenting the same id with a different secret can never re-claim it. */
     const expected = existing ? existing.authSecret : authSecret;
     if (!(await verifyProof(expected, accountId, challenge.value, proof))) {
+      await logEvent('create_refused', {
+        route: 'signin',
+        reason: 'bad_proof',
+        account: accountId
+      });
       return json({ error: 'bad_proof' }, 401);
     }
 
@@ -262,7 +280,15 @@ export class Vault {
           body: JSON.stringify({ accountId })
         })
       );
-      if (!reserved.ok) return json({ error: 'full' }, 429);
+      if (!reserved.ok) {
+        /* The cap is the Registry's answer, and the reason this creation wrote nothing. */
+        await logEvent('create_refused', {
+          route: 'signin',
+          reason: 'cap_full',
+          account: accountId
+        });
+        return json({ error: 'full' }, 429);
+      }
     }
 
     /* Creation always starts free. Ownership is only granted after a successful proof of the
@@ -317,17 +343,33 @@ export class Vault {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
 
     let account = await this.storage.get('account');
-    if (!account) return json({ error: 'no_account' }, 404);
+    if (!account) {
+      /* No account answers to this id, so there is no account reference to write either. */
+      await logEvent('signin_failed', { route: 'signin', reason: 'no_account' });
+      return json({ error: 'no_account' }, 404);
+    }
 
     const now = this.now();
     const lock = (await this.storage.get('lock')) ?? { failures: 0, until: 0 };
     if (lock.until > now) {
-      return json({ error: 'locked', retryAfter: Math.ceil((lock.until - now) / 1000) }, 429);
+      const retryAfter = Math.ceil((lock.until - now) / 1000);
+      await logEvent('signin_locked', {
+        route: 'signin',
+        reason: 'locked',
+        account: account.accountId,
+        retry_after: retryAfter
+      });
+      return json({ error: 'locked', retryAfter }, 429);
     }
 
     const nonce = await this.storage.get('nonce');
     if (!nonce || nonce.expiresAt <= now) {
       await this.storage.delete('nonce');
+      await logEvent('signin_failed', {
+        route: 'signin',
+        reason: 'challenge_expired',
+        account: account.accountId
+      });
       return json({ error: 'challenge_expired' }, 401);
     }
     /* Single use: spent whether the proof is right or wrong, so a captured proof cannot be
@@ -335,7 +377,14 @@ export class Vault {
     await this.storage.delete('nonce');
 
     const body = await readJson(request, MAX_SMALL_BODY);
-    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+    if (body.tooLarge) {
+      await logEvent('signin_failed', {
+        route: 'signin',
+        reason: 'too_large',
+        account: account.accountId
+      });
+      return json({ error: 'too_large' }, 413);
+    }
 
     const proof = body.value?.proof;
     const client = CLIENT_KINDS.has(body.value?.client) ? body.value.client : 'unknown';
@@ -345,6 +394,12 @@ export class Vault {
         : false;
 
     if (!ok) {
+      await logEvent('signin_failed', {
+        route: 'signin',
+        reason: 'bad_proof',
+        account: account.accountId
+      });
+
       const failures = lock.failures + 1;
       const locked = failures >= MAX_FAILURES;
       await this.storage.put('lock', {

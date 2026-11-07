@@ -14,6 +14,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import worker, { LIMITS } from '../src/index.js';
+import { quiet } from './logs.mjs';
+
+/* The refusals here are about the counter, not the line the refusal writes. */
+quiet();
 
 const ACCOUNT = 'B'.repeat(22);
 const SOURCE = '203.0.113.7';

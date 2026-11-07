@@ -23,6 +23,11 @@ import {
 import { Registry } from '../src/registry.js';
 import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
+import { quiet } from './logs.mjs';
+
+/* These tests are about what the object answers and stores; the lines its refusals write are
+   tested in events.test.mjs. */
+quiet();
 
 const PHRASE = WORDLIST.slice(0, 13).join(' ');
 const ACCOUNT = await deriveAccount(PHRASE);

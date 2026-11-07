@@ -23,6 +23,7 @@ sealed blob.
 src/index.js                  the Worker: security headers, routing, the API, the icon proxy
 src/vault.js                  one Durable Object per account: nonce, sessions, sealed vault
 src/registry.js               one Durable Object that caps how many accounts may exist
+src/events.js                 the one shape a logged event has, and the digest it names an account by
 public/w/bookmarks/crypto.js  phrase -> account id, key and auth secret; seal and open
 public/w/bookmarks/vault.js   this device's copy: one sealed blob, a bounded history
 public/w/bookmarks/bookmarks.js  the document: add, edit, delete, sort, filter, merge
@@ -127,6 +128,35 @@ in that file and the `LIMITS` table in `src/index.js` disagree.
 
 A challenge is valid for 60 seconds, and asking for one again during that time returns the same
 nonce. A sign-in that is already in progress therefore completes whatever else arrives.
+
+## Events
+
+Observability is on for the Worker, and each refusal is written as one JSON line through
+`console.log`, which is what it captures. A request that is served writes nothing, so a line
+means something was refused or failed:
+
+```json
+{"event":"signin_failed","route":"signin","reason":"bad_proof","account":"9f2c1ab04d7e"}
+```
+
+| Field | Value |
+|---|---|
+| `event` | `signin_failed`, `signin_locked`, `create_refused`, `rate_limited`, `proxy_refused`, `server_error` |
+| `route` | The class the route is counted as — `signin`, `fetch` or `vault` — or `api` when an exception surfaced before a class was known |
+| `reason` | The code the refusing branch answered with: `bad_proof`, `challenge_expired`, `no_account`, `too_large`, `cap_full`, `invalid`, `mismatch`, `locked`, `over_limit`, `bad_host`, `blocked_host`, `bad_hash`, `timeout`, `fetch_failed`, `unhandled` |
+| `account` | The first 12 hex characters of SHA-256(account id), present when the branch holds the account. The id itself is never written. |
+| `retry_after` | Whole seconds; on `rate_limited` and `signin_locked` only |
+
+The shape is defined once, in `src/events.js`, and `logEvent` is the only writer. It takes an
+event name, a fixed reason code and at most an account id, and the id leaves only as that digest
+prefix. The phrase, the auth secret, a proof, a nonce, a session token, a sealed blob, a
+hostname and the caller's address are not fields and never appear; the rate limiter keys on a
+digest of its own and never passes it here.
+
+The account object writes `signin_failed`, `signin_locked` and `create_refused`. The Worker
+writes `rate_limited`, `proxy_refused` and `server_error`. `tests/events.test.mjs` reads the
+lines the way the platform would — by capturing the console — and checks both the fields and the
+absence of anything identifying.
 
 ## Secrets
 
