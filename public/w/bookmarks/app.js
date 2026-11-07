@@ -35,6 +35,7 @@ import { tileFor } from './tiles.js';
 import { fetchIcon, fetchPageTitle } from './icons.js';
 import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
+import { formatStamp } from './stamps.js';
 
 const store = createVault(indexedDbAdapter());
 
@@ -70,6 +71,9 @@ let units = 0;
 let trialEndsAt = null;
 /* How many places are signed in to this account, as of the last sign-in or the last check. */
 let placesCount = null;
+/* The account's own dates, as the sign-in answer carried them, in milliseconds. */
+let vaultCreatedAt = null;
+let lastActivityAt = null;
 
 let saving = false;
 let dirty = false;
@@ -572,6 +576,10 @@ function applyPlan(payload) {
   units = Number.isInteger(payload?.units) ? payload.units : 0;
   trialEndsAt = typeof payload?.trialEndsAt === 'number' ? payload.trialEndsAt : null;
   if (Number.isInteger(payload?.places)) placesCount = payload.places;
+  /* The same answer carries the account's own dates, so Settings needs no second request. Only a
+     proof of the phrase receives them, and this client has one by the time it reads them. */
+  vaultCreatedAt = typeof payload?.createdAt === 'number' ? payload.createdAt : null;
+  lastActivityAt = typeof payload?.lastSeenAt === 'number' ? payload.lastSeenAt : null;
   renderPlanNote();
 }
 
@@ -2115,6 +2123,32 @@ function openSettings() {
     return button;
   };
 
+  /* A fact about the account, not an action: no press, and a dash where the vault has no such
+     moment. Both are read on this device's clock, so the hour is the hour the owner sees. The
+     value element is kept so it can be filled when the account answers later. */
+  const stampRows = [];
+  const stampRow = (title, read) => {
+    const value = el('span', { text: formatStamp(read()) });
+    stampRows.push({ read, value });
+    return el('div', { class: 'settings-item settings-stamp' }, [
+      el('strong', { text: title }),
+      value
+    ]);
+  };
+
+  /* A session lives only in memory, so a reload leaves the account's dates unknown until the next
+     sign-in. Opening Settings asks for them once, rather than showing a dash until something else
+     happens to sync. A failure leaves the dashes in place and says nothing. */
+  const fillStamps = async () => {
+    if (!syncEnabled() || (vaultCreatedAt && lastActivityAt)) return;
+    try {
+      if (!sync.signedIn) applyPlan(await sync.login(state.accountId, state.authSecret));
+      for (const row of stampRows) row.value.textContent = formatStamp(row.read());
+    } catch {
+      /* The dash stands for "not known on this device yet". */
+    }
+  };
+
   const modal = openModal({
     title: 'Settings',
     body: [
@@ -2122,6 +2156,11 @@ function openSettings() {
         class: 'modal-note',
         text: `${count} bookmarks in this vault · version ${state.version} · ${planLabel()}.`
       }),
+      el('h3', { class: 'settings-heading', text: 'Account' }),
+      el('div', { class: 'settings-list' }, [
+        stampRow('Vault created', () => vaultCreatedAt),
+        stampRow('Last activity', () => lastActivityAt)
+      ]),
       el('h3', { class: 'settings-heading', text: 'Appearance' }),
       el('label', { class: 'field' }, [
         el('span', { class: 'field-label', text: 'Text size' }),
@@ -2273,6 +2312,8 @@ function openSettings() {
         : [el('p', { class: 'modal-note settings-version', text: `Version ${runningVersion}` })])
     ]
   });
+
+  fillStamps();
 }
 
 async function lockVault() {
@@ -2292,6 +2333,8 @@ async function lockVault() {
   plan = null;
   units = 0;
   trialEndsAt = null;
+  vaultCreatedAt = null;
+  lastActivityAt = null;
   planNote.hidden = true;
   list.replaceChildren();
   showLock('Locked. Enter your phrase to reopen the vault.', { hasVault: true });
