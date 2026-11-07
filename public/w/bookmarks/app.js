@@ -21,6 +21,7 @@ import {
   updateBookmark
 } from './bookmarks.js';
 import { deriveAccount, generatePhrase, open, phraseProblem, seal } from './crypto.js';
+import { CLIPBOARD_CLEAR_MS, clearPhraseField, overwriteClipboard } from './hygiene.js';
 import {
   ICON_TRIES_KEY,
   SIZE_KEY,
@@ -49,6 +50,9 @@ const store = createVault(indexedDbAdapter());
 
 const state = {
   accountId: null,
+  /* The signing key, non-extractable; and the base64url secret the server is given at creation,
+     which is dropped as soon as the account exists. */
+  authKey: null,
   authSecret: null,
   key: null,
   version: 0,
@@ -649,7 +653,7 @@ async function openPlaces() {
   let data;
   try {
     if (!sync.signedIn) {
-      const session = await sync.login(state.accountId, state.authSecret);
+      const session = await sync.login(state.accountId, authMaterial());
       applyPlan(session);
     }
     data = await sync.sessions();
@@ -750,12 +754,20 @@ function handleSyncError(error) {
 }
 
 /**
+ * What signs a login proof: the non-extractable key when this session has one, and otherwise the
+ * base64url secret, which only exists between an unlock and the account's creation.
+ */
+function authMaterial() {
+  return state.authKey ?? state.authSecret;
+}
+
+/**
  * One reconcile: sign in if needed, read the server's blob, merge it into this device, then
  * push if this device knows something the server does not. A conflict is merged and retried
  * once; a second conflict means two devices are writing faster than one can settle.
  */
 async function syncNow() {
-  if (!syncEnabled() || !state.key || !state.authSecret) return;
+  if (!syncEnabled() || !state.key || !authMaterial()) return;
   if (syncBusy) {
     syncQueued = true;
     return;
@@ -769,7 +781,7 @@ async function syncNow() {
       let session;
 
       try {
-        session = await sync.login(state.accountId, state.authSecret);
+        session = await sync.login(state.accountId, authMaterial());
       } catch (error) {
         if (error.code !== 'NO_ACCOUNT') throw error;
 
@@ -782,7 +794,10 @@ async function syncNow() {
           throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
         }
         await sync.register(state.accountId, state.authSecret);
-        session = await sync.login(state.accountId, state.authSecret);
+        /* The server now holds the secret, so this page does not: from here the session signs
+           with the non-extractable key and nothing else. */
+        state.authSecret = null;
+        session = await sync.login(state.accountId, authMaterial());
       }
 
       applyPlan(session);
@@ -883,8 +898,9 @@ function showLock(message = '', { hasVault = null } = {}) {
   phraseInput.focus();
 }
 
-function enter({ accountId, authSecret, key, version, sealed, document: vaultDocument }) {
+function enter({ accountId, authSecret, authKey = null, key, version, sealed, document: vaultDocument }) {
   state.accountId = accountId;
+  state.authKey = authKey ?? null;
   state.authSecret = authSecret ?? null;
   state.key = key;
   state.version = version;
@@ -938,7 +954,8 @@ async function tryRemembered() {
     const vaultDocument = await open(key, stored.sealed, remembered.accountId);
     enter({
       accountId: remembered.accountId,
-      authSecret: remembered.authKey ?? null,
+      authSecret: null,
+      authKey: remembered.authKey ?? null,
       key,
       version: stored.version,
       sealed: stored.sealed,
@@ -956,7 +973,10 @@ async function handleUnlock(event) {
   event.preventDefault();
   showLockError('');
 
+  /* The field is cleared on every attempt, before anything else can fail: a shared machine must
+     not be left showing the phrase of the person who tried a moment ago. */
   const phrase = phraseInput.value;
+  clearPhraseField(phraseInput);
   const problem = phraseProblem(phrase);
   if (problem) {
     showLockError(problem);
@@ -980,13 +1000,13 @@ async function handleUnlock(event) {
     enter({
       accountId,
       authSecret,
+      authKey,
       key: vaultKey,
       version: stored.version,
       sealed: stored.sealed,
       document: vaultDocument
     });
 
-    phraseInput.value = '';
     if (!stored.sealed) {
       await saveNow();
       await offerServerVault();
@@ -1007,7 +1027,7 @@ async function handleUnlock(event) {
  * asked whether a copy exists without knowing the key: if it does, offer to load it.
  */
 async function offerServerVault() {
-  if (!state.authSecret || hasBookmarks()) return;
+  if (!authMaterial() || hasBookmarks()) return;
 
   let exists;
   try {
@@ -1111,10 +1131,38 @@ function openCreateModal() {
     }, 2400);
   }
 
+  /* The clipboard is the second place a phrase outlives its use. A copy is overwritten after a
+     short delay, and when the dialog closes, so a machine handed to someone else does not keep
+     the master secret on its clipboard. The write only happens while the clipboard still holds
+     the phrase: a person may have copied something else, and that is not ours to erase. */
+  let clipboardTimer = 0;
+  let copiedPhrase = '';
+
+  function scheduleClipboardClear(copied) {
+    copiedPhrase = copied;
+    clearTimeout(clipboardTimer);
+    clipboardTimer = setTimeout(clearCopiedPhrase, CLIPBOARD_CLEAR_MS);
+  }
+
+  function clearCopiedPhrase() {
+    clearTimeout(clipboardTimer);
+    if (!copiedPhrase) return;
+    const phraseToClear = copiedPhrase;
+    copiedPhrase = '';
+    overwriteClipboard({
+      phrase: phraseToClear,
+      read: () => navigator.clipboard.readText(),
+      write: (text) => navigator.clipboard.writeText(text)
+    }).catch(() => {});
+  }
+
   copyButton.addEventListener('click', async () => {
+    const copied = phrase;
+
     try {
-      await navigator.clipboard.writeText(phrase);
+      await navigator.clipboard.writeText(copied);
       feedback('Copied', true);
+      scheduleClipboardClear(copied);
       return;
     } catch {
       /* Fall through to the selection-based copy. */
@@ -1122,6 +1170,7 @@ function openCreateModal() {
 
     if (copyWithSelection()) {
       feedback('Copied', true);
+      scheduleClipboardClear(copied);
       return;
     }
 
@@ -1162,7 +1211,8 @@ function openCreateModal() {
         el('span', { text: 'I have saved these thirteen words somewhere safe.' })
       ])
     ],
-    actions: [createButton]
+    actions: [createButton],
+    onClose: clearCopiedPhrase
   });
 
   createButton.addEventListener('click', async () => {
@@ -1188,7 +1238,7 @@ async function createNewVault(phrase, remember) {
   if (remember) await store.remember(accountId, vaultKey, authKey);
   else await store.forget();
 
-  enter({ accountId, authSecret, key: vaultKey, version: 1, sealed, document: vaultDocument });
+  enter({ accountId, authSecret, authKey, key: vaultKey, version: 1, sealed, document: vaultDocument });
   setAddForm(true);
   announce('Vault created. Add a bookmark, or import a file from Settings.');
 }
@@ -1225,6 +1275,7 @@ async function handleRestore() {
   }
 
   const phrase = phraseInput.value;
+  clearPhraseField(phraseInput);
   if (phrase.trim() === '') {
     showLockError('Enter the 13-word phrase for the backup, then restore it again.');
     phraseInput.focus();
@@ -1241,7 +1292,7 @@ async function handleRestore() {
     if (rememberInput.checked) await store.remember(accountId, vaultKey, authKey);
     else await store.forget();
 
-    enter({ accountId, authSecret, key: vaultKey, version, sealed, document: vaultDocument });
+    enter({ accountId, authSecret, authKey, key: vaultKey, version, sealed, document: vaultDocument });
     announce('Backup restored.');
   } catch (error) {
     showLockError(messageFor(error));
@@ -2079,13 +2130,15 @@ function promptForSyncPhrase() {
       error.hidden = true;
       confirm.disabled = true;
       confirm.textContent = 'Checking…';
+      const typed = phrase.value;
+      clearPhraseField(phrase);
       try {
-        const { accountId, authSecret } = await deriveAccount(phrase.value);
+        const { accountId, authSecret, authKey } = await deriveAccount(typed);
         if (accountId !== state.accountId) {
           throw new Error('That phrase belongs to a different vault.');
         }
         settled = true;
-        resolve(authSecret);
+        resolve({ authSecret, authKey });
         modal.close();
       } catch (problem) {
         error.textContent = clean(problem.message);
@@ -2159,7 +2212,7 @@ function openSettings() {
   const fillStamps = async () => {
     if (!syncEnabled() || (vaultCreatedAt && lastActivityAt)) return;
     try {
-      if (!sync.signedIn) applyPlan(await sync.login(state.accountId, state.authSecret));
+      if (!sync.signedIn) applyPlan(await sync.login(state.accountId, authMaterial()));
       for (const row of stampRows) row.value.textContent = formatStamp(row.read());
     } catch {
       /* The dash stands for "not known on this device yet". */
@@ -2247,12 +2300,15 @@ function openSettings() {
             modal.close();
 
             if (enable && typeof state.authSecret !== 'string') {
-              const secret = await promptForSyncPhrase();
-              if (!secret) return;
+              const derived = await promptForSyncPhrase();
+              if (!derived) return;
 
-              state.authSecret = secret;
+              state.authSecret = derived.authSecret;
+              state.authKey = derived.authKey;
+              /* The remembered record takes the signing key: the secret the server is given is
+                 the one value that must not be written to this device. */
               const remembered = await store.readRemembered();
-              if (remembered) await store.remember(state.accountId, remembered.key, secret);
+              if (remembered) await store.remember(state.accountId, remembered.key, derived.authKey);
             }
 
             setPrefs({ sync: enable });
@@ -2338,6 +2394,7 @@ async function lockVault() {
   await sync.logout();
   await store.forget();
   state.accountId = null;
+  state.authKey = null;
   state.authSecret = null;
   state.key = null;
   state.version = 0;
