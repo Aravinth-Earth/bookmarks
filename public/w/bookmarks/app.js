@@ -55,6 +55,8 @@ let lastSyncedAt = 0;
 let plan = null;
 let units = 0;
 let trialEndsAt = null;
+/* How many places are signed in to this account, as of the last sign-in or the last check. */
+let placesCount = null;
 
 let saving = false;
 let dirty = false;
@@ -427,6 +429,7 @@ function applyPlan(payload) {
   plan = payload?.plan ?? null;
   units = Number.isInteger(payload?.units) ? payload.units : 0;
   trialEndsAt = typeof payload?.trialEndsAt === 'number' ? payload.trialEndsAt : null;
+  if (Number.isInteger(payload?.places)) placesCount = payload.places;
   renderPlanNote();
 }
 
@@ -451,6 +454,83 @@ function renderPlanNote() {
     return;
   }
   planNote.textContent = `Free sync · ${days} day${days === 1 ? '' : 's'} left. Your bookmarks stay on this device either way.`;
+}
+
+/**
+ * Where this vault is signed in, as far as the account itself knows. The server keeps one
+ * session per sign-in; this reads their count and stamps, and nothing else about them.
+ */
+function placesDetail() {
+  if (!syncEnabled()) return 'Off while Sync is off.';
+  if (placesCount === null) return 'See where this account is signed in.';
+  const noun = placesCount === 1 ? 'place is' : 'places are';
+  return `${placesCount} ${noun} signed in to this account. Tap to see them.`;
+}
+
+function placeName(client) {
+  if (client === 'mobile') return 'Phone';
+  if (client === 'desktop') return 'Computer';
+  return 'Unknown device';
+}
+
+function whenTime(stamp) {
+  if (!stamp) return 'unknown time';
+  return new Date(stamp).toLocaleString([], {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+async function openPlaces() {
+  if (!syncEnabled()) {
+    announce('Sync is off, so this vault is not signed in anywhere.');
+    return;
+  }
+
+  let data;
+  try {
+    if (!sync.signedIn) {
+      const session = await sync.login(state.accountId, state.authSecret);
+      applyPlan(session);
+    }
+    data = await sync.sessions();
+  } catch (error) {
+    if (error?.code === 'UNAUTHORIZED') {
+      sync.token = null;
+      announce('The session expired. Try again.');
+      return;
+    }
+    announce('Could not read the connected places.');
+    return;
+  }
+
+  placesCount = data.count;
+
+  openModal({
+    title: 'Connected places',
+    body: [
+      el('p', {
+        class: 'modal-note',
+        text: `${data.count} ${data.count === 1 ? 'place is' : 'places are'} signed in to this account. Each signed in with the phrase; this list is account metadata — a session carries the sealed blob and nothing that opens it.`
+      }),
+      el(
+        'ul',
+        { class: 'places-list' },
+        data.sessions.map((session) =>
+          el('li', { class: 'places-row' }, [
+            el('strong', {
+              text: `${placeName(session.client)}${session.current ? ' · this device' : ''}`
+            }),
+            el('span', {
+              text: `signed in ${whenTime(session.createdAt)} · last active ${whenTime(session.lastSeenAt)}`
+            })
+          ])
+        )
+      )
+    ]
+  });
 }
 
 function planLabel() {
@@ -711,7 +791,10 @@ async function handleUnlock(event) {
     });
 
     phraseInput.value = '';
-    if (!stored.sealed) await saveNow();
+    if (!stored.sealed) {
+      await saveNow();
+      await offerServerVault();
+    }
   } catch (error) {
     showLockError(messageFor(error));
     phraseInput.focus();
@@ -719,6 +802,47 @@ async function handleUnlock(event) {
     unlockButton.disabled = false;
     unlockButton.textContent = 'Unlock';
   }
+}
+
+/**
+ * A phrase entered on a device that has never held this vault opens an empty one, and Sync —
+ * the thing that would fetch the real copy — is a preference inside the vault. So a new device
+ * sits empty and reads as lost data. The account id comes from the phrase, so the server can be
+ * asked whether a copy exists without knowing the key: if it does, offer to load it.
+ */
+async function offerServerVault() {
+  if (!state.authSecret || hasBookmarks()) return;
+
+  let exists;
+  try {
+    exists = await sync.accountExists(state.accountId);
+  } catch {
+    return; /* Offline, or the question could not be asked: stay local, say nothing. */
+  }
+  if (!exists) return;
+
+  const load = await askModal({
+    title: 'This vault is on the server',
+    body: [
+      el('p', {
+        class: 'modal-note',
+        text: 'A synced copy of this account exists. Loading brings its bookmarks to this device and leaves Sync on. Starting empty keeps this device on its own for now; Sync can be turned on later in Settings.'
+      })
+    ],
+    confirmLabel: 'Load from server',
+    cancelLabel: 'Start empty'
+  });
+  if (!load) return;
+
+  state.document = { ...state.document, prefs: { ...state.document.prefs, sync: true } };
+  render();
+  await saveNow({ push: false });
+  await syncNow();
+}
+
+/* Only an empty vault is worth asking about: anything already here wins over a prompt. */
+function hasBookmarks() {
+  return (state.document?.bookmarks.length ?? 0) > 0;
 }
 
 function openCreateModal() {
@@ -1643,6 +1767,10 @@ function openSettings() {
           }
           await syncNow();
           announce(syncLabel || 'Synced.');
+        }),
+        item('Connected places', placesDetail(), async () => {
+          modal.close();
+          await openPlaces();
         }),
         item(
           'Account id',

@@ -10,6 +10,20 @@
 
 import { proveAuth } from './crypto.js';
 
+/**
+ * The only thing the server is told about this device: one word, no user agent, no name.
+ * It is what makes the account's session list readable as "2 places".
+ */
+export function clientKind() {
+  try {
+    const coarse = globalThis.matchMedia?.('(pointer: coarse)');
+    if (!coarse) return 'unknown';
+    return coarse.matches ? 'mobile' : 'desktop';
+  } catch {
+    return 'unknown';
+  }
+}
+
 export class SyncError extends Error {
   constructor(code, message, { status = 0, current = null, currentVersion = 0 } = {}) {
     super(message);
@@ -62,7 +76,10 @@ export class SyncClient {
     }
 
     const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
-    const session = await this.request(`/a/${accountId}/login`, { method: 'POST', body: { proof } });
+    const session = await this.request(`/a/${accountId}/login`, {
+      method: 'POST',
+      body: { proof, client: clientKind() }
+    });
 
     if (session.status === 429) {
       throw new SyncError('LOCKED', 'Too many attempts. Try again later.', { status: 429 });
@@ -96,6 +113,36 @@ export class SyncClient {
     throw new SyncError('REGISTER_FAILED', 'Could not create the account.', {
       status: response.status
     });
+  }
+
+  /**
+   * Whether this account exists on the server, answered without a session. The challenge route
+   * is the cheapest honest question: it 404s for an account that was never created.
+   */
+  async accountExists(accountId) {
+    const response = await this.request(`/a/${accountId}/challenge`, { method: 'POST' });
+    if (response.status === 404) return false;
+    if (response.ok && typeof response.payload.nonce === 'string') return true;
+    throw new SyncError('CHALLENGE_FAILED', 'The server did not answer.', {
+      status: response.status
+    });
+  }
+
+  /** The places this account is signed in on. Needs a live session; no key material moves. */
+  async sessions() {
+    this.requireSession();
+    const response = await this.request(`/a/${this.accountId}/sessions`, { token: this.token });
+
+    if (response.status === 401) {
+      this.token = null;
+      throw new SyncError('UNAUTHORIZED', 'The session expired.');
+    }
+    if (!response.ok) {
+      throw new SyncError('SESSIONS_FAILED', 'Could not read the connected places.', {
+        status: response.status
+      });
+    }
+    return response.payload;
   }
 
   /** @returns {Promise<{version: number, iv: string, ct: string, updatedAt: number} | null>} */

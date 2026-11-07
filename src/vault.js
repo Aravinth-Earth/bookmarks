@@ -25,6 +25,13 @@ const OWNER_RECHECK_MS = 365 * 24 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 3;
 const NONCE_TTL_MS = 60_000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/* A session's last-seen stamp is written only when it is this stale, so an ordinary read or
+   write does not each cost a storage write. */
+const LAST_SEEN_STEP_MS = 60 * 60 * 1000;
+/* What a client says it is. Anything else is stored as unknown; no user agent is kept. */
+const CLIENT_KINDS = new Set(['mobile', 'desktop']);
+/* One sign-in is one place. The oldest are dropped rather than accumulated forever. */
+const MAX_SESSIONS = 20;
 const MAX_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 
@@ -155,6 +162,7 @@ export class Vault {
     if (path === '/challenge') return this.challenge(request);
     if (path === '/login') return this.login(request);
     if (path === '/logout') return this.logout(request);
+    if (path === '/sessions' && request.method === 'GET') return this.listSessions(request);
     if (path === '/vault' && request.method === 'GET') return this.readVault(request);
     if (path === '/vault' && request.method === 'PUT') return this.writeVault(request);
 
@@ -260,6 +268,7 @@ export class Vault {
     if (body.tooLarge) return json({ error: 'too_large' }, 413);
 
     const proof = body.value?.proof;
+    const client = CLIENT_KINDS.has(body.value?.client) ? body.value.client : 'unknown';
     const ok =
       typeof proof === 'string' && proof.length > 0
         ? await verifyProof(account.authSecret, account.accountId, nonce.value, proof)
@@ -284,7 +293,15 @@ export class Vault {
 
     const token = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = now + SESSION_TTL_MS;
-    await this.storage.put(`session:${await sessionHash(token)}`, { expiresAt, createdAt: now });
+    await this.storage.put(`session:${await sessionHash(token)}`, {
+      expiresAt,
+      createdAt: now,
+      lastSeenAt: now,
+      client
+    });
+
+    /* So the app can say "3 places" the moment it signs in, without a second request. */
+    const places = await this.trimSessions();
 
     return json({
       token,
@@ -292,7 +309,8 @@ export class Vault {
       plan: account.plan ?? 'free',
       units: account.units ?? 0,
       trialEndsAt: account.trialEndsAt ?? null,
-      paidUntil: account.paidUntil ?? null
+      paidUntil: account.paidUntil ?? null,
+      places
     });
   }
 
@@ -302,6 +320,32 @@ export class Vault {
 
     await this.storage.delete(`session:${auth}`);
     return json({ ok: true });
+  }
+
+  /**
+   * The places this account is signed in on.
+   *
+   * Only a session may ask, and only counts and timestamps leave: a session hash never does, so
+   * knowing how many places exist cannot be turned into opening one of them. Nothing about a
+   * bookmark, a name or a key is involved — this is account metadata, not vault content.
+   */
+  async listSessions(request) {
+    const auth = await this.authorize(request);
+    if (!auth) return json({ error: 'unauthorized' }, 401);
+
+    await this.pruneSessions();
+
+    const sessions = [...(await this.storage.list({ prefix: 'session:' }))]
+      .map(([key, session]) => ({
+        client: CLIENT_KINDS.has(session.client) ? session.client : 'unknown',
+        createdAt: session.createdAt ?? 0,
+        lastSeenAt: session.lastSeenAt ?? session.createdAt ?? 0,
+        expiresAt: session.expiresAt ?? 0,
+        current: key === `session:${auth}`
+      }))
+      .sort((left, right) => right.lastSeenAt - left.lastSeenAt);
+
+    return json({ count: sessions.length, sessions });
   }
 
   async readVault(request) {
@@ -459,6 +503,13 @@ export class Vault {
       await this.storage.delete(`session:${hash}`);
       return null;
     }
+
+    /* "Connected places" is only useful if the list shows real activity, but a write per
+       request would be wasteful — an hour of drift is enough to answer it. */
+    const stamp = this.now();
+    if (!session.lastSeenAt || stamp - session.lastSeenAt >= LAST_SEEN_STEP_MS) {
+      await this.storage.put(`session:${hash}`, { ...session, lastSeenAt: stamp });
+    }
     return hash;
   }
 
@@ -468,6 +519,16 @@ export class Vault {
     for (const [key, session] of sessions) {
       if (session.expiresAt <= now) await this.storage.delete(key);
     }
+  }
+
+  /** Drop all but the newest sessions, and report how many places are left. */
+  async trimSessions(keep = MAX_SESSIONS) {
+    await this.pruneSessions();
+    const entries = [...(await this.storage.list({ prefix: 'session:' }))].sort(
+      (left, right) => (right[1].lastSeenAt ?? 0) - (left[1].lastSeenAt ?? 0)
+    );
+    for (const [key] of entries.slice(keep)) await this.storage.delete(key);
+    return Math.min(entries.length, keep);
   }
 
   async pruneHistory() {
