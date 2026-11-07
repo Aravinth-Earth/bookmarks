@@ -31,7 +31,7 @@ import {
 } from './import-export.js';
 import { tileFor } from './tiles.js';
 import { fetchIcon, fetchPageTitle } from './icons.js';
-import { SyncClient, SyncError } from './sync.js';
+import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
 
 const store = createVault(indexedDbAdapter());
@@ -104,6 +104,8 @@ const viewHint = $('view-hint');
 const vaultStatus = $('vault-status');
 const status = $('status');
 const planNote = $('plan-note');
+const syncRefusal = $('sync-refusal');
+const syncRefusalDismiss = $('sync-refusal-dismiss');
 
 /* ------------------------------------------------------------------ appearance */
 
@@ -497,6 +499,7 @@ function applyPrefs() {
   if (VIEWS.has(prefs.view)) currentView = prefs.view;
   writePref(VIEW_KEY, currentView);
   applyAppearance();
+  if (prefs.sync !== true) clearSyncRefusal({ reset: true });
 }
 
 /* ---------------------------------------------------------------------- sync */
@@ -504,6 +507,27 @@ function applyPrefs() {
 function syncEnabled() {
   return state.document?.prefs?.sync === true;
 }
+
+/**
+ * A refusal to create the account is not a passing message, so it is not shown in the status
+ * pill: that fades, and this one has an address to read and a decision to make. It stays in the
+ * page until the person dismisses it or turns Sync off, and it never covers the vault.
+ */
+let syncRefusalDismissed = false;
+
+function showSyncRefusal() {
+  if (syncRefusalDismissed || !syncEnabled()) return;
+  syncRefusal.hidden = false;
+}
+
+function clearSyncRefusal({ reset = false } = {}) {
+  syncRefusal.hidden = true;
+  if (reset) syncRefusalDismissed = false;
+}
+
+/* The vault syncs after every change; the same unreachable server must not re-announce itself
+   on each one. A successful sync clears this, so a later outage is news again. */
+let lastSyncNotice = '';
 
 /**
  * A stable comparison for "did this actually change". Merge order and array order are not
@@ -660,47 +684,45 @@ function planLabel() {
 
 function markSynced() {
   lastSyncedAt = Date.now();
+  lastSyncNotice = '';
   const at = new Date(lastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   setSyncStatus(`Synced ${at}`);
 }
 
 function handleSyncError(error) {
-  if (error?.code === 'TRIAL_ENDED') {
+  /* A failed attempt can land after Sync was turned off; nothing about it should repaint then. */
+  if (!syncEnabled()) return;
+
+  const failure = describeSyncFailure(error);
+
+  if (failure.kind === 'cap') {
+    setSyncStatus(failure.label);
+    showSyncRefusal();
+    return;
+  }
+  if (failure.kind === 'trial') {
     trialEndsAt = Date.now();
     renderPlanNote();
-    setSyncStatus('Read-only');
+    setSyncStatus(failure.label);
     return;
   }
-  if (error?.code === 'PUSH_FAILED' && error.status === 413) {
-    setSyncStatus('Vault too large');
-    announce('This vault is larger than the free tier allows. Export a sealed backup and trim it.', {
-      duration: 8000
-    });
-    return;
-  }
-  if (error?.code === 'FULL') {
-    setSyncStatus('Server full');
-    announce('This server is not accepting new vaults right now.', { duration: 6000 });
-    return;
-  }
-  if (error?.code === 'NO_ACCOUNT') {
-    setSyncStatus('Could not create the account');
-    return;
-  }
-  if (error?.code === 'LOCKED') {
-    setSyncStatus('Locked out');
-    return;
-  }
-  if (error?.code === 'CONFLICT') {
-    setSyncStatus('Sync conflict');
-    return;
-  }
-  if (error?.code === 'UNAUTHORIZED') {
+  if (failure.kind === 'unauthorized') {
     sync.token = null;
-    setSyncStatus('Signing in…');
+    setSyncStatus(failure.label);
     return;
   }
-  setSyncStatus('Offline');
+  if (failure.kind === 'locked' || failure.kind === 'conflict') {
+    setSyncStatus(failure.label);
+    return;
+  }
+
+  setSyncStatus(failure.label);
+
+  /* A local-first vault retries on its own, so the same quiet failure is announced once. */
+  if (failure.message !== lastSyncNotice) {
+    lastSyncNotice = failure.message;
+    announce(failure.message, { duration: failure.kind === 'size' ? 8000 : 6000 });
+  }
 }
 
 /**
@@ -2130,8 +2152,10 @@ function openSettings() {
             if (!syncEnabled()) {
               await sync.logout();
               setSyncStatus('');
+              clearSyncRefusal({ reset: true });
               return;
             }
+            clearSyncRefusal({ reset: true });
             await syncNow();
           }
         ),
@@ -2235,6 +2259,10 @@ function bindEvents() {
   lockForm.addEventListener('submit', handleUnlock);
   newVaultButton.addEventListener('click', openCreateModal);
   restoreButton.addEventListener('click', handleRestore);
+  syncRefusalDismiss.addEventListener('click', () => {
+    syncRefusalDismissed = true;
+    syncRefusal.hidden = true;
+  });
 
   addForm.addEventListener('submit', handleAdd);
   addToggle.addEventListener('click', () => setAddForm(addForm.hidden));
