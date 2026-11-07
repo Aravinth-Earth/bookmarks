@@ -54,6 +54,10 @@ let syncLabel = '';
 /* Icon fetching: four hosts at a time, and the vault saved every fifth batch rather than each. */
 const ICON_BATCH = 4;
 const ICON_SAVE_EVERY = 5;
+/* A host that failed is not asked again on every launch: once a week, and only a few at a time. */
+const ICON_TRIES_KEY = 'bookmarks-icon-tries';
+const ICON_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+const ICON_TOPUP_HOSTS = 20;
 let iconsBusy = false;
 let lastSyncedAt = 0;
 let plan = null;
@@ -728,6 +732,7 @@ function enter({ accountId, authSecret, key, version, sealed, document: vaultDoc
   else if (window.matchMedia?.('(pointer: fine)').matches) searchInput.focus();
 
   if (syncEnabled()) syncNow();
+  scheduleIconTopUp();
 }
 
 async function tryRemembered() {
@@ -1234,7 +1239,32 @@ async function fetchAndStoreIcon(id, hostname) {
   saveNow();
 }
 
-async function fetchMissingIcons({ announceDone = true } = {}) {
+/* When each host was last asked for an icon. Kept on the device rather than in the vault: it is
+   a local courtesy about retries, not something worth syncing or sealing. */
+function readIconTries() {
+  try {
+    const raw = localStorage.getItem(ICON_TRIES_KEY);
+    const value = raw ? JSON.parse(raw) : null;
+    return value && typeof value === 'object' ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeIconTries(tries) {
+  try {
+    /* The map is one entry per host ever asked; anything older than a season is noise. */
+    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    const kept = Object.fromEntries(
+      Object.entries(tries).filter(([, at]) => Number.isFinite(Number(at)) && Number(at) >= cutoff)
+    );
+    localStorage.setItem(ICON_TRIES_KEY, JSON.stringify(kept));
+  } catch {
+    /* Storage refused; the next launch simply asks again. */
+  }
+}
+
+async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {}) {
   if (iconsBusy) return 0;
 
   const missing = state.document.bookmarks.filter((bookmark) => !bookmark.icon);
@@ -1252,7 +1282,11 @@ async function fetchMissingIcons({ announceDone = true } = {}) {
     else byHost.set(bookmark.hostname, [bookmark.id]);
   }
 
-  const hosts = [...byHost.keys()];
+  const hosts = onlyHosts
+    ? [...byHost.keys()].filter((hostname) => onlyHosts.includes(hostname))
+    : [...byHost.keys()];
+  if (hosts.length === 0) return 0;
+  const tries = readIconTries();
   let done = 0;
   let added = 0;
   let unsavedBatches = 0;
@@ -1295,6 +1329,12 @@ async function fetchMissingIcons({ announceDone = true } = {}) {
 
       done += batch.length;
       setVaultStatus(`Fetching icons… ${done}/${hosts.length}`);
+
+      /* A host that just answered — with an icon or not — is not worth asking again this week.
+         Written per batch so a closed tab does not lose what it already spent. */
+      const triedAt = Date.now();
+      for (const hostname of batch) tries[hostname] = triedAt;
+      writeIconTries(tries);
     }
 
     if (unsavedBatches > 0) await saveNow();
@@ -1304,6 +1344,37 @@ async function fetchMissingIcons({ announceDone = true } = {}) {
     iconsBusy = false;
     updateStatusLine();
   }
+}
+
+/**
+ * Icons that never arrived — a host with none, a fetch that failed while offline, an import cut
+ * short by a closed tab — are topped up when the vault opens: a few hosts at a time, and no host
+ * more than once a week. Quiet, because nobody asked for this run.
+ */
+function scheduleIconTopUp() {
+  if (!state.document) return;
+
+  const missingHosts = [
+    ...new Set(
+      state.document.bookmarks.filter((bookmark) => !bookmark.icon).map((bookmark) => bookmark.hostname)
+    )
+  ];
+  if (missingHosts.length === 0) return;
+
+  const tries = readIconTries();
+  const now = Date.now();
+  const due = missingHosts.filter((hostname) => {
+    const triedAt = Number(tries[hostname]);
+    return !Number.isFinite(triedAt) || now - triedAt >= ICON_RETRY_AFTER_MS;
+  });
+  if (due.length === 0) return;
+
+  /* After the first paint and the first sync, so the vault is usable before any of this starts. */
+  setTimeout(() => {
+    if (!state.document || state.document.bookmarks.length === 0) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    fetchMissingIcons({ announceDone: false, onlyHosts: due.slice(0, ICON_TOPUP_HOSTS) });
+  }, 3000);
 }
 
 async function removeAllIcons() {
