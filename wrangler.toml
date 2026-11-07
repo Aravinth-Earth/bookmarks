@@ -60,16 +60,6 @@ zone_name = "332321.xyz"
 pattern = "www.332321.xyz/w/bookmarks"
 zone_name = "332321.xyz"
 
-# The preview route serves the SAME asset tree as the canonical path (the Worker rewrites the
-# prefix), so a branch build can be exercised without touching what visitors see.
-[[routes]]
-pattern = "www.332321.xyz/w/bookmarks-preview/*"
-zone_name = "332321.xyz"
-
-[[routes]]
-pattern = "www.332321.xyz/w/bookmarks-preview"
-zone_name = "332321.xyz"
-
 # Workers Builds runs `npx wrangler preview` for every branch push, and that command refuses to
 # run without this block -- an empty one is enough.
 [previews]
