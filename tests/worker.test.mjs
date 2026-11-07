@@ -12,6 +12,11 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import worker from '../src/index.js';
+import { quiet } from './logs.mjs';
+
+/* The proxy refusals here are about routing and destinations; their event lines are tested in
+   events.test.mjs. */
+quiet();
 
 /* Synthetic fixtures: no account that exists anywhere is named by this file. */
 const ACCOUNT = 'A'.repeat(22);

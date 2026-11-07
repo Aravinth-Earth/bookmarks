@@ -10,6 +10,8 @@
  * opens anything.
  */
 
+import { logEvent } from './events.js';
+
 const CANONICAL = '/w/bookmarks';
 /* The app's own host. Anything under the old www path is sent here, so the app is never used
    on an origin that other site pages can read storage from. */
@@ -95,9 +97,21 @@ function tooMany(className) {
   });
 }
 
-/** Run a route unless its source is over the class's ceiling. */
+/**
+ * Run a route unless its source is over the class's ceiling.
+ *
+ * The refusal writes one line naming the class and the length of the window the caller has to
+ * wait, and nothing about the caller: no address, no digest of one, no path.
+ */
 async function limited(env, className, request, run) {
-  if (className && (await overLimit(env, className, request))) return tooMany(className);
+  if (className && (await overLimit(env, className, request))) {
+    await logEvent('rate_limited', {
+      route: className,
+      reason: 'over_limit',
+      retry_after: LIMITS[className].period
+    });
+    return tooMany(className);
+  }
   return run();
 }
 
@@ -189,6 +203,26 @@ const ROUTE_CLASS = {
   [ICON_PATH]: 'fetch',
   [TITLE_PATH]: 'fetch'
 };
+
+/**
+ * The class an API path is counted as, for a boundary line written after dispatch threw.
+ *
+ * The path is read the same way `handleApi` reads it — the direct route, or the route after
+ * `/a/<accountId>` — so a boundary line names the class whose route failed rather than a guess.
+ */
+function routeClassOf(pathname) {
+  const path = pathname.slice(API_PREFIX.length);
+  if (ROUTE_CLASS[path]) return ROUTE_CLASS[path];
+
+  const forwarded = path.match(/^\/a\/[^/]+\/([^/]+)/);
+  return (forwarded && ROUTE_CLASS[`/${forwarded[1]}`]) || 'api';
+}
+
+/** The account an API path names, if it names one that is well formed. */
+function accountOf(pathname) {
+  const match = pathname.slice(API_PREFIX.length).match(/^\/a\/([^/]+)\//);
+  return match && ACCOUNT_ID.test(match[1]) ? match[1] : undefined;
+}
 
 const USER_AGENT = 'Bookmarks/0.1 (+https://www.332321.xyz/w/bookmarks/)';
 
@@ -602,6 +636,12 @@ async function discoverIcon(hostname, signal) {
       signal
     );
   } catch {
+    /* A page that ran out of time is the same refusal the icon route reports; this helper
+       answers it as "no declared icon", so the line is written here. A host that simply could
+       not be reached is an ordinary miss and writes nothing. */
+    if (signal?.aborted) {
+      await logEvent('proxy_refused', { route: ROUTE_CLASS[ICON_PATH], reason: 'timeout' });
+    }
     return null;
   }
 
@@ -629,6 +669,18 @@ async function discoverIcon(hostname, signal) {
 }
 
 /**
+ * A refusal from one of the two proxy routes: one line, then the same 400 it always answered.
+ *
+ * `reason` is one of the fixed codes: bad_host, blocked_host or bad_hash. The hostname the
+ * caller supplied is never part of the line — it is the one value on this route that belongs to
+ * the caller.
+ */
+async function proxyRefused(reason) {
+  await logEvent('proxy_refused', { route: ROUTE_CLASS[ICON_PATH], reason });
+  return json({ error: reason }, 400);
+}
+
+/**
  * The icon service.
  *
  * The hostname travels in a header, not the query string, and the URL carries only its SHA-256.
@@ -643,11 +695,11 @@ async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   if (request.method !== 'GET') return json({ error: 'method' }, 405);
 
   const hostname = (request.headers.get('x-icon-host') ?? '').trim();
-  if (!HOSTNAME.test(hostname)) return json({ error: 'bad_host' }, 400);
-  if (destinationRefused(hostname)) return json({ error: 'blocked_host' }, 400);
+  if (!HOSTNAME.test(hostname)) return proxyRefused('bad_host');
+  if (destinationRefused(hostname)) return proxyRefused('blocked_host');
 
   const claimed = url.searchParams.get('h') ?? '';
-  if (claimed !== (await hostHash(hostname))) return json({ error: 'bad_hash' }, 400);
+  if (claimed !== (await hostHash(hostname))) return proxyRefused('bad_hash');
 
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), timeoutMs);
@@ -704,6 +756,12 @@ async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
       }
     });
   } catch {
+    /* The timeout abort and a failed connection are the two ways this route gives up on a host
+       it was allowed to ask. The reason says which, and the host is not named. */
+    await logEvent('proxy_refused', {
+      route: ROUTE_CLASS[ICON_PATH],
+      reason: abort.signal.aborted ? 'timeout' : 'fetch_failed'
+    });
     return new Response(null, {
       status: 502,
       headers: { 'cache-control': 'public, max-age=300' }
@@ -762,6 +820,10 @@ async function fetchPageTitle(hostname, signal) {
       signal
     );
   } catch {
+    /* The title route answers a timeout as "no title", so the refusal is recorded here. */
+    if (signal?.aborted) {
+      await logEvent('proxy_refused', { route: ROUTE_CLASS[TITLE_PATH], reason: 'timeout' });
+    }
     return null;
   }
 
@@ -790,11 +852,11 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   if (request.method !== 'GET') return json({ error: 'method' }, 405);
 
   const hostname = (request.headers.get('x-page-host') ?? '').trim();
-  if (!HOSTNAME.test(hostname)) return json({ error: 'bad_host' }, 400);
-  if (destinationRefused(hostname)) return json({ error: 'blocked_host' }, 400);
+  if (!HOSTNAME.test(hostname)) return proxyRefused('bad_host');
+  if (destinationRefused(hostname)) return proxyRefused('blocked_host');
 
   const claimed = url.searchParams.get('h') ?? '';
-  if (claimed !== (await hostHash(hostname))) return json({ error: 'bad_hash' }, 400);
+  if (claimed !== (await hostHash(hostname))) return proxyRefused('bad_hash');
 
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), timeoutMs);
@@ -803,6 +865,10 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
     const title = await fetchPageTitle(hostname, abort.signal);
     return title ? cachedJson({ title }, 604_800) : json({ error: 'no_title' }, 404);
   } catch {
+    await logEvent('proxy_refused', {
+      route: ROUTE_CLASS[TITLE_PATH],
+      reason: abort.signal.aborted ? 'timeout' : 'fetch_failed'
+    });
     return json({ error: 'failed' }, 502);
   } finally {
     clearTimeout(timer);
@@ -879,6 +945,14 @@ export default {
       try {
         return await handleApi(request, env, url);
       } catch {
+        /* One line at the boundary, then the same 500 the caller always got. The class and the
+           account are read from the path, so an exception inside an object is attributable
+           without naming the account or the route's arguments. */
+        await logEvent('server_error', {
+          route: routeClassOf(url.pathname),
+          reason: 'unhandled',
+          account: accountOf(url.pathname)
+        });
         return json({ error: 'internal' }, 500);
       }
     }
