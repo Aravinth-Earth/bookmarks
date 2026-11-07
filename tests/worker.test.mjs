@@ -2,8 +2,9 @@
  * The Worker's own routing: the account path and the asset passthrough.
  *
  * The Durable Object has its own tests; this file covers the layer in front of it. There is no
- * admin route: an account is created by the first sync that names it, and the Registry caps how
- * many may exist.
+ * public admin route: an account is created by the first sync that names it, the Registry caps
+ * how many may exist, and the object's operator routes are refused before dispatch so only a
+ * bound Worker can read them.
  */
 
 import test from 'node:test';
@@ -101,6 +102,34 @@ test('account paths are forwarded to that account and nothing else', async () =>
   assert.equal(response.status, 200);
   assert.equal(calls[0].name, ACCOUNT);
   assert.equal(calls[0].path, '/challenge');
+});
+
+test('the object operator routes do not exist on the public API', async () => {
+  for (const path of [
+    `/a/${ACCOUNT}/admin-stats`,
+    `/a/${ACCOUNT}/admin-stats?all=1`,
+    `/a/${ACCOUNT}/admin-list`
+  ]) {
+    const { env, calls } = harness();
+    const response = await worker.fetch(api(path), env);
+
+    assert.equal(response.status, 404, path);
+    assert.deepEqual(await response.json(), { error: 'not_found' });
+    assert.equal(calls.length, 0, `${path} never reaches the object`);
+  }
+
+  /* The refusal is not a method check: a write to an operator path is a 404 as well. */
+  const { env, calls } = harness();
+  const posted = await worker.fetch(
+    api(`/a/${ACCOUNT}/admin-stats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ anything: true })
+    }),
+    env
+  );
+  assert.equal(posted.status, 404);
+  assert.equal(calls.length, 0);
 });
 
 test('an account path with a malformed id is refused before dispatch', async () => {
