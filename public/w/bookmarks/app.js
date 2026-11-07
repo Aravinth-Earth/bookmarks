@@ -1592,7 +1592,10 @@ function openEditModal(bookmark) {
         clicks
       ]),
       el('label', { class: 'confirm-saved' }, [pinned, el('span', { text: 'Pin to the top' })]),
-      el('label', { class: 'confirm-saved' }, [iconOnly, el('span', { text: 'Show the tile only' })]),
+      el('label', { class: 'confirm-saved' }, [
+        iconOnly,
+        el('span', { text: 'Show as icon only' })
+      ]),
       error
     ],
     actions: [deleteButton, cancelButton, saveButton]
