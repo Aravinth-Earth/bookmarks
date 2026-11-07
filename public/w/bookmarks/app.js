@@ -59,8 +59,6 @@ const ICON_TRIES_KEY = 'bookmarks-icon-tries';
 const ICON_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 const ICON_TOPUP_HOSTS = 20;
 let iconsBusy = false;
-/* Set when a long press opened the editor, so the click that follows does not open the site. */
-let pressOpenedEditor = false;
 /* True once a name has been typed for the bookmark being added, so a suggestion never wins. */
 let nameTouched = false;
 let lastSyncedAt = 0;
@@ -101,6 +99,7 @@ const addUrl = $('add-url');
 const addName = $('add-name');
 const list = $('list');
 const empty = $('empty');
+const viewHint = $('view-hint');
 const vaultStatus = $('vault-status');
 const status = $('status');
 const planNote = $('plan-note');
@@ -138,6 +137,9 @@ function applyAppearance() {
   list.dataset.view = currentView;
   document.documentElement.dataset.size = currentSize;
   viewInput.value = currentView;
+  /* Pills are for opening pages; editing and deleting live in the list, so say where they are. */
+  viewHint.hidden =
+    currentView !== 'pills' || (state.document?.bookmarks.length ?? 0) === 0;
 }
 
 /* --------------------------------------------------------------- small helpers */
@@ -1099,6 +1101,11 @@ function actionButton(action, label, iconName, { pressed = false } = {}) {
   return button;
 }
 
+/**
+ * One row. The list view is the table: name, address, clicks, last use, actions. The pills view
+ * reuses the same markup, showing only the tile, the name and the count — it is a reading and
+ * clicking view, not an editing one.
+ */
 function rowFor(bookmark) {
   const { initial, background, foreground } = tileFor(bookmark);
 
@@ -1109,17 +1116,14 @@ function rowFor(bookmark) {
     tile.textContent = initial;
   }
 
-  const label = el('span', { class: 'row-label' }, [
-    el('span', { class: 'row-name', text: bookmark.name || bookmark.search || bookmark.hostname }),
-    el('span', { class: 'row-host', text: bookmark.hostname })
-  ]);
+  const name = el('span', { class: 'row-name', text: labelOf(bookmark) });
 
   const link = el('a', {
     class: 'row-link',
     href: bookmark.url,
     target: '_blank',
     rel: 'noopener noreferrer'
-  }, [tile, label]);
+  }, [tile, name]);
 
   /* An icon-only pill hides its label, and a hidden label leaves the link with no accessible
      name at all — so the name is stated explicitly. */
@@ -1134,11 +1138,15 @@ function rowFor(bookmark) {
   row.style.setProperty('--tile-seed', background);
   row.style.setProperty('--tile-fg', foreground);
 
+  const host = el('span', { class: 'row-host', text: bookmark.hostname });
+
   const clicks = el('span', {
     class: 'clicks',
     text: String(bookmark.clickCount),
     'aria-label': `${bookmark.clickCount} clicks`
   });
+
+  const when = el('span', { class: 'row-when', text: lastUsedLabel(bookmark) });
 
   const actions = el('span', { class: 'row-actions' }, [
     actionButton('pin', `${bookmark.pinned ? 'Unpin' : 'Pin'} ${labelOf(bookmark)}`, 'pin', {
@@ -1148,14 +1156,17 @@ function rowFor(bookmark) {
     actionButton('remove', `Delete ${labelOf(bookmark)}`, 'remove')
   ]);
 
-  /* In the pills view the whole chip opens the site, so editing needs a target of its own; in
-     the list view the pencil in .row-actions already is one. */
-  const quick = el('span', { class: 'row-quick' }, [
-    actionButton('edit', `Edit ${labelOf(bookmark)}`, 'edit')
-  ]);
-
-  row.append(link, clicks, quick, actions);
+  row.append(link, host, clicks, when, actions);
   return row;
+}
+
+/** The day a bookmark was last opened, short enough for a column. */
+function lastUsedLabel(bookmark) {
+  const stamp = bookmark.lastClickedAt ?? bookmark.createdAt ?? null;
+  if (!stamp) return '—';
+  const when = new Date(stamp);
+  if (Number.isNaN(when.getTime())) return '—';
+  return when.toLocaleDateString([], { day: 'numeric', month: 'short' });
 }
 
 function render() {
@@ -1166,7 +1177,17 @@ function render() {
   const view = { ...state.document, bookmarks: matched };
   const sorted = sortBookmarks(view, sortInput.value);
 
-  list.replaceChildren(...sorted.map(rowFor));
+  /* The list view is a table, so it gets a header. Pills view hides it with CSS. */
+  const head = el('li', { class: 'row row-head' }, [
+    el('span', { 'aria-hidden': 'true' }),
+    el('span', { text: 'Name' }),
+    el('span', { text: 'Address' }),
+    el('span', { class: 'clicks', text: 'Clicks' }),
+    el('span', { class: 'row-when', text: 'Last used' }),
+    el('span')
+  ]);
+
+  list.replaceChildren(head, ...sorted.map(rowFor));
 
   empty.hidden = sorted.length !== 0;
   empty.textContent =
@@ -1175,6 +1196,7 @@ function render() {
       : `No bookmark matches “${query.trim()}”.`;
 
   updateStatusLine();
+  viewHint.hidden = currentView !== 'pills' || sorted.length === 0;
 }
 
 /* ------------------------------------------------------------------- actions */
@@ -2116,81 +2138,6 @@ function bindEvents() {
     delete addName.dataset.suggesting;
   });
   list.addEventListener('click', handleListClick);
-
-  /* A long press opens the editor under the finger; the release's click must not reach the
-     backdrop (which would close it) or the link (which would open the site). */
-  document.addEventListener(
-    'click',
-    (event) => {
-      if (!pressOpenedEditor) return;
-      pressOpenedEditor = false;
-      event.preventDefault();
-      event.stopPropagation();
-    },
-    true
-  );
-
-  /* Editing a pill: the pencil on hover, a right-click, or a press held on a phone. */
-  list.addEventListener('contextmenu', (event) => {
-    const row = event.target.closest('.row');
-    const bookmark = row ? findBookmark(row.dataset.id) : null;
-    if (!bookmark) return;
-    event.preventDefault();
-    openEditModal(bookmark);
-  });
-
-  let pressTimer = 0;
-  let pressStart = null;
-  const cancelPress = () => {
-    clearTimeout(pressTimer);
-    pressTimer = 0;
-    pressStart = null;
-  };
-
-  list.addEventListener('pointerdown', (event) => {
-    if (event.pointerType === 'mouse') return;
-    const row = event.target.closest('.row');
-    if (!row || event.target.closest('button')) return;
-    const id = row.dataset.id;
-    pressStart = { x: event.clientX, y: event.clientY };
-    clearTimeout(pressTimer);
-    pressTimer = setTimeout(() => {
-      pressTimer = 0;
-      const bookmark = findBookmark(id);
-      if (!bookmark) return;
-      pressOpenedEditor = true;
-      /* The finger is still down: the click it produces on release would land on the modal's
-         backdrop and close it again. One capturing listener eats that click. */
-      setTimeout(() => {
-        pressOpenedEditor = false;
-      }, 800);
-      openEditModal(bookmark);
-    }, 550);
-  });
-
-  list.addEventListener('pointermove', (event) => {
-    if (!pressStart) return;
-    if (Math.abs(event.clientX - pressStart.x) > 10 || Math.abs(event.clientY - pressStart.y) > 10) {
-      cancelPress();
-    }
-  });
-  list.addEventListener('pointerup', cancelPress);
-  list.addEventListener('pointercancel', cancelPress);
-
-  lockButton.addEventListener('click', () => lockVault());
-
-  /* On a phone the view select gives way to one button that flips between the two views. */
-  viewToggle.addEventListener('click', () => {
-    currentView = currentView === 'pills' ? 'list' : 'pills';
-    writePref(VIEW_KEY, currentView);
-    applyAppearance();
-    viewToggle.setAttribute('aria-label', `Switch to ${currentView === 'pills' ? 'list' : 'pills'} view`);
-    state.document = {
-      ...state.document,
-      prefs: { ...state.document.prefs, view: currentView }
-    };
-    saveNow();
-  });
 
   searchInput.addEventListener('input', render);
 
