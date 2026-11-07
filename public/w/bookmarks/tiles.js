@@ -53,9 +53,18 @@ export function luminance(hex) {
   return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
 }
 
-/** Black or white, whichever reads better on that background. */
+/**
+ * Black or white, whichever reads better on that background.
+ *
+ * Pure black, not a near-black: with #101414 as the ink the two choices cross at about 4.3:1,
+ * which is under AA, so some mid-tone seed always failed. Black and white cross at 0.179 with
+ * both sides at 4.58:1, so this threshold keeps every seed at or above 4.5.
+ *
+ * A threshold of 0.35 — "light background" by intuition — left mid-tones with white text at
+ * about 2.6:1, which is why some pills read as a smudge.
+ */
 export function foregroundFor(hex) {
-  return luminance(hex) > 0.35 ? '#101414' : '#ffffff';
+  return luminance(hex) > 0.179 ? '#000000' : '#ffffff';
 }
 
 function initialOf(bookmark) {
