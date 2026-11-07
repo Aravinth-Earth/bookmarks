@@ -8,6 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 import worker from '../src/index.js';
 
@@ -161,4 +162,196 @@ test('the bare path redirects to the slashed one', async () => {
 
   assert.equal(response.status, 301);
   assert.equal(response.headers.get('location'), 'https://www.332321.xyz/w/bookmarks/');
+});
+
+/* --------------------------------------------------------------- icon service */
+
+const ICON_HOST = 'example.com';
+const ICON_HASH = createHash('sha256').update(ICON_HOST).digest('base64url');
+
+function iconRequest({ host = ICON_HOST, hash = ICON_HASH } = {}) {
+  return new Request(`https://www.332321.xyz/w/bookmarks/api/icon?h=${hash}`, {
+    headers: host ? { 'x-icon-host': host } : {}
+  });
+}
+
+async function withFetch(implementation, run) {
+  const original = globalThis.fetch;
+  globalThis.fetch = implementation;
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+test('the icon service refuses a missing hostname, a non-DNS host or a wrong hash', async () => {
+  for (const host of [
+    '127.0.0.1',
+    'localhost',
+    'EXAMPLE.com',
+    'example.com:8443',
+    'exa mple.com',
+    '-bad.com',
+    'a..b.com',
+    ''
+  ]) {
+    const response = await worker.fetch(iconRequest({ host }), harness().env);
+    assert.equal(response.status, 400, JSON.stringify(host));
+  }
+
+  const noHost = await worker.fetch(
+    new Request('https://www.332321.xyz/w/bookmarks/api/icon?h=x'),
+    harness().env
+  );
+  assert.equal(noHost.status, 400);
+
+  const wrongHash = await worker.fetch(iconRequest({ hash: 'a'.repeat(43) }), harness().env);
+  assert.equal(wrongHash.status, 400);
+});
+
+test('a valid icon request asks that host only for its favicon', async () => {
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  const asked = [];
+
+  const response = await withFetch(
+    async (url) => {
+      asked.push(url);
+      return new Response(bytes, {
+        headers: { 'content-type': 'image/png', 'content-length': '4' }
+      });
+    },
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+  assert.equal(response.headers.get('content-type'), 'image/png');
+  assert.match(response.headers.get('cache-control'), /max-age=2592000/);
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  assert.deepEqual(asked, ['https://example.com/favicon.ico']);
+});
+
+test('a non-image, an oversized icon and a missing one are each refused', async () => {
+  const html = await withFetch(
+    async () => new Response('<html>', { headers: { 'content-type': 'text/html' } }),
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+  assert.equal(html.status, 404, 'a page that is not an image ends as "no icon"');
+
+  const declared = await withFetch(
+    async () =>
+      new Response(new Uint8Array(4), {
+        headers: { 'content-type': 'image/png', 'content-length': '200000' }
+      }),
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+  assert.equal(declared.status, 413);
+
+  const streamed = await withFetch(
+    async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            for (let at = 0; at < 100; at += 1) controller.enqueue(new Uint8Array(1024));
+            controller.close();
+          }
+        }),
+        { headers: { 'content-type': 'image/png' } }
+      ),
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+  assert.equal(streamed.status, 413, 'a body with no declared length is capped while read');
+
+  const missing = await withFetch(
+    async () => new Response(null, { status: 404 }),
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+  assert.equal(missing.status, 404);
+  assert.match(missing.headers.get('cache-control'), /max-age=600/);
+});
+
+test('an unreachable host is a 502 rather than a crash', async () => {
+  const response = await withFetch(
+    async () => {
+      throw new Error('network down');
+    },
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 502);
+  assert.match(response.headers.get('cache-control'), /max-age=300/);
+});
+
+test('a page that declares its icon is followed, once', async () => {
+  const asked = [];
+
+  const response = await withFetch(
+    async (url) => {
+      asked.push(url);
+      if (url.endsWith('/favicon.ico')) return new Response(null, { status: 404 });
+      if (url === `https://${ICON_HOST}/`) {
+        return new Response('<html><link rel="icon" href="/art/icon.svg"></html>', {
+          headers: { 'content-type': 'text/html' }
+        });
+      }
+      if (url === `https://${ICON_HOST}/art/icon.svg`) {
+        return new Response('<svg xmlns="http://www.w3.org/2000/svg"/>', {
+          headers: { 'content-type': 'image/svg+xml' }
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'image/svg+xml');
+  assert.deepEqual(asked, [
+    `https://${ICON_HOST}/favicon.ico`,
+    `https://${ICON_HOST}/`,
+    `https://${ICON_HOST}/art/icon.svg`
+  ]);
+});
+
+test('an icon behind a redirect is followed by hand', async () => {
+  const asked = [];
+
+  const response = await withFetch(
+    async (url) => {
+      asked.push(url);
+      if (url === `https://${ICON_HOST}/favicon.ico`) {
+        return new Response(null, {
+          status: 301,
+          headers: { location: `https://www.${ICON_HOST}/favicon.ico` }
+        });
+      }
+      if (url === `https://www.${ICON_HOST}/favicon.ico`) {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/png' }
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(asked, [
+    `https://${ICON_HOST}/favicon.ico`,
+    `https://www.${ICON_HOST}/favicon.ico`
+  ]);
+});
+
+test('a redirect that leaves https is not followed', async () => {
+  const response = await withFetch(
+    async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: 'http://example.com/favicon.ico' }
+      }),
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 404);
 });

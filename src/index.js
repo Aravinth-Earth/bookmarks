@@ -145,10 +145,234 @@ async function createAccount(request, env) {
   });
 }
 
+const ICON_PATH = '/icon';
+const ICON_MAX_BYTES = 64 * 1024;
+const ICON_PAGE_MAX_BYTES = 256 * 1024;
+const ICON_TIMEOUT_MS = 10_000;
+const ICON_TYPES = new Set([
+  'image/x-icon',
+  'image/vnd.microsoft.icon',
+  'image/png',
+  'image/svg+xml',
+  'image/jpeg',
+  'image/webp',
+  'image/gif'
+]);
+
+const USER_AGENT = 'Bookmarks/0.1 (+https://www.332321.xyz/w/bookmarks/)';
+
+/* A hostname, not a URL: no scheme, no port, no path, no IP literal, no single label. */
+const HOSTNAME = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
+
+function toBase64Url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function hostHash(hostname) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(hostname));
+  return toBase64Url(new Uint8Array(digest));
+}
+
+/** Read at most `max` bytes, cancelling the stream the moment it exceeds the cap. */
+async function readCapped(response, max) {
+  if (!response.body) return new Uint8Array(0);
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function iconTypeOf(response) {
+  const type = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+  return ICON_TYPES.has(type) ? type : null;
+}
+
+/**
+ * Follow a short redirect chain by hand.
+ *
+ * `wikipedia.org` serves its icon from `en.wikipedia.org`, so redirects must be followed. They
+ * are followed here rather than by the runtime because the local runtime does not complete this
+ * chain, and because each hop is checked: https only, at most three of them.
+ */
+async function followToImage(target, signal) {
+  let current = target;
+
+  for (let hop = 0; hop < 4; hop += 1) {
+    const response = await fetch(current, {
+      headers: {
+        accept: 'image/*',
+        'user-agent': USER_AGENT
+      },
+      redirect: 'manual',
+      signal
+    });
+
+    if (response.status < 300 || response.status >= 400) return response;
+
+    const location = response.headers.get('location');
+    if (!location) return response;
+
+    const next = new URL(location, current);
+    if (next.protocol !== 'https:') return null;
+
+    current = next.toString();
+  }
+
+  return null;
+}
+
+/**
+ * Find the icon a page declares, for the half of the web that does not serve `/favicon.ico`.
+ * Only the first `<link rel="...icon...">` is used; the href is resolved against the page and
+ * must be https.
+ */
+async function discoverIcon(hostname, signal) {
+  const pageUrl = `https://${hostname}/`;
+
+  let page;
+  try {
+    page = await fetch(pageUrl, {
+      headers: { accept: 'text/html', 'user-agent': USER_AGENT },
+      redirect: 'follow',
+      signal
+    });
+  } catch {
+    return null;
+  }
+
+  if (!page.ok) return null;
+  const pageType = (page.headers.get('content-type') ?? '').toLowerCase();
+  if (!pageType.includes('text/html')) return null;
+
+  const bytes = await readCapped(page, ICON_PAGE_MAX_BYTES);
+  if (!bytes) return null;
+
+  const html = new TextDecoder().decode(bytes);
+  const link = html.match(/<link\b[^>]*\brel\s*=\s*["']?[^"'>]*\bicon\b[^"'>]*["']?[^>]*>/i);
+  if (!link) return null;
+
+  const href = link[0].match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
+  if (!href) return null;
+
+  try {
+    const url = new URL(href, pageUrl);
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The icon service.
+ *
+ * The hostname travels in a header, not the query string, and the URL carries only its SHA-256.
+ * That keeps the domain out of the request path — which is the part Cloudflare's logs record —
+ * while still giving the edge a deterministic cache key per host. The hash is re-derived here,
+ * so a caller cannot ask for a host that does not match the key it is cached under.
+ *
+ * The Worker is the only party that contacts the bookmarked site, once, and every other user is
+ * served the cached bytes. No hostname is logged by this code.
+ */
+async function handleIcon(request, url) {
+  if (request.method !== 'GET') return json({ error: 'method' }, 405);
+
+  const hostname = (request.headers.get('x-icon-host') ?? '').trim();
+  if (!HOSTNAME.test(hostname)) return json({ error: 'bad_host' }, 400);
+
+  const claimed = url.searchParams.get('h') ?? '';
+  if (claimed !== (await hostHash(hostname))) return json({ error: 'bad_hash' }, 400);
+
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), ICON_TIMEOUT_MS);
+
+  let upstream = null;
+  let type = null;
+
+  try {
+    upstream = await followToImage(`https://${hostname}/favicon.ico`, abort.signal);
+    type = upstream ? iconTypeOf(upstream) : null;
+
+    if (!type) {
+      /* A page that answered /favicon.ico with HTML, or with nothing useful, may still declare
+         an icon. Only one extra request, and only for a host the caller named. */
+      if (upstream?.body) await upstream.body.cancel().catch(() => {});
+      const declared = await discoverIcon(hostname, abort.signal);
+      if (declared) {
+        upstream = await followToImage(declared, abort.signal);
+        type = upstream ? iconTypeOf(upstream) : null;
+      }
+    }
+  } catch {
+    return new Response(null, {
+      status: 502,
+      headers: { 'cache-control': 'public, max-age=300' }
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!upstream || !upstream.ok || !type) {
+    return new Response(null, {
+      status: 404,
+      headers: { 'cache-control': 'public, max-age=600' }
+    });
+  }
+
+  const declared = Number(upstream.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > ICON_MAX_BYTES) {
+    return new Response(null, {
+      status: 413,
+      headers: { 'cache-control': 'public, max-age=600' }
+    });
+  }
+
+  const bytes = await readCapped(upstream, ICON_MAX_BYTES);
+  if (!bytes || bytes.byteLength === 0) {
+    return new Response(null, {
+      status: bytes ? 404 : 413,
+      headers: { 'cache-control': 'public, max-age=600' }
+    });
+  }
+
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      'content-type': type,
+      'content-length': String(bytes.byteLength),
+      'cache-control': 'public, max-age=2592000, immutable',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'"
+    }
+  });
+}
+
 async function handleApi(request, env, url) {
   const path = url.pathname.slice(API_PREFIX.length);
 
   if (path === '/health') return json({ ok: true, version: VERSION });
+  if (path === ICON_PATH) return handleIcon(request, url);
   if (path === '/accounts') return createAccount(request, env);
 
   if (path.startsWith('/a/')) {

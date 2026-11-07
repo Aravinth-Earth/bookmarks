@@ -30,6 +30,7 @@ import {
   parseSealed
 } from './import-export.js';
 import { tileFor } from './tiles.js';
+import { fetchIcon } from './icons.js';
 import { SyncClient, SyncError } from './sync.js';
 
 const store = createVault(indexedDbAdapter());
@@ -50,6 +51,7 @@ let syncBusy = false;
 let syncQueued = false;
 let syncTimer = 0;
 let syncLabel = '';
+let lastSyncedAt = 0;
 
 let saving = false;
 let dirty = false;
@@ -412,6 +414,12 @@ function setSyncStatus(label) {
   updateStatusLine();
 }
 
+function markSynced() {
+  lastSyncedAt = Date.now();
+  const at = new Date(lastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  setSyncStatus(`Synced ${at}`);
+}
+
 function handleSyncError(error) {
   if (error?.code === 'NO_ACCOUNT') {
     setSyncStatus('Not on the server');
@@ -450,6 +458,7 @@ async function syncNow() {
   }
 
   syncBusy = true;
+  let absorbed = false;
   try {
     if (!sync.signedIn) {
       setSyncStatus('Signing in…');
@@ -465,11 +474,13 @@ async function syncNow() {
 
       if (fingerprint(merged) !== fingerprint(state.document)) {
         state.document = merged;
+        absorbed = true;
         render();
         await saveNow({ push: false });
       }
       if (fingerprint(merged) === fingerprint(remoteDocument)) {
-        setSyncStatus('Synced');
+        markSynced();
+        if (absorbed) announce('Merged changes from another device.');
         return;
       }
     } else {
@@ -484,6 +495,7 @@ async function syncNow() {
         const conflictDocument = await open(state.key, result.current, state.accountId);
         const { document: merged } = mergeDocuments(state.document, conflictDocument);
         state.document = merged;
+        absorbed = true;
         render();
         await saveNow({ push: false });
       }
@@ -494,7 +506,8 @@ async function syncNow() {
     }
 
     state.remoteVersion = result.version;
-    setSyncStatus('Synced');
+    markSynced();
+    if (absorbed) announce('Merged changes from another device.');
   } catch (error) {
     handleSyncError(error);
   } finally {
@@ -896,6 +909,7 @@ async function handleAdd(event) {
     setAddForm(false);
     saveNow();
     announce(`Added ${labelOf(bookmark)}`);
+    fetchAndStoreIcon(bookmark.id, bookmark.hostname);
   } catch (error) {
     if (error.code === 'DUPLICATE') {
       searchInput.value = '';
@@ -947,6 +961,73 @@ function removeBookmark(bookmark) {
       }
     }
   });
+}
+
+async function fetchAndStoreIcon(id, hostname) {
+  const icon = await fetchIcon(hostname).catch(() => null);
+  if (!icon) return;
+
+  const bookmark = findBookmark(id);
+  if (!bookmark || bookmark.icon) return;
+
+  state.document = updateBookmark(state.document, id, { icon }, Date.now);
+  render();
+  saveNow();
+}
+
+async function fetchMissingIcons() {
+  const missing = state.document.bookmarks.filter((bookmark) => !bookmark.icon);
+  if (missing.length === 0) {
+    announce('Every bookmark already has an icon.');
+    return;
+  }
+
+  let done = 0;
+  let added = 0;
+
+  /* Four at a time: enough to finish a library quickly, few enough that the Worker is not the
+     thing that floods someone's server. */
+  for (let at = 0; at < missing.length; at += 4) {
+    const batch = missing.slice(at, at + 4);
+    const fetched = await Promise.all(
+      batch.map(async (bookmark) => [
+        bookmark.id,
+        await fetchIcon(bookmark.hostname, { fresh: true }).catch(() => null)
+      ])
+    );
+
+    const icons = fetched.filter(([, icon]) => typeof icon === 'string');
+    if (icons.length > 0) {
+      let next = state.document;
+      for (const [id, icon] of icons) {
+        if (next.bookmarks.some((bookmark) => bookmark.id === id && !bookmark.icon)) {
+          next = updateBookmark(next, id, { icon }, Date.now);
+        }
+      }
+      state.document = next;
+      added += icons.length;
+      render();
+      await saveNow();
+    }
+
+    done += batch.length;
+    setVaultStatus(`Fetching icons… ${done}/${missing.length}`);
+  }
+
+  announce(`Added ${added} icon${added === 1 ? '' : 's'}.`);
+}
+
+async function removeAllIcons() {
+  const at = new Date().toISOString();
+  state.document = {
+    ...state.document,
+    bookmarks: state.document.bookmarks.map((bookmark) =>
+      bookmark.icon ? { ...bookmark, icon: null, updatedAt: at } : bookmark
+    )
+  };
+  render();
+  await saveNow();
+  announce('Icons removed.');
 }
 
 function openEditModal(bookmark) {
@@ -1283,6 +1364,7 @@ function promptForSyncPhrase() {
 
 function openSettings() {
   const count = state.document.bookmarks.length;
+  const missingIcons = state.document.bookmarks.filter((bookmark) => !bookmark.icon).length;
 
   const sizeSelect = el('select', {}, [
     el('option', { value: 'small', text: 'Small' }),
@@ -1339,6 +1421,32 @@ function openSettings() {
           handleImport();
         })
       ]),
+      el('h3', { class: 'settings-heading', text: 'Icons' }),
+      el('div', { class: 'settings-list' }, [
+        item(
+          'Fetch missing icons',
+          `${missingIcons} without an icon. Each site is asked once, by this server, and the image is stored inside the sealed vault.`,
+          async () => {
+            modal.close();
+            await fetchMissingIcons();
+          }
+        ),
+        item('Remove icons', 'Delete every stored icon and go back to lettered tiles.', async () => {
+          modal.close();
+          const sure = await askModal({
+            title: 'Remove every icon?',
+            body: [
+              el('p', {
+                class: 'modal-note',
+                text: 'The icons are deleted from the sealed vault and the lettered tiles come back. Bookmarks themselves are untouched.'
+              })
+            ],
+            confirmLabel: 'Remove icons',
+            danger: true
+          });
+          if (sure) await removeAllIcons();
+        })
+      ]),
       el('h3', { class: 'settings-heading', text: 'Server' }),
       el('div', { class: 'settings-list' }, [
         item(
@@ -1373,7 +1481,16 @@ function openSettings() {
             }
             await syncNow();
           }
-        )
+        ),
+        item('Sync now', 'Reconcile with the server immediately.', async () => {
+          modal.close();
+          if (!syncEnabled()) {
+            announce('Sync is off.');
+            return;
+          }
+          await syncNow();
+          announce(syncLabel || 'Synced.');
+        })
       ]),
       el('h3', { class: 'settings-heading', text: 'This device' }),
       el('div', { class: 'settings-list' }, [
@@ -1420,6 +1537,7 @@ async function lockVault() {
   state.lastDeleted = null;
   saveStamp = '';
   syncLabel = '';
+  lastSyncedAt = 0;
   list.replaceChildren();
   showLock('Locked. Enter your phrase to reopen the vault.');
 }

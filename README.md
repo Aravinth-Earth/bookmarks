@@ -62,6 +62,17 @@ Then open the app, go to Settings, and turn **Sync** on. The first run pushes th
 vault; another device that enters the same phrase pulls it and merges. Re-running the script
 for an existing account reports "already exists" and changes nothing.
 
+## Icons
+
+Each icon is fetched once by the Worker — from the site's own `/favicon.ico`, or from the
+`<link rel="icon">` the page declares — cached at the edge for 30 days, downscaled to 32px in
+the browser, and stored inside the sealed vault as a data URI.
+
+The browser never contacts a bookmarked site. The hostname travels in a request header and the
+URL carries only its SHA-256, so the domain does not appear in a request path that platform
+logs record. A site that cannot be reached, or that answers with something that is not an
+image, simply keeps its lettered tile.
+
 ## Credits
 
 The 13-word phrase is drawn from EFF's short word list, used under
