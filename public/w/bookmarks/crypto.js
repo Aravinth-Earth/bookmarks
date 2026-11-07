@@ -90,6 +90,35 @@ export function generatePhrase() {
  *
  * @returns {string} the 13 lowercase words, single-spaced
  */
+/**
+ * What is wrong with a typed phrase, in words a person can act on — or null when it is usable.
+ *
+ * `normalizePhrase` throws terse, internal messages; unlocking shows this instead, because "got
+ * 12" and "is not a word in the list" tell the reader nothing about what to do next.
+ */
+export function phraseProblem(input) {
+  const words = String(input ?? '')
+    .toLowerCase()
+    .replace(/[\s\u00a0]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+
+  if (words.length !== WORD_COUNT) {
+    const noun = words.length === 1 ? 'word' : 'words';
+    return words.length === 0
+      ? `The phrase has ${WORD_COUNT} words.`
+      : `That is ${words.length} ${noun} — the phrase is ${WORD_COUNT}.`;
+  }
+
+  const unknown = words.find((word) => !WORD_SET.has(word));
+  if (unknown) {
+    return `“${unknown}” is not one of the words these phrases use — check the spelling.`;
+  }
+
+  return null;
+}
+
 export function normalizePhrase(input) {
   if (typeof input !== 'string' || input.trim() === '') {
     throw new Error('bookmarks: a phrase is required');
