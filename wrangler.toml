@@ -33,6 +33,39 @@ class_name = "Vault"
 name = "REGISTRY"
 class_name = "Registry"
 
+# Per-source request limits. Each binding counts calls per key inside the Cloudflare location
+# that serves the request; the Worker passes a digest of the caller's address, never the address.
+# The thresholds are the ones `LIMITS` in src/index.js holds, and scripts/check.mjs refuses a
+# deploy where the two disagree. A request over its class's ceiling is answered 429
+# {"error":"rate_limited"} before it reaches storage or an outbound fetch.
+#
+# Sign-in: /account, /challenge, /login — 10 per minute per source.
+[[ratelimits]]
+name = "SIGNIN_LIMIT"
+namespace_id = "3101"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+# Icon and title: /icon, /title — 30 per ten seconds per source.
+[[ratelimits]]
+name = "FETCH_LIMIT"
+namespace_id = "3102"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 10
+
+# Vault: /vault, /sessions, /logout — 60 per minute per source.
+[[ratelimits]]
+name = "VAULT_LIMIT"
+namespace_id = "3103"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Vault"]

@@ -145,6 +145,44 @@ try {
   problems.push(`wordlist: ${error.message}`);
 }
 
+/* 4. The request limits the Worker counts are the ones wrangler.toml declares. A binding renamed
+   or a threshold edited in one file only would deploy, and would count nothing. */
+try {
+  const { LIMITS } = await import(join(root, 'src/index.js'));
+  const config = readFileSync(join(root, 'wrangler.toml'), 'utf8');
+  const blocks = config
+    .split('[[ratelimits]]')
+    .slice(1)
+    .map((part) => part.split('\n[[')[0]);
+  const namespaces = new Set();
+
+  for (const rule of Object.values(LIMITS)) {
+    const block = blocks.find((text) => text.includes(`name = "${rule.binding}"`));
+    if (!block) {
+      problems.push(`limits: wrangler.toml has no [[ratelimits]] binding named ${rule.binding}`);
+      continue;
+    }
+
+    const number = (field) =>
+      Number(block.match(new RegExp(`\\b${field}\\s*=\\s*([0-9_]+)`))?.[1]?.replace(/_/g, ''));
+    const limit = number('limit');
+    const period = number('period');
+    if (limit !== rule.limit || period !== rule.period) {
+      problems.push(
+        `limits: ${rule.binding} is limit=${limit} period=${period} in wrangler.toml, ` +
+          `limit=${rule.limit} period=${rule.period} in src/index.js`
+      );
+    }
+
+    const namespace = block.match(/\bnamespace_id\s*=\s*"([0-9]+)"/)?.[1];
+    if (!namespace) problems.push(`limits: ${rule.binding} has no namespace_id`);
+    else if (namespaces.has(namespace)) problems.push(`limits: namespace ${namespace} repeats`);
+    else namespaces.add(namespace);
+  }
+} catch (error) {
+  problems.push(`limits: ${error.message}`);
+}
+
 if (problems.length) {
   console.error('check failed:');
   for (const problem of problems) console.error(`  - ${problem}`);
@@ -152,5 +190,6 @@ if (problems.length) {
 }
 
 console.log(
-  `check passed: ${assets.length} assets, no third-party references, no overclaiming copy, 1296 words`
+  `check passed: ${assets.length} assets, no third-party references, no overclaiming copy, ` +
+    `1296 words, request limits match wrangler.toml`
 );

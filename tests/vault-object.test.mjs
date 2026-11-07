@@ -309,6 +309,43 @@ test('a challenge needs the account, and returns a nonce once it exists', async 
   assert.match(challenge.body.nonce, /^[A-Za-z0-9_-]{22}$/);
 });
 
+test('a challenge from anywhere else does not displace the nonce a sign-in is holding', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const owner = await read(await harness.vault.fetch(request('/challenge')));
+  assert.equal(owner.status, 200);
+
+  /* Two more callers ask for a challenge while the first is still valid. */
+  const stored = harness.storage.raw.get('nonce');
+  const second = await read(await harness.vault.fetch(request('/challenge')));
+  await harness.vault.fetch(request('/challenge'));
+
+  assert.equal(second.body.nonce, owner.body.nonce, 'the live nonce is the same value');
+  assert.equal(harness.storage.raw.get('nonce'), stored, 'and asking again writes nothing');
+
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, owner.body.nonce);
+  const login = await read(await harness.vault.fetch(request('/login', { body: { proof } })));
+  assert.equal(login.status, 200, 'the sign-in that was in progress completes');
+  assert.equal((await harness.storage.get('lock')).failures, 0, 'and no failure is counted');
+});
+
+test('a nonce that has expired is replaced, never handed out again', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const first = await read(await harness.vault.fetch(request('/challenge')));
+  harness.advance(60_000);
+
+  const second = await read(await harness.vault.fetch(request('/challenge')));
+  assert.equal(second.status, 200);
+  assert.notEqual(second.body.nonce, first.body.nonce);
+
+  const stale = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, first.body.nonce);
+  const login = await read(await harness.vault.fetch(request('/login', { body: { proof: stale } })));
+  assert.equal(login.status, 401, 'the expired nonce no longer signs anything in');
+});
+
 test('the right proof logs in, and the same proof cannot be replayed', async () => {
   const harness = object();
   await provision(harness);

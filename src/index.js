@@ -61,6 +61,46 @@ function redirect(url, pathname) {
   });
 }
 
+/**
+ * Has this source spent its class's budget?
+ *
+ * The counter is held against a digest of the class name and the caller's address, so no
+ * address is stored and none is logged. A class whose binding is absent is not counted;
+ * `npm run check` refuses that state in the configuration a deploy would ship.
+ */
+async function overLimit(env, className, request) {
+  const rule = LIMITS[className];
+  const binding = env?.[rule.binding];
+  if (!binding) return false;
+
+  const address = request.headers.get('cf-connecting-ip') ?? '';
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`${className}\n${address}`)
+  );
+  const { success } = await binding.limit({ key: toBase64Url(new Uint8Array(digest)) });
+  return !success;
+}
+
+/* 429 and nothing else: the class is refused before its route runs, so the refusal writes
+   nothing and fetches nothing on the caller's behalf. */
+function tooMany(className) {
+  return new Response(JSON.stringify({ error: 'rate_limited' }), {
+    status: 429,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'retry-after': String(LIMITS[className].period)
+    }
+  });
+}
+
+/** Run a route unless its source is over the class's ceiling. */
+async function limited(env, className, request, run) {
+  if (className && (await overLimit(env, className, request))) return tooMany(className);
+  return run();
+}
+
 /* The page is served at one prefix and that prefix is known here, so the 404 is generated in
    this file: its link back to the app and the site's security headers then match the rest of
    what the Worker returns, rather than whatever the asset binding would answer on its own. */
@@ -122,6 +162,33 @@ const ICON_TYPES = new Set([
   'image/webp',
   'image/gif'
 ]);
+
+/**
+ * What one source may spend per class, and the binding that counts it.
+ *
+ * The ceilings are the cost model: a sign-in request spends as much of its minute as eighteen
+ * icon fetches, or six vault requests. The routes that write, or that fetch somewhere else,
+ * are the ones a caller may spend least of. Each binding is a [[ratelimits]] entry in
+ * wrangler.toml with the same name, limit and period; `npm run check` fails when they differ.
+ */
+export const LIMITS = {
+  signin: { binding: 'SIGNIN_LIMIT', limit: 10, period: 60 },
+  fetch: { binding: 'FETCH_LIMIT', limit: 30, period: 10 },
+  vault: { binding: 'VAULT_LIMIT', limit: 60, period: 60 }
+};
+
+/* The class each route is counted as. Anything absent here is answered without a counter:
+   /health reads two constants, and an unknown path is a 404. */
+const ROUTE_CLASS = {
+  '/account': 'signin',
+  '/challenge': 'signin',
+  '/login': 'signin',
+  '/logout': 'vault',
+  '/sessions': 'vault',
+  '/vault': 'vault',
+  [ICON_PATH]: 'fetch',
+  [TITLE_PATH]: 'fetch'
+};
 
 const USER_AGENT = 'Bookmarks/0.1 (+https://www.332321.xyz/w/bookmarks/)';
 
@@ -746,8 +813,17 @@ async function handleApi(request, env, url) {
   const path = url.pathname.slice(API_PREFIX.length);
 
   if (path === '/health') return json({ ok: true, version: VERSION });
-  if (path === ICON_PATH) return handleIcon(request, url, iconTimeoutOf(env));
-  if (path === TITLE_PATH) return handleTitle(request, url, iconTimeoutOf(env));
+
+  if (path === ICON_PATH) {
+    return limited(env, ROUTE_CLASS[ICON_PATH], request, () =>
+      handleIcon(request, url, iconTimeoutOf(env))
+    );
+  }
+  if (path === TITLE_PATH) {
+    return limited(env, ROUTE_CLASS[TITLE_PATH], request, () =>
+      handleTitle(request, url, iconTimeoutOf(env))
+    );
+  }
 
   if (path.startsWith('/a/')) {
     const rest = path.slice('/a/'.length);
@@ -764,7 +840,9 @@ async function handleApi(request, env, url) {
 
     const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
     const target = new URL(`https://vault${forward}`, 'https://vault');
-    return stub.fetch(new Request(target, request));
+    return limited(env, ROUTE_CLASS[forward], request, () =>
+      stub.fetch(new Request(target, request))
+    );
   }
 
   return json({ error: 'not_found' }, 404);
