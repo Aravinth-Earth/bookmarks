@@ -59,6 +59,8 @@ const ICON_TRIES_KEY = 'bookmarks-icon-tries';
 const ICON_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 const ICON_TOPUP_HOSTS = 20;
 let iconsBusy = false;
+/* Set when a long press opened the editor, so the click that follows does not open the site. */
+let pressOpenedEditor = false;
 /* True once a name has been typed for the bookmark being added, so a suggestion never wins. */
 let nameTouched = false;
 let lastSyncedAt = 0;
@@ -90,6 +92,8 @@ const searchInput = $('search');
 const sortInput = $('sort');
 const viewInput = $('view');
 const settingsButton = $('settings-button');
+const lockButton = $('lock-button');
+const viewToggle = $('view-toggle');
 const addForm = $('add-form');
 const addToggle = $('add-toggle');
 const addCancel = $('add-cancel');
@@ -1144,7 +1148,13 @@ function rowFor(bookmark) {
     actionButton('remove', `Delete ${labelOf(bookmark)}`, 'remove')
   ]);
 
-  row.append(link, clicks, actions);
+  /* In the pills view the whole chip opens the site, so editing needs a target of its own; in
+     the list view the pencil in .row-actions already is one. */
+  const quick = el('span', { class: 'row-quick' }, [
+    actionButton('edit', `Edit ${labelOf(bookmark)}`, 'edit')
+  ]);
+
+  row.append(link, clicks, quick, actions);
   return row;
 }
 
@@ -1198,6 +1208,8 @@ async function suggestName() {
     addName.placeholder = original;
   }
   if (!title || nameTouched || addName.value.trim() !== '' || addUrl.value.trim() !== raw) return;
+  /* The answer can land after the person has moved into the field; typing wins. */
+  if (document.activeElement === addName) return;
 
   addName.value = shortenTitle(title);
 }
@@ -1578,6 +1590,7 @@ function handleListClick(event) {
     }
     return;
   }
+
 
   /* A click on the link counts the visit. It is not prevented: the browser opens the tab, and
      the count is written behind it. The list re-sorts only after the click has been handled. */
@@ -2066,6 +2079,82 @@ function bindEvents() {
     delete addName.dataset.suggesting;
   });
   list.addEventListener('click', handleListClick);
+
+  /* A long press opens the editor under the finger; the release's click must not reach the
+     backdrop (which would close it) or the link (which would open the site). */
+  document.addEventListener(
+    'click',
+    (event) => {
+      if (!pressOpenedEditor) return;
+      pressOpenedEditor = false;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    true
+  );
+
+  /* Editing a pill: the pencil on hover, a right-click, or a press held on a phone. */
+  list.addEventListener('contextmenu', (event) => {
+    const row = event.target.closest('.row');
+    const bookmark = row ? findBookmark(row.dataset.id) : null;
+    if (!bookmark) return;
+    event.preventDefault();
+    openEditModal(bookmark);
+  });
+
+  let pressTimer = 0;
+  let pressStart = null;
+  const cancelPress = () => {
+    clearTimeout(pressTimer);
+    pressTimer = 0;
+    pressStart = null;
+  };
+
+  list.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'mouse') return;
+    const row = event.target.closest('.row');
+    if (!row || event.target.closest('button')) return;
+    const id = row.dataset.id;
+    pressStart = { x: event.clientX, y: event.clientY };
+    clearTimeout(pressTimer);
+    pressTimer = setTimeout(() => {
+      pressTimer = 0;
+      const bookmark = findBookmark(id);
+      if (!bookmark) return;
+      pressOpenedEditor = true;
+      /* The finger is still down: the click it produces on release would land on the modal's
+         backdrop and close it again. One capturing listener eats that click. */
+      setTimeout(() => {
+        pressOpenedEditor = false;
+      }, 800);
+      openEditModal(bookmark);
+    }, 550);
+  });
+
+  list.addEventListener('pointermove', (event) => {
+    if (!pressStart) return;
+    if (Math.abs(event.clientX - pressStart.x) > 10 || Math.abs(event.clientY - pressStart.y) > 10) {
+      cancelPress();
+    }
+  });
+  list.addEventListener('pointerup', cancelPress);
+  list.addEventListener('pointercancel', cancelPress);
+
+  lockButton.addEventListener('click', () => lockVault());
+
+  /* On a phone the view select gives way to one button that flips between the two views. */
+  viewToggle.addEventListener('click', () => {
+    currentView = currentView === 'pills' ? 'list' : 'pills';
+    writePref(VIEW_KEY, currentView);
+    applyAppearance();
+    viewToggle.setAttribute('aria-label', `Switch to ${currentView === 'pills' ? 'list' : 'pills'} view`);
+    state.document = {
+      ...state.document,
+      prefs: { ...state.document.prefs, view: currentView }
+    };
+    saveNow();
+  });
+
   searchInput.addEventListener('input', render);
 
   sortInput.addEventListener('change', () => {

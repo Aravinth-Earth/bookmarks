@@ -251,6 +251,11 @@ a:focus-visible {
 
 /* ---------------------------------------------------------------- toolbar */
 
+/* The view toggle is the phone's stand-in for the view select. */
+.view-toggle {
+    display: none;
+}
+
 /* The toolbar's own icons exist for the phone width, where the labels are hidden. */
 .button-icon {
     display: none;
@@ -597,6 +602,19 @@ a:focus-visible {
     pointer-events: none;
 }
 
+/* The pencil sits above the stretched link so a hover target exists inside a chip that
+   otherwise opens the site. */
+.row-quick {
+    display: none;
+    position: relative;
+    z-index: 1;
+}
+
+.list[data-view='pills'] .row:hover .row-quick,
+.list[data-view='pills'] .row:focus-within .row-quick {
+    display: flex;
+}
+
 /* A focus ring around the whole pill, because that is now the thing the link covers. */
 .list[data-view='pills'] .row:focus-within {
     outline: 2px solid var(--focus-ring, var(--accent, #58a6ff));
@@ -933,15 +951,23 @@ body.modal-open {
         flex: 1 1 100%;
     }
 
-    .sort,
-    .view {
-        flex: 1 1 0;
+    /* One select and four icons: two selects plus buttons was a crowded, clipped row. */
+    .sort {
+        flex: 1 1 auto;
         min-width: 0;
     }
 
-    .sort select,
-    .view select {
+    .sort select {
         width: 100%;
+    }
+
+    .view {
+        display: none;
+    }
+
+    .view-toggle {
+        display: grid;
+        place-items: center;
     }
 
     .toolbar .button-label {
