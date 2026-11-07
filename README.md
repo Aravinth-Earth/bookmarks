@@ -64,9 +64,10 @@ Open the app, create a vault (or unlock one), then Settings → **Sync**. The fi
 the account and pushes this device's vault; another device that enters the same phrase pulls it
 and merges.
 
-Creation is open but bounded: one Registry object caps how many accounts may exist — 50 by
-default, `MAX_ACCOUNTS` in `src/registry.js`, overridable by a var of the same name. At the cap
-the server answers `429 {error:"full"}`.
+Creation is open but bounded: one Registry object caps how many accounts may exist. The cap
+is **1 while the service is being tested** — set in `wrangler.toml` as `MAX_ACCOUNTS`, falling
+back to 50 in `src/registry.js` when the var is absent. At the cap the server answers
+`429 {error:"full"}`.
 
 ## Secrets
 

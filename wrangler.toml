@@ -6,6 +6,11 @@ name = "bookmarks"
 main = "src/index.js"
 compatibility_date = "2026-10-30"
 
+[vars]
+# One account while the service is being tested. The Registry enforces it and answers
+# 429 {error:"full"} at the cap; raise it to open creation to others.
+MAX_ACCOUNTS = "1"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
