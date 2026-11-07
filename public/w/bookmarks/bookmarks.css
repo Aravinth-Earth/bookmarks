@@ -930,6 +930,14 @@ body.modal-open {
     font-size: var(--font-size-xs, 0.7rem);
 }
 
+/* A row that only states a fact: no hover lift, because there is nothing to press. */
+.settings-stamp,
+.settings-stamp:hover {
+    background: var(--bg-inset, #0d1117);
+    border-color: var(--border, #21262d);
+    cursor: default;
+}
+
 .settings-heading {
     margin: var(--space-2, 0.5rem) 0 0;
     color: var(--text-muted, #6e7681);

@@ -487,7 +487,10 @@ export class Vault {
 
     /* The flag can be set after the account already exists: the next login upgrades it. */
     account = await this.claimOwner(account);
-    await this.storage.put('account', { ...account, lastSeenAt: now });
+    /* Kept in this local too, so the answer below reads the moment that was just stored rather
+       than the one it replaced. */
+    account = { ...account, lastSeenAt: now };
+    await this.storage.put('account', account);
     await this.pruneSessions();
 
     const token = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
@@ -509,6 +512,11 @@ export class Vault {
       units: account.units ?? 0,
       trialEndsAt: account.trialEndsAt ?? null,
       paidUntil: account.paidUntil ?? null,
+      /* The account's own dates, in milliseconds. They are only ever sent in this answer, which
+         needs a proof of the phrase, so the owner can read when the vault was created and when
+         it last moved without a second request — and nobody without the phrase is told either. */
+      createdAt: account.createdAt ?? null,
+      lastSeenAt: account.lastSeenAt ?? null,
       places
     });
   }
