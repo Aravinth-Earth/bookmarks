@@ -724,18 +724,23 @@ async function handleUnlock(event) {
 function openCreateModal() {
   let phrase = generatePhrase();
   let words = phrase.split(' ');
-  let gridVisible = true;
+  /* A line is the default: it is what a person copies. The grid is for reading word by word. */
+  let showGrid = false;
+  let feedbackTimer = 0;
 
-  const grid = el('div', { class: 'phrase-grid' });
+  const grid = el('div', { class: 'phrase-grid', hidden: true });
+  const line = el('p', { class: 'phrase-line' });
+  const copyStatus = el('span', { class: 'visually-hidden', 'aria-live': 'polite' });
+
   const copyButton = el('button', {
-    class: 'button button-quiet',
+    class: 'button button-quiet copy-button',
     type: 'button',
     text: 'Copy phrase'
   });
-  const oneLineButton = el('button', {
+  const viewButton = el('button', {
     class: 'button button-quiet',
     type: 'button',
-    text: 'Show the phrase as one line'
+    text: 'Show as word grid'
   });
   const regenerateButton = el('button', {
     class: 'button button-quiet',
@@ -751,29 +756,63 @@ function openCreateModal() {
   });
 
   function renderPhrase() {
-    if (gridVisible) {
+    grid.hidden = !showGrid;
+    line.hidden = showGrid;
+
+    if (showGrid) {
       grid.replaceChildren(...words.map((word) => el('span', { text: word })));
+      viewButton.textContent = 'Show as one line';
     } else {
-      grid.replaceChildren(el('span', { text: phrase }));
+      line.textContent = phrase;
+      viewButton.textContent = 'Show as word grid';
     }
   }
 
-  function showOneLine() {
-    gridVisible = false;
-    oneLineButton.textContent = 'Show the phrase as a grid';
-    renderPhrase();
+  /** The clipboard API can be refused; a hidden textarea with execCommand still works on a tap. */
+  function copyWithSelection() {
+    const field = document.createElement('textarea');
+    field.value = phrase;
+    field.setAttribute('readonly', '');
+    field.style.position = 'fixed';
+    field.style.top = '-1000px';
+    document.body.append(field);
+    field.select();
+
+    let copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    }
+    field.remove();
+    return copied;
   }
 
-  /** Select the whole phrase, so the clipboard fallback is one keypress away. */
   function selectPhrase() {
-    showOneLine();
-    const span = grid.firstElementChild;
-    if (!span) return;
+    showGrid = false;
+    renderPhrase();
+
     const range = document.createRange();
-    range.selectNodeContents(span);
+    range.selectNodeContents(line);
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
+    line.focus?.();
+  }
+
+  /** One tap, one visible answer: the label changes, the colour changes, the width does not. */
+  function feedback(label, copied) {
+    clearTimeout(feedbackTimer);
+    copyButton.textContent = label;
+    copyButton.classList.toggle('copied', copied);
+    copyStatus.textContent = copied
+      ? 'Phrase copied to the clipboard.'
+      : 'The phrase is selected. Press Control C to copy it.';
+
+    feedbackTimer = setTimeout(() => {
+      copyButton.textContent = 'Copy phrase';
+      copyButton.classList.remove('copied');
+    }, 2400);
   }
 
   renderPhrase();
@@ -781,30 +820,34 @@ function openCreateModal() {
   copyButton.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(phrase);
-      copyButton.textContent = 'Copied';
+      feedback('Copied', true);
+      return;
     } catch {
-      selectPhrase();
-      copyButton.textContent = 'Press Ctrl+C';
+      /* Fall through to the selection-based copy. */
     }
-    setTimeout(() => (copyButton.textContent = 'Copy phrase'), 2400);
+
+    if (copyWithSelection()) {
+      feedback('Copied', true);
+      return;
+    }
+
+    selectPhrase();
+    feedback('Press Ctrl+C', false);
   });
 
-  oneLineButton.addEventListener('click', () => {
-    gridVisible = !gridVisible;
-    oneLineButton.textContent = gridVisible
-      ? 'Show the phrase as one line'
-      : 'Show the phrase as a grid';
+  viewButton.addEventListener('click', () => {
+    showGrid = !showGrid;
     renderPhrase();
   });
 
   regenerateButton.addEventListener('click', () => {
     phrase = generatePhrase();
     words = phrase.split(' ');
-    gridVisible = true;
-    oneLineButton.textContent = 'Show the phrase as one line';
-    copyButton.textContent = 'Copy phrase';
     saved.checked = false;
     createButton.disabled = true;
+    clearTimeout(feedbackTimer);
+    copyButton.textContent = 'Copy phrase';
+    copyButton.classList.remove('copied');
     renderPhrase();
   });
 
@@ -819,8 +862,10 @@ function openCreateModal() {
         class: 'modal-note',
         text: 'These thirteen words are the vault. They are shown once and are not stored anywhere. Copy them, or write them down, before continuing.'
       }),
+      line,
       grid,
-      el('div', { class: 'phrase-actions' }, [copyButton, oneLineButton, regenerateButton]),
+      el('div', { class: 'phrase-actions' }, [copyButton, viewButton, regenerateButton]),
+      copyStatus,
       el('p', {
         class: 'modal-note',
         text: 'There is no recovery. Anyone with these words can read the vault; anyone without them, including this server, cannot.'
