@@ -21,6 +21,7 @@ import { Vault } from '../src/vault.js';
 import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
 import { parsed, withEvents } from './logs.mjs';
+import { withFetch } from './dns.mjs';
 
 const PHRASE = WORDLIST.slice(0, 13).join(' ');
 const ACCOUNT = await deriveAccount(PHRASE);
@@ -441,16 +442,6 @@ function api(path, { method = 'GET', body, headers = {}, source = SOURCE } = {})
     },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
-}
-
-async function withFetch(implementation, run) {
-  const original = globalThis.fetch;
-  globalThis.fetch = implementation;
-  try {
-    return await run();
-  } finally {
-    globalThis.fetch = original;
-  }
 }
 
 const HOST = 'example.com';
