@@ -30,7 +30,7 @@ import {
   parseSealed
 } from './import-export.js';
 import { tileFor } from './tiles.js';
-import { fetchIcon } from './icons.js';
+import { fetchIcon, fetchPageTitle } from './icons.js';
 import { SyncClient, SyncError } from './sync.js';
 
 const store = createVault(indexedDbAdapter());
@@ -59,6 +59,8 @@ const ICON_TRIES_KEY = 'bookmarks-icon-tries';
 const ICON_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 const ICON_TOPUP_HOSTS = 20;
 let iconsBusy = false;
+/* True once a name has been typed for the bookmark being added, so a suggestion never wins. */
+let nameTouched = false;
 let lastSyncedAt = 0;
 let plan = null;
 let units = 0;
@@ -694,6 +696,7 @@ async function syncNow() {
 function setAddForm(open, { focus = true } = {}) {
   addForm.hidden = !open;
   addToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (!open) nameTouched = false;
   if (!focus) return;
   (open ? addUrl : addToggle).focus();
 }
@@ -724,12 +727,24 @@ function enter({ accountId, authSecret, key, version, sealed, document: vaultDoc
 
   sortInput.value = vaultDocument.prefs?.sort ?? 'clicks';
   searchInput.value = '';
+
+  /* The listing preference travels with the vault, so the second device opens the way the first
+     one was left. localStorage stays as the pre-paint value for a returning visit. */
+  if (VIEWS.has(vaultDocument.prefs?.view)) {
+    currentView = vaultDocument.prefs.view;
+    writePref(VIEW_KEY, currentView);
+  }
+  applyAppearance();
+
   render();
 
-  const empty = vaultDocument.bookmarks.length === 0;
-  setAddForm(empty, { focus: false });
-  if (empty) addUrl.focus();
-  else if (window.matchMedia?.('(pointer: fine)').matches) searchInput.focus();
+  /* The add form is an action, not furniture: it opens when it is asked for. An empty vault used
+     to open it on every entry, which is why it appeared after a vault was loaded from the
+     server. */
+  setAddForm(false);
+  if (window.matchMedia?.('(pointer: fine)').matches && vaultDocument.bookmarks.length > 0) {
+    searchInput.focus();
+  }
 
   if (syncEnabled()) syncNow();
   scheduleIconTopUp();
@@ -1002,6 +1017,7 @@ async function createNewVault(phrase, remember) {
   else await store.forget();
 
   enter({ accountId, authSecret, key: vaultKey, version: 1, sealed, document: vaultDocument });
+  setAddForm(true);
   announce('Vault created. Add a bookmark, or import a file from Settings.');
 }
 
@@ -1153,6 +1169,60 @@ function render() {
 
 /* ------------------------------------------------------------------- actions */
 
+/**
+ * The site usually says what it is called. Leaving the address field asks for its <title> and
+ * offers it as the name — but only while the name field is still empty and untouched, so nothing
+ * the person typed is ever replaced. A failure is silence, and the host stands in as the label.
+ */
+async function suggestName() {
+  const raw = addUrl.value.trim();
+  if (raw === '' || nameTouched || addName.value.trim() !== '') return;
+
+  let url;
+  try {
+    url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    return;
+  }
+  if (!/^https?:$/.test(url.protocol)) return;
+
+  const hostname = url.hostname.replace(/^www\./i, '');
+  const original = addName.placeholder;
+  addName.dataset.suggesting = '1';
+  addName.placeholder = 'Looking for the site name…';
+
+  const title = await fetchPageTitle(hostname).catch(() => null);
+
+  if (addName.dataset.suggesting === '1') {
+    delete addName.dataset.suggesting;
+    addName.placeholder = original;
+  }
+  if (!title || nameTouched || addName.value.trim() !== '' || addUrl.value.trim() !== raw) return;
+
+  addName.value = shortenTitle(title);
+}
+
+/**
+ * Page titles are written for search engines, not for a chip in a list: "GitHub · Change is
+ * constant. GitHub keeps you ahead. · GitHub · GitHub" is the site's name plus its whole pitch.
+ * The first segment is the name; the rest is kept only when there is no separator to cut at.
+ */
+function shortenTitle(title) {
+  const flat = String(title).replace(/\s+/g, ' ').trim();
+  if (flat.length <= 48) return flat;
+
+  for (const separator of [' | ', ' · ', ' — ', ' - ']) {
+    const [head] = flat.split(separator);
+    const candidate = head.trim();
+    if (candidate.length >= 3 && candidate.length < flat.length) return candidate;
+  }
+
+  /* No separator worth trusting: cut on a word boundary rather than mid-word. */
+  const clipped = flat.slice(0, 48);
+  const space = clipped.lastIndexOf(' ');
+  return (space > 24 ? clipped.slice(0, space) : clipped).trimEnd();
+}
+
 async function handleAdd(event) {
   event.preventDefault();
 
@@ -1174,6 +1244,21 @@ async function handleAdd(event) {
     saveNow();
     announce(`Added ${labelOf(bookmark)}`);
     fetchAndStoreIcon(bookmark.id, bookmark.hostname);
+
+    /* Submitting before the suggestion arrived leaves the host as the label; if the site does
+       have a name, put it in — unless one was typed meanwhile. */
+    if (bookmark.name === '') {
+      fetchPageTitle(bookmark.hostname)
+        .then((title) => {
+          if (!title) return;
+          const current = findBookmark(bookmark.id);
+          if (!current || current.name !== '') return;
+          state.document = updateBookmark(state.document, bookmark.id, { name: shortenTitle(title) }, Date.now);
+          render();
+          saveNow();
+        })
+        .catch(() => {});
+    }
   } catch (error) {
     if (error.code === 'DUPLICATE') {
       searchInput.value = '';
@@ -1972,6 +2057,14 @@ function bindEvents() {
   addForm.addEventListener('submit', handleAdd);
   addToggle.addEventListener('click', () => setAddForm(addForm.hidden));
   addCancel.addEventListener('click', () => setAddForm(false));
+
+  /* Suggest the site's own name once the address is settled, and stand out of the way the moment
+     a name is typed. */
+  addUrl.addEventListener('blur', suggestName);
+  addName.addEventListener('input', () => {
+    nameTouched = true;
+    delete addName.dataset.suggesting;
+  });
   list.addEventListener('click', handleListClick);
   searchInput.addEventListener('input', render);
 
@@ -1990,6 +2083,11 @@ function bindEvents() {
     currentView = VIEWS.has(viewInput.value) ? viewInput.value : 'pills';
     writePref(VIEW_KEY, currentView);
     applyAppearance();
+    state.document = {
+      ...state.document,
+      prefs: { ...state.document.prefs, view: currentView }
+    };
+    saveNow();
   });
 
   document.addEventListener('keydown', (event) => {

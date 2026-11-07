@@ -251,6 +251,13 @@ a:focus-visible {
 
 /* ---------------------------------------------------------------- toolbar */
 
+/* The toolbar's own icons exist for the phone width, where the labels are hidden. */
+.button-icon {
+    display: none;
+    width: 1.05rem;
+    height: 1.05rem;
+}
+
 .toolbar {
     position: sticky;
     top: 0;
@@ -891,7 +898,21 @@ body.modal-open {
 
 @media (max-width: 40rem) {
     .shell {
-        padding: var(--space-4, 1rem) var(--space-3, 0.75rem) var(--space-6, 1.5rem);
+        padding: var(--space-3, 0.75rem) var(--space-3, 0.75rem) var(--space-6, 1.5rem);
+    }
+
+    /* On a phone the list is the screen: the introduction goes, the title shrinks, and the two
+       actions become icons so the controls fit one row under the search field. */
+    .masthead {
+        margin-bottom: var(--space-2, 0.5rem);
+    }
+
+    .masthead h1 {
+        font-size: var(--font-size-lg, 1.15rem);
+    }
+
+    .lede {
+        display: none;
     }
 
     .add {
@@ -904,18 +925,39 @@ body.modal-open {
 
     .toolbar {
         flex-wrap: wrap;
+        gap: var(--space-1, 0.25rem);
+        padding: var(--space-1, 0.25rem) 0;
     }
 
     .search {
-        flex-basis: 100%;
+        flex: 1 1 100%;
     }
 
-    .sort {
-        flex: 1 1 auto;
+    .sort,
+    .view {
+        flex: 1 1 0;
+        min-width: 0;
     }
 
-    .sort select {
+    .sort select,
+    .view select {
         width: 100%;
+    }
+
+    .toolbar .button-label {
+        display: none;
+    }
+
+    .toolbar .button-icon {
+        display: block;
+    }
+
+    .toolbar .button {
+        padding: 0.4rem 0.55rem;
+    }
+
+    .vault-status {
+        margin: var(--space-1, 0.25rem) 0;
     }
 
     .row-actions {

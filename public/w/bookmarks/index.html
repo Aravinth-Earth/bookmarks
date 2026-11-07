@@ -90,9 +90,15 @@
                     </select>
                 </label>
 
-                <button id="add-toggle" class="button add-toggle" type="button" aria-expanded="false" aria-controls="add-form">+ Add</button>
+                <button id="add-toggle" class="button add-toggle" type="button" aria-expanded="false" aria-controls="add-form" aria-label="Add a bookmark">
+                    <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    <span class="button-label">Add</span>
+                </button>
 
-                <button id="settings-button" class="button button-quiet" type="button">Settings</button>
+                <button id="settings-button" class="button button-quiet" type="button" aria-label="Settings">
+                    <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8h9M19 8h1M4 16h3M13 16h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="15" cy="8" r="2.6" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="16" r="2.6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+                    <span class="button-label">Settings</span>
+                </button>
             </div>
 
             <p id="plan-note" class="plan-note" hidden></p>

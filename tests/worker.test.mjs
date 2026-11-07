@@ -357,3 +357,60 @@ test('the site stylesheets are proxied with a cache header', async () => {
   assert.match(response.headers.get('cache-control'), /max-age=86400/);
   assert.deepEqual(asked, ['https://www.332321.xyz/css/tokens.css']);
 });
+
+/* -------------------------------------------------------------- title service */
+
+function titleRequest({ host = ICON_HOST, hash = ICON_HASH, method = 'GET' } = {}) {
+  return new Request(`https://b.332321.xyz/w/bookmarks/api/title?h=${hash}`, {
+    method,
+    headers: host ? { 'x-page-host': host } : {}
+  });
+}
+
+test('the title service refuses a missing host, a non-DNS host or a wrong hash', async () => {
+  for (const host of ['127.0.0.1', 'localhost', 'EXAMPLE.com', 'exa mple.com', '']) {
+    const response = await worker.fetch(titleRequest({ host }), harness().env);
+    assert.equal(response.status, 400, JSON.stringify(host));
+  }
+
+  const wrongHash = await worker.fetch(titleRequest({ hash: 'a'.repeat(43) }), harness().env);
+  assert.equal(wrongHash.status, 400);
+
+  const wrongMethod = await worker.fetch(titleRequest({ method: 'POST' }), harness().env);
+  assert.equal(wrongMethod.status, 405);
+});
+
+test('a title is read from the page head and answered with a cache lifetime', async () => {
+  const asked = [];
+  const response = await withFetch(
+    async (url) => {
+      asked.push(url);
+      return new Response('<html><head><title>Example &amp; Co</title></head><body>…</body></html>', {
+        headers: { 'content-type': 'text/html; charset=utf-8' }
+      });
+    },
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { title: 'Example & Co' });
+  assert.match(response.headers.get('cache-control'), /max-age=604800/);
+  assert.deepEqual(asked, ['https://example.com/'], 'only the origin is asked, never a path');
+});
+
+test('a page larger than the read cap still yields its title, and a page without one misses', async () => {
+  const big = `<html><head><title>Big Page</title></head><body>${'x'.repeat(400 * 1024)}</body></html>`;
+  const fromBig = await withFetch(
+    async () => new Response(big, { headers: { 'content-type': 'text/html' } }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  assert.equal(fromBig.status, 200);
+  assert.deepEqual(await fromBig.json(), { title: 'Big Page' });
+
+  const none = await withFetch(
+    async () => new Response('<html><head></head></html>', { headers: { 'content-type': 'text/html' } }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  assert.equal(none.status, 404);
+  assert.equal((await none.json()).error, 'no_title');
+});
