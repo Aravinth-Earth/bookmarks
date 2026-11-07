@@ -128,16 +128,6 @@ test('an unknown route is a 404', async () => {
   assert.equal(response.status, 404);
 });
 
-test('the first reservation is marked as the first account', async () => {
-  const { registry } = harness();
-
-  const first = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
-  assert.equal(first.body.first, true);
-
-  const second = await json(await registry.fetch(reserve({ accountId: accountId(2) })));
-  assert.equal(second.body.first, false);
-});
-
 test('releasing a slot lets another account take it', async () => {
   const { registry } = harness({ MAX_ACCOUNTS: '1' });
 
@@ -151,7 +141,6 @@ test('releasing a slot lets another account take it', async () => {
 
   const accepted = await json(await registry.fetch(reserve({ accountId: accountId(2) })));
   assert.equal(accepted.status, 200);
-  assert.equal(accepted.body.first, true, 'the freed slot makes the next account the first');
 });
 
 test('releasing an unknown id is harmless, an invalid one is refused', async () => {

@@ -62,12 +62,7 @@ export class Registry {
 
     accounts.push(accountId);
     await this.storage.put('accounts', accounts);
-    return json({
-      ok: true,
-      first: accounts.length === 1,
-      count: accounts.length,
-      max: this.max()
-    });
+    return json({ ok: true, count: accounts.length, max: this.max() });
   }
 
   /**

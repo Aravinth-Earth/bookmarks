@@ -12,9 +12,12 @@
  * `now` is injectable so expiry and lockout are testable without waiting.
  */
 
-export const PAID_MAX_CT_CHARS = 1_400_000;
-/* About 120 KB sealed: a few hundred bookmarks with icons. Small on purpose — the free tier is
-   a trial, not a place to keep a library forever. */
+/* One paid unit is about ten bookmarks; 10 units is about a hundred. The cap is bytes because
+   the server cannot count entries in a sealed vault. */
+export const UNIT_CT_CHARS = 14_000;
+/* The owner's balance. It is a number like anyone else's, so the paid path is the same code. */
+export const OWNER_UNITS = 100;
+/* About 11 units: roughly a hundred bookmarks with icons. */
 export const FREE_MAX_CT_CHARS = 160_000;
 export const FREE_TRIAL_MS = 30 * 24 * 60 * 60 * 1000;
 export const READ_ONLY_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -134,7 +137,6 @@ export class Vault {
     /* The cap lives in one object, so creation is serialised against it. An existing account
        never reaches this point, so a full registry cannot lock out the person who already has
        one, and a retried first sync cannot consume a second slot. */
-    let first = false;
     const registry = this.env?.REGISTRY;
     if (registry) {
       const stub = registry.get(registry.idFromName('registry'));
@@ -146,22 +148,20 @@ export class Vault {
         })
       );
       if (!reserved.ok) return json({ error: 'full' }, 429);
-
-      const reservation = await reserved.json().catch(() => ({}));
-      first = reservation.first === true;
     }
 
-    /* The first account on a fresh deployment is the owner's: it never expires, so the person
-       running this is not on a trial on their own server. No id or secret has to be configured
-       for that to be true. */
+    /* Ownership is named, never positional: whoever holds the phrase for the configured id is
+       the owner, and no one can become the owner by simply arriving first. */
     const now = this.now();
-    const plan = first ? 'owner' : 'free';
+    const plan = this.env?.OWNER_ACCOUNT_ID === accountId ? 'owner' : 'free';
     const trialEndsAt = plan === 'free' ? now + FREE_TRIAL_MS : null;
+    const units = plan === 'owner' ? OWNER_UNITS : 0;
 
     await this.storage.put('account', {
       accountId,
       authSecret,
       plan,
+      units,
       createdAt: now,
       lastSeenAt: now,
       trialEndsAt,
@@ -189,7 +189,7 @@ export class Vault {
   async login(request) {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
 
-    const account = await this.storage.get('account');
+    let account = await this.storage.get('account');
     if (!account) return json({ error: 'no_account' }, 404);
 
     const now = this.now();
@@ -225,6 +225,9 @@ export class Vault {
     }
 
     await this.storage.put('lock', { failures: 0, until: 0 });
+
+    /* The flag can be set after the account already exists: the next login upgrades it. */
+    account = await this.claimOwner(account);
     await this.storage.put('account', { ...account, lastSeenAt: now });
     await this.pruneSessions();
 
@@ -236,6 +239,7 @@ export class Vault {
       token,
       expiresAt,
       plan: account.plan ?? 'free',
+      units: account.units ?? 0,
       trialEndsAt: account.trialEndsAt ?? null,
       paidUntil: account.paidUntil ?? null
     });
@@ -282,8 +286,7 @@ export class Vault {
     if (typeof ct !== 'string' || ct.length === 0 || !BASE64URL.test(ct)) {
       return json({ error: 'bad_ct' }, 400);
     }
-    const limit =
-      account.plan === 'owner' || account.plan === 'paid' ? PAID_MAX_CT_CHARS : FREE_MAX_CT_CHARS;
+    const limit = this.capChars(account);
     if (ct.length > limit) return json({ error: 'quota', limit }, 413);
 
     const current = (await this.storage.get('vault')) ?? { version: 0 };
@@ -312,6 +315,26 @@ export class Vault {
     await this.storage.put('account', { ...account, lastSeenAt: updatedAt });
 
     return json(vault);
+  }
+
+  /** The owner's flag is applied on login, so it can be configured after the account exists. */
+  async claimOwner(account) {
+    const owner = this.env?.OWNER_ACCOUNT_ID;
+    if (!owner || owner !== account.accountId) return account;
+    if (account.plan === 'owner' && account.units === OWNER_UNITS) return account;
+
+    const upgraded = { ...account, plan: 'owner', units: OWNER_UNITS, trialEndsAt: null };
+    await this.storage.put('account', upgraded);
+    return upgraded;
+  }
+
+  /** Paid and owner accounts hold a number of units; free accounts hold a fixed trial size. */
+  capChars(account) {
+    if (account.plan === 'owner' || account.plan === 'paid') {
+      const units = Number.isInteger(account.units) ? account.units : 0;
+      return Math.max(0, units) * UNIT_CT_CHARS;
+    }
+    return FREE_MAX_CT_CHARS;
   }
 
   /** A free trial that has run out is read-only: the data can still be read and exported. */

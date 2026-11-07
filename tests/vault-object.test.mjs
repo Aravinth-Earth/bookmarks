@@ -13,7 +13,9 @@ import assert from 'node:assert/strict';
 import {
   FREE_MAX_CT_CHARS,
   FREE_TRIAL_MS,
+  OWNER_UNITS,
   READ_ONLY_GRACE_MS,
+  UNIT_CT_CHARS,
   Vault
 } from '../src/vault.js';
 import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
@@ -65,9 +67,9 @@ function object(overrides = {}) {
   const reserved = [];
   const released = [];
   let full = overrides.registryFull ?? false;
-  const first = overrides.first !== false;
 
   const env = {
+    OWNER_ACCOUNT_ID: overrides.ownerId ?? '',
     REGISTRY: {
       idFromName: (name) => ({ name }),
       get: (id) => ({
@@ -82,7 +84,7 @@ function object(overrides = {}) {
           }
 
           reserved.push(body.accountId);
-          return new Response(JSON.stringify(full ? { error: 'full' } : { ok: true, first }), {
+          return new Response(JSON.stringify(full ? { error: 'full' } : { ok: true }), {
             status: full ? 429 : 200,
             headers
           });
@@ -411,12 +413,13 @@ test('an unknown route is a 404, not a crash', async () => {
 
 const DAY = 24 * 60 * 60 * 1000;
 
-test('the first account is the owner and never expires', async () => {
-  const harness = object();
+test('the configured owner id gets the owner plan and never expires', async () => {
+  const harness = object({ ownerId: ACCOUNT.accountId });
   await provision(harness);
 
   const session = await login(harness);
   assert.equal(session.body.plan, 'owner');
+  assert.equal(session.body.units, OWNER_UNITS);
   assert.equal(session.body.trialEndsAt, null);
 
   harness.advance(10 * 365 * DAY);
@@ -434,8 +437,8 @@ test('the first account is the owner and never expires', async () => {
   assert.deepEqual(harness.released, []);
 });
 
-test('a later account is free and carries a trial deadline', async () => {
-  const harness = object({ first: false });
+test('an account that is not named as the owner is free and carries a trial deadline', async () => {
+  const harness = object();
   await provision(harness);
 
   const session = await login(harness);
@@ -444,7 +447,7 @@ test('a later account is free and carries a trial deadline', async () => {
 });
 
 test('a free vault turns read-only at the deadline and is deleted after the grace', async () => {
-  const harness = object({ first: false });
+  const harness = object();
   await provision(harness);
   const session = await login(harness);
   const auth = { authorization: `Bearer ${session.body.token}` };
@@ -490,13 +493,14 @@ test('a free vault turns read-only at the deadline and is deleted after the grac
 });
 
 test('a paid account keeps writing after the trial', async () => {
-  const harness = object({ first: false });
+  const harness = object();
   await provision(harness);
 
   const account = await harness.storage.get('account');
   await harness.storage.put('account', {
     ...account,
     plan: 'paid',
+    units: 10,
     paidUntil: 1_000_000 + FREE_TRIAL_MS + 90 * DAY
   });
 
@@ -517,7 +521,7 @@ test('a paid account keeps writing after the trial', async () => {
 });
 
 test('a free vault is held to the smaller quota', async () => {
-  const harness = object({ first: false });
+  const harness = object();
   await provision(harness);
   const session = await login(harness);
 
@@ -537,7 +541,7 @@ test('a free vault is held to the smaller quota', async () => {
 });
 
 test('the owner keeps the larger quota', async () => {
-  const harness = object();
+  const harness = object({ ownerId: ACCOUNT.accountId });
   await provision(harness);
   const session = await login(harness);
 
@@ -552,4 +556,48 @@ test('the owner keeps the larger quota', async () => {
   );
 
   assert.equal(response.status, 200);
+});
+
+test('an account created before the owner flag is configured is upgraded on login', async () => {
+  const harness = object();
+  await provision(harness);
+  assert.equal((await harness.storage.get('account')).plan, 'free');
+
+  harness.env.OWNER_ACCOUNT_ID = ACCOUNT.accountId;
+  const session = await login(harness);
+
+  assert.equal(session.body.plan, 'owner');
+  assert.equal(session.body.units, OWNER_UNITS);
+  assert.equal((await harness.storage.get('account')).plan, 'owner');
+});
+
+test('another account never becomes the owner', async () => {
+  const harness = object({ ownerId: 'B'.repeat(22) });
+  await provision(harness);
+
+  const session = await login(harness);
+  assert.equal(session.body.plan, 'free');
+  assert.equal(session.body.units, 0);
+});
+
+test('a paid account is capped by the units it holds', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const account = await harness.storage.get('account');
+  await harness.storage.put('account', { ...account, plan: 'paid', units: 1, paidUntil: null });
+
+  const session = await login(harness);
+  const response = await read(
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${session.body.token}` },
+        body: { baseVersion: 0, iv: IV, ct: 'a'.repeat(UNIT_CT_CHARS + 1) }
+      })
+    )
+  );
+
+  assert.equal(response.status, 413);
+  assert.equal(response.body.limit, UNIT_CT_CHARS);
 });

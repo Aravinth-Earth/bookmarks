@@ -53,6 +53,7 @@ let syncTimer = 0;
 let syncLabel = '';
 let lastSyncedAt = 0;
 let plan = null;
+let units = 0;
 let trialEndsAt = null;
 
 let saving = false;
@@ -424,6 +425,7 @@ function trialDaysLeft() {
 
 function applyPlan(payload) {
   plan = payload?.plan ?? null;
+  units = Number.isInteger(payload?.units) ? payload.units : 0;
   trialEndsAt = typeof payload?.trialEndsAt === 'number' ? payload.trialEndsAt : null;
   renderPlanNote();
 }
@@ -453,8 +455,8 @@ function renderPlanNote() {
 
 function planLabel() {
   if (!syncEnabled()) return 'sync off';
-  if (plan === 'owner') return 'owner account';
-  if (plan === 'paid') return 'paid';
+  if (plan === 'owner') return units > 0 ? `owner account · ${units * 10} entries` : 'owner account';
+  if (plan === 'paid') return units > 0 ? `paid · ${units * 10} entries` : 'paid';
   if (plan === 'free') {
     const days = trialDaysLeft();
     return days !== null && days > 0 ? `free trial · ${days} days left` : 'free trial ended · read-only';
@@ -1566,7 +1568,20 @@ function openSettings() {
           }
           await syncNow();
           announce(syncLabel || 'Synced.');
-        })
+        }),
+        item(
+          'Account id',
+          state.accountId ?? 'not signed in',
+          async () => {
+            if (!state.accountId) return;
+            try {
+              await navigator.clipboard.writeText(state.accountId);
+              announce('Account id copied. It names this account; it cannot log in.');
+            } catch {
+              announce(`Account id: ${state.accountId}`, { duration: 8000 });
+            }
+          }
+        )
       ]),
       el('h3', { class: 'settings-heading', text: 'This device' }),
       el('div', { class: 'settings-list' }, [
@@ -1615,6 +1630,7 @@ async function lockVault() {
   syncLabel = '';
   lastSyncedAt = 0;
   plan = null;
+  units = 0;
   trialEndsAt = null;
   planNote.hidden = true;
   list.replaceChildren();

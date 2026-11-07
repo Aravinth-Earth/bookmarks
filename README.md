@@ -73,22 +73,35 @@ back to 50 in `src/registry.js` when the var is absent. At the cap the server an
 
 | Plan | Sync | Vault | How it is chosen |
 |---|---|---|---|
-| Owner | no expiry | ~1 MB | The first account on a fresh deployment |
-| Free | 30 days, then 7 days read-only | ~120 KB | Any account created after the first |
-| Paid | no expiry | ~1 MB+ | Planned; a subscription extends `paidUntil` |
+| Owner | no expiry | 100 units (~1 MB) | The account id set as `OWNER_ACCOUNT_ID` |
+| Free | 30 days, then 7 days read-only | ~11 units (~120 KB) | Everyone else |
+| Paid | no expiry | the units bought | Planned |
 
-The countdown is shown in the app. When a free trial ends the server copy becomes read-only for
-a week and is then deleted; **the bookmarks stay on the device throughout**, and a sealed backup
-can be exported at any time. The Registry releases the slot on deletion, so the cap frees itself.
+One unit is about ten bookmarks (14,000 sealed characters). The countdown is shown in the app.
+When a free trial ends the server copy becomes read-only for a week and is then deleted; **the
+bookmarks stay on the device throughout**, and a sealed backup can be exported at any time. The
+Registry releases the slot on deletion, so the cap frees itself.
 
-The free limit is bytes, not bookmarks: the vault is sealed, and the server cannot count entries
+The limit is bytes, not bookmarks: the vault is sealed, and the server cannot count entries
 without breaking the encryption.
+
+### Naming the owner
+
+Ownership is named, never positional. Copy the Account id from Settings, then set it once:
+
+```sh
+npx wrangler secret put OWNER_ACCOUNT_ID   # paste the id from Settings
+```
+
+The id routes requests to the account and cannot log in. If the account already exists as free,
+the next login upgrades it to the owner plan. No one can become the owner by arriving first.
 
 ## Secrets
 
-There are none. No token is needed in any environment, and nothing in this repository is a
-credential. The vault key is derived in the browser and never reaches the server; the auth
-secret it derives can log in and cannot decrypt.
+`OWNER_ACCOUNT_ID` is the only configured value, and it is optional: it names the account that
+is the owner. It is not a bearer token — it cannot log in, create accounts or read anything.
+Nothing in this repository is a credential. The vault key is derived in the browser and never
+reaches the server; the auth secret it derives can log in and cannot decrypt.
 
 ## Icons
 
