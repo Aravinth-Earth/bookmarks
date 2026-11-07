@@ -179,20 +179,53 @@ export class SyncClient {
   }
 
   /**
-   * Create the account on the server. First write wins; a 409 means the account we wanted is
-   * the account that exists, so it is success from the caller's point of view.
+   * Create the account on the server.
+   *
+   * The first request writes nothing: the server answers 428 with a nonce, and the proof is the
+   * same HMAC that signing in uses, so an account cannot be created for an id whose phrase the
+   * caller does not hold. A second attempt is made when the nonce was spent or replaced before
+   * the proof arrived, which is what two devices creating the same account at once looks like.
+   *
+   * `created: false` means the account already existed and this caller proved the same secret,
+   * so a retried creation is success and does not take a second slot.
    */
   async register(accountId, authSecret) {
-    const response = await this.request(`/a/${accountId}/account`, {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await this.registerOnce(accountId, authSecret);
+      if (result) return result;
+    }
+    throw new SyncError('REGISTER_FAILED', 'Could not create the account.');
+  }
+
+  /** One creation round trip. `null` means the challenge was stale and is worth retrying. */
+  async registerOnce(accountId, authSecret) {
+    const challenge = await this.request(`/a/${accountId}/account`, {
       method: 'POST',
       body: { accountId, authSecret }
     });
 
+    if (challenge.status === 429) {
+      throw new SyncError('FULL', 'This server is not accepting new vaults.');
+    }
+    if (challenge.status === 409) return { created: false };
+    if (challenge.status !== 428 || typeof challenge.payload.nonce !== 'string') {
+      throw new SyncError('REGISTER_FAILED', 'Could not create the account.', {
+        status: challenge.status
+      });
+    }
+
+    const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
+    const response = await this.request(`/a/${accountId}/account`, {
+      method: 'POST',
+      body: { accountId, authSecret, proof }
+    });
+
     if (response.status === 201) return { created: true };
-    if (response.status === 409) return { created: false };
+    if (response.status === 200) return { created: false };
     if (response.status === 429) {
       throw new SyncError('FULL', 'This server is not accepting new vaults.');
     }
+    if (response.status === 401 || response.status === 428) return null;
     throw new SyncError('REGISTER_FAILED', 'Could not create the account.', {
       status: response.status
     });

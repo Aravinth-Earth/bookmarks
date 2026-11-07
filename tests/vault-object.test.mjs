@@ -17,8 +17,10 @@ import {
   OWNER_UNITS,
   READ_ONLY_GRACE_MS,
   UNIT_CT_CHARS,
+  UNUSED_RELEASE_MS,
   Vault
 } from '../src/vault.js';
+import { Registry } from '../src/registry.js';
 import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
 
@@ -71,7 +73,7 @@ function object(overrides = {}) {
 
   const env = {
     OWNER_ACCOUNT_ID: overrides.ownerId ?? '',
-    REGISTRY: {
+    REGISTRY: overrides.registry ?? {
       idFromName: (name) => ({ name }),
       get: (id) => ({
         fetch: async (request) => {
@@ -128,11 +130,24 @@ async function read(response) {
   return { status: response.status, body: await response.json() };
 }
 
-async function provision(harness) {
+async function blind(harness, authSecret = ACCOUNT.authSecret) {
+  return read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.accountId, authSecret } })
+    )
+  );
+}
+
+/** The full creation flow: ask for a nonce, sign it with the secret, and write the account. */
+async function provision(harness, authSecret = ACCOUNT.authSecret) {
+  const challenge = await blind(harness, authSecret);
+  if (challenge.status !== 428) return challenge;
+
+  const proof = await proveAuth(authSecret, ACCOUNT.accountId, challenge.body.nonce);
   return read(
     await harness.vault.fetch(
       request('/account', {
-        body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret }
+        body: { accountId: ACCOUNT.accountId, authSecret, proof }
       })
     )
   );
@@ -145,15 +160,31 @@ async function login(harness) {
   return read(await harness.vault.fetch(request('/login', { body: { proof } })));
 }
 
-test('an account is provisioned exactly once', async () => {
+test('a blind creation request writes nothing and answers with a nonce', async () => {
+  const harness = object();
+
+  const response = await blind(harness);
+
+  assert.equal(response.status, 428);
+  assert.equal(response.body.error, 'proof_required');
+  assert.match(response.body.nonce, /^[A-Za-z0-9_-]{22}$/);
+  assert.equal(typeof response.body.expiresAt, 'number');
+  assert.equal(harness.storage.raw.has('account'), false, 'nothing is written yet');
+  assert.deepEqual(harness.reserved, [], 'a blind request takes no slot');
+});
+
+test('a valid proof creates the account exactly once', async () => {
   const harness = object();
 
   const first = await provision(harness);
   assert.equal(first.status, 201);
+  assert.equal(first.body.created, true);
+  assert.equal((await harness.storage.get('account')).authSecret, ACCOUNT.authSecret);
 
   const second = await provision(harness);
-  assert.equal(second.status, 409);
-  assert.equal(second.body.error, 'exists');
+  assert.equal(second.status, 200);
+  assert.equal(second.body.created, false);
+  assert.deepEqual(harness.reserved, [ACCOUNT.accountId], 'a retried creation takes one slot');
 
   for (const body of [
     {},
@@ -165,6 +196,68 @@ test('an account is provisioned exactly once', async () => {
     const response = await read(await harness.vault.fetch(request('/account', { body })));
     assert.equal(response.status, 400, JSON.stringify(body));
   }
+});
+
+test('a proof signed with a different secret is refused and writes nothing', async () => {
+  const harness = object();
+  const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
+
+  const challenge = await blind(harness);
+  assert.equal(challenge.status, 428);
+
+  const proof = await proveAuth(other.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const response = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret, proof }
+      })
+    )
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(response.body.error, 'bad_proof');
+  assert.equal(harness.storage.raw.has('account'), false);
+  assert.deepEqual(harness.reserved, []);
+});
+
+test('a nonce is single use, and a spent one earns a fresh challenge', async () => {
+  const harness = object();
+  const challenge = await blind(harness);
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+
+  const created = await read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret, proof } })
+    )
+  );
+  assert.equal(created.status, 201);
+
+  /* The same proof cannot be presented again: the nonce is gone, so a new challenge comes back. */
+  const replay = await read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret, proof } })
+    )
+  );
+  assert.equal(replay.status, 428);
+  assert.equal(replay.body.error, 'proof_required');
+  assert.notEqual(replay.body.nonce, challenge.body.nonce);
+});
+
+test('an existing account cannot be re-claimed with a different secret', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
+  const response = await provision(harness, other.authSecret);
+
+  assert.equal(response.status, 401);
+  assert.equal(response.body.error, 'bad_proof');
+  assert.equal(
+    (await harness.storage.get('account')).authSecret,
+    ACCOUNT.authSecret,
+    'the stored secret is untouched'
+  );
+  assert.equal((await login(harness)).status, 200, 'the real phrase still signs in');
 });
 
 test('a new account is refused when the registry is full', async () => {
@@ -184,7 +277,8 @@ test('an existing account is unaffected by a full registry', async () => {
   harness.setFull(true);
   const again = await provision(harness);
 
-  assert.equal(again.status, 409, 'the existing check comes before the reservation');
+  assert.equal(again.status, 200, 'the existing check comes before the reservation');
+  assert.equal(again.body.created, false);
   assert.equal(harness.reserved.length, 1);
 });
 
@@ -494,6 +588,57 @@ test('a free vault turns read-only at the deadline and is deleted after the grac
 
   assert.equal(harness.storage.raw.size, 0);
   assert.deepEqual(harness.released, [ACCOUNT.accountId]);
+});
+
+test('an account created and never used releases its slot after the idle window', async () => {
+  const harness = object();
+  await provision(harness);
+  assert.deepEqual(harness.reserved, [ACCOUNT.accountId]);
+
+  harness.advance(UNUSED_RELEASE_MS - 1);
+  await harness.vault.alarm();
+  assert.ok(harness.storage.raw.has('account'), 'still inside the idle window');
+  assert.deepEqual(harness.released, []);
+
+  harness.advance(2);
+  await harness.vault.alarm();
+  assert.equal(harness.storage.raw.size, 0, 'the unused account is gone');
+  assert.deepEqual(harness.released, [ACCOUNT.accountId]);
+});
+
+test('an account that signed in keeps its slot past the idle window', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  assert.equal(session.status, 200);
+
+  harness.advance(UNUSED_RELEASE_MS + 1);
+  await harness.vault.alarm();
+
+  assert.ok(harness.storage.raw.has('account'));
+  assert.deepEqual(harness.released, []);
+});
+
+test('a released unused account leaves no entry in the registry list', async () => {
+  const registryStorage = storage();
+  const registry = new Registry({ storage: registryStorage }, { MAX_ACCOUNTS: '1' });
+  const binding = {
+    idFromName: () => ({ name: 'registry' }),
+    get: () => ({ fetch: (request) => registry.fetch(request) })
+  };
+
+  const harness = object({ registry: binding });
+  await provision(harness);
+
+  const before = await (await registry.fetch(new Request('https://registry/admin-list'))).json();
+  assert.deepEqual(before.ids, [ACCOUNT.accountId]);
+
+  harness.advance(UNUSED_RELEASE_MS + 1);
+  await harness.vault.alarm();
+
+  const after = await (await registry.fetch(new Request('https://registry/admin-list'))).json();
+  assert.deepEqual(after.ids, [], 'no phantom entry is left behind');
+  assert.equal(after.count, 0);
 });
 
 test('a paid account keeps writing after the trial', async () => {
