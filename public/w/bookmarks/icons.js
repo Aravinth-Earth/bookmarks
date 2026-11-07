@@ -11,6 +11,7 @@
  */
 
 const API = '/w/bookmarks/api/icon';
+const TITLE_API = '/w/bookmarks/api/title';
 const MAX_BYTES = 64 * 1024;
 const RAW_FALLBACK_BYTES = 8 * 1024;
 const TILE_PX = 32;
@@ -101,4 +102,29 @@ export async function fetchIcon(hostname, { fresh = false } = {}) {
   if (!blob || blob.size === 0 || blob.size > MAX_BYTES) return null;
 
   return shrink(blob).catch(() => null);
+}
+
+/**
+ * The page's own <title>, for the name field. Same shape as the icon: the host rides in a
+ * header, the query carries only its hash, and a miss is simply no suggestion.
+ */
+export async function fetchPageTitle(hostname) {
+  if (typeof hostname !== 'string' || hostname === '') return null;
+
+  let response;
+  try {
+    const hash = await hostHash(hostname);
+    response = await fetch(`${TITLE_API}?h=${hash}`, {
+      headers: { 'x-page-host': hostname },
+      credentials: 'same-origin'
+    });
+  } catch {
+    return null;
+  }
+
+  if (!response.ok) return null;
+
+  const payload = await response.json().catch(() => null);
+  const title = typeof payload?.title === 'string' ? payload.title.trim() : '';
+  return title === '' ? null : title;
 }

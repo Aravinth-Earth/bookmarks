@@ -106,6 +106,9 @@ function notFound(prefix) {
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
 
 const ICON_PATH = '/icon';
+/* A page's own <title>, so the add form can suggest a name instead of showing a bare host. */
+const TITLE_PATH = '/title';
+const TITLE_MAX_CHARS = 120;
 const ICON_MAX_BYTES = 64 * 1024;
 const ICON_PAGE_MAX_BYTES = 256 * 1024;
 const ICON_TIMEOUT_MS = 10_000;
@@ -136,6 +139,45 @@ async function hostHash(hostname) {
 }
 
 /** Read at most `max` bytes, cancelling the stream the moment it exceeds the cap. */
+/**
+ * The first `max` bytes of a response, then stop reading.
+ *
+ * A page is worth reading only as far as its <head>: refusing a body because the whole document
+ * is over the cap is why sites with large pages (github.com, itsfoss.com) answered "no icon" and
+ * had no title to offer. Images still go through readCapped, where a short read would corrupt.
+ */
+async function readPrefix(response, max) {
+  if (!response.body) return new Uint8Array(0);
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const room = max - total;
+    if (value.byteLength >= room) {
+      chunks.push(value.subarray(0, room));
+      total += room;
+      await reader.cancel();
+      break;
+    }
+
+    chunks.push(value);
+    total += value.byteLength;
+  }
+
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return bytes;
+}
+
 async function readCapped(response, max) {
   if (!response.body) return new Uint8Array(0);
 
@@ -226,8 +268,7 @@ async function discoverIcon(hostname, signal) {
   const pageType = (page.headers.get('content-type') ?? '').toLowerCase();
   if (!pageType.includes('text/html')) return null;
 
-  const bytes = await readCapped(page, ICON_PAGE_MAX_BYTES);
-  if (!bytes) return null;
+  const bytes = await readPrefix(page, ICON_PAGE_MAX_BYTES);
 
   const html = new TextDecoder().decode(bytes);
   const link = html.match(/<link\b[^>]*\brel\s*=\s*["']?[^"'>]*\bicon\b[^"'>]*["']?[^>]*>/i);
@@ -328,11 +369,106 @@ async function handleIcon(request, url) {
   });
 }
 
+/** A small JSON answer with a real cache lifetime, for values that rarely change. */
+function cachedJson(body, maxAge) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': `public, max-age=${maxAge}`,
+      'content-security-policy': "default-src 'none'",
+      'x-content-type-options': 'nosniff'
+    }
+  });
+}
+
+/** The handful of entities that actually turn up inside a <title>, decoded. */
+function decodeEntities(text) {
+  const fromCode = (value) => {
+    try {
+      return String.fromCodePoint(value);
+    } catch {
+      return '';
+    }
+  };
+
+  return String(text)
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => fromCode(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => fromCode(Number(dec)))
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * The page's own title, read from the same document the icon discovery already reads.
+ *
+ * Only the origin is fetched, never a path a caller names, so this cannot be pointed at an
+ * arbitrary URL on someone's server; the answer is one short string and nothing else.
+ */
+async function fetchPageTitle(hostname, signal) {
+  let page;
+  try {
+    page = await fetch(`https://${hostname}/`, {
+      headers: { accept: 'text/html', 'user-agent': USER_AGENT },
+      redirect: 'follow',
+      signal
+    });
+  } catch {
+    return null;
+  }
+
+  if (!page.ok) return null;
+  const type = (page.headers.get('content-type') ?? '').toLowerCase();
+  if (!type.includes('text/html')) return null;
+
+  const bytes = await readPrefix(page, ICON_PAGE_MAX_BYTES);
+
+  const html = new TextDecoder().decode(bytes);
+  const match = html.match(/<title[^>]*>([\s\S]{0,400}?)<\/title>/i);
+  if (!match) return null;
+
+  const title = decodeEntities(match[1]).replace(/\s+/g, ' ').trim();
+  return title === '' ? null : title.slice(0, TITLE_MAX_CHARS);
+}
+
+/**
+ * `GET /api/title` with `x-page-host` and `h = sha256(host)`.
+ *
+ * The same shape as the icon route: the host travels in a header, the URL carries only its
+ * hash, and nothing about the caller, an account or a vault is involved.
+ */
+async function handleTitle(request, url) {
+  if (request.method !== 'GET') return json({ error: 'method' }, 405);
+
+  const hostname = (request.headers.get('x-page-host') ?? '').trim();
+  if (!HOSTNAME.test(hostname)) return json({ error: 'bad_host' }, 400);
+
+  const claimed = url.searchParams.get('h') ?? '';
+  if (claimed !== (await hostHash(hostname))) return json({ error: 'bad_hash' }, 400);
+
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), ICON_TIMEOUT_MS);
+
+  try {
+    const title = await fetchPageTitle(hostname, abort.signal);
+    return title ? cachedJson({ title }, 604_800) : json({ error: 'no_title' }, 404);
+  } catch {
+    return json({ error: 'failed' }, 502);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function handleApi(request, env, url) {
   const path = url.pathname.slice(API_PREFIX.length);
 
   if (path === '/health') return json({ ok: true, version: VERSION });
   if (path === ICON_PATH) return handleIcon(request, url);
+  if (path === TITLE_PATH) return handleTitle(request, url);
 
   if (path.startsWith('/a/')) {
     const rest = path.slice('/a/'.length);
