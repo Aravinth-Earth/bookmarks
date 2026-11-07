@@ -139,6 +139,46 @@ async function hostHash(hostname) {
   return toBase64Url(new Uint8Array(digest));
 }
 
+/* The wait for an upstream host. A binding may shorten it: the tests hold the same code to a few
+   hundred milliseconds rather than ten seconds. */
+function iconTimeoutOf(env) {
+  const ms = Number(env?.ICON_TIMEOUT_MS);
+  return Number.isFinite(ms) && ms > 0 ? ms : ICON_TIMEOUT_MS;
+}
+
+/**
+ * One step of a stream read, given up at once when the request aborts.
+ *
+ * Aborting a fetch stops a request that has not answered, and the runtime also errors a body
+ * that already started arriving. This race does not rely on that: a host that sends a byte every
+ * few seconds is still a stream that would otherwise keep the invocation alive, so the read is
+ * abandoned here the moment the signal fires. The reader is cancelled alongside, so the bytes
+ * nobody will read stop being received.
+ */
+function untilAborted(read, signal) {
+  if (!signal) return read;
+
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(new Error('aborted'));
+    if (signal.aborted) {
+      aborted();
+      return;
+    }
+
+    signal.addEventListener('abort', aborted, { once: true });
+    read.then(
+      (step) => {
+        signal.removeEventListener('abort', aborted);
+        resolve(step);
+      },
+      (error) => {
+        signal.removeEventListener('abort', aborted);
+        reject(error);
+      }
+    );
+  });
+}
+
 /** Read at most `max` bytes, cancelling the stream the moment it exceeds the cap. */
 /**
  * The first `max` bytes of a response, then stop reading.
@@ -147,27 +187,36 @@ async function hostHash(hostname) {
  * is over the cap is why sites with large pages (github.com, itsfoss.com) answered "no icon" and
  * had no title to offer. Images still go through readCapped, where a short read would corrupt.
  */
-async function readPrefix(response, max) {
+async function readPrefix(response, max, signal) {
   if (!response.body) return new Uint8Array(0);
 
   const reader = response.body.getReader();
+  const close = () => {
+    reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener('abort', close, { once: true });
+
   const chunks = [];
   let total = 0;
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    for (;;) {
+      const { done, value } = await untilAborted(reader.read(), signal);
+      if (done) break;
 
-    const room = max - total;
-    if (value.byteLength >= room) {
-      chunks.push(value.subarray(0, room));
-      total += room;
-      await reader.cancel();
-      break;
+      const room = max - total;
+      if (value.byteLength >= room) {
+        chunks.push(value.subarray(0, room));
+        total += room;
+        await reader.cancel();
+        break;
+      }
+
+      chunks.push(value);
+      total += value.byteLength;
     }
-
-    chunks.push(value);
-    total += value.byteLength;
+  } finally {
+    signal?.removeEventListener('abort', close);
   }
 
   const bytes = new Uint8Array(total);
@@ -179,23 +228,32 @@ async function readPrefix(response, max) {
   return bytes;
 }
 
-async function readCapped(response, max) {
+async function readCapped(response, max, signal) {
   if (!response.body) return new Uint8Array(0);
 
   const reader = response.body.getReader();
+  const close = () => {
+    reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener('abort', close, { once: true });
+
   const chunks = [];
   let total = 0;
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    for (;;) {
+      const { done, value } = await untilAborted(reader.read(), signal);
+      if (done) break;
 
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel();
-      return null;
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    signal?.removeEventListener('abort', close);
   }
 
   const bytes = new Uint8Array(total);
@@ -269,7 +327,7 @@ async function discoverIcon(hostname, signal) {
   const pageType = (page.headers.get('content-type') ?? '').toLowerCase();
   if (!pageType.includes('text/html')) return null;
 
-  const bytes = await readPrefix(page, ICON_PAGE_MAX_BYTES);
+  const bytes = await readPrefix(page, ICON_PAGE_MAX_BYTES, signal);
 
   const html = new TextDecoder().decode(bytes);
   const link = html.match(/<link\b[^>]*\brel\s*=\s*["']?[^"'>]*\bicon\b[^"'>]*["']?[^>]*>/i);
@@ -297,7 +355,7 @@ async function discoverIcon(hostname, signal) {
  * The Worker is the only party that contacts the bookmarked site, once, and every other user is
  * served the cached bytes. No hostname is logged by this code.
  */
-async function handleIcon(request, url) {
+async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   if (request.method !== 'GET') return json({ error: 'method' }, 405);
 
   const hostname = (request.headers.get('x-icon-host') ?? '').trim();
@@ -307,14 +365,14 @@ async function handleIcon(request, url) {
   if (claimed !== (await hostHash(hostname))) return json({ error: 'bad_hash' }, 400);
 
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), ICON_TIMEOUT_MS);
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
 
-  let upstream = null;
-  let type = null;
-
+  /* Everything the host sends is read inside this block, and the timer is cleared only once the
+     read has finished or thrown: a host that answers with headers and then trickles its body
+     would otherwise keep the invocation alive with no bound. */
   try {
-    upstream = await followToImage(`https://${hostname}/favicon.ico`, abort.signal);
-    type = upstream ? iconTypeOf(upstream) : null;
+    let upstream = await followToImage(`https://${hostname}/favicon.ico`, abort.signal);
+    let type = upstream ? iconTypeOf(upstream) : null;
 
     if (!type) {
       /* A page that answered /favicon.ico with HTML, or with nothing useful, may still declare
@@ -326,6 +384,40 @@ async function handleIcon(request, url) {
         type = upstream ? iconTypeOf(upstream) : null;
       }
     }
+
+    if (!upstream || !upstream.ok || !type) {
+      return new Response(null, {
+        status: 404,
+        headers: { 'cache-control': 'public, max-age=600' }
+      });
+    }
+
+    const declaredLength = Number(upstream.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > ICON_MAX_BYTES) {
+      return new Response(null, {
+        status: 413,
+        headers: { 'cache-control': 'public, max-age=600' }
+      });
+    }
+
+    const bytes = await readCapped(upstream, ICON_MAX_BYTES, abort.signal);
+    if (!bytes || bytes.byteLength === 0) {
+      return new Response(null, {
+        status: bytes ? 404 : 413,
+        headers: { 'cache-control': 'public, max-age=600' }
+      });
+    }
+
+    return new Response(bytes, {
+      status: 200,
+      headers: {
+        'content-type': type,
+        'content-length': String(bytes.byteLength),
+        'cache-control': 'public, max-age=2592000, immutable',
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'"
+      }
+    });
   } catch {
     return new Response(null, {
       status: 502,
@@ -334,40 +426,6 @@ async function handleIcon(request, url) {
   } finally {
     clearTimeout(timer);
   }
-
-  if (!upstream || !upstream.ok || !type) {
-    return new Response(null, {
-      status: 404,
-      headers: { 'cache-control': 'public, max-age=600' }
-    });
-  }
-
-  const declared = Number(upstream.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > ICON_MAX_BYTES) {
-    return new Response(null, {
-      status: 413,
-      headers: { 'cache-control': 'public, max-age=600' }
-    });
-  }
-
-  const bytes = await readCapped(upstream, ICON_MAX_BYTES);
-  if (!bytes || bytes.byteLength === 0) {
-    return new Response(null, {
-      status: bytes ? 404 : 413,
-      headers: { 'cache-control': 'public, max-age=600' }
-    });
-  }
-
-  return new Response(bytes, {
-    status: 200,
-    headers: {
-      'content-type': type,
-      'content-length': String(bytes.byteLength),
-      'cache-control': 'public, max-age=2592000, immutable',
-      'x-content-type-options': 'nosniff',
-      'content-security-policy': "default-src 'none'"
-    }
-  });
 }
 
 /** A small JSON answer with a real cache lifetime, for values that rarely change. */
@@ -426,7 +484,7 @@ async function fetchPageTitle(hostname, signal) {
   const type = (page.headers.get('content-type') ?? '').toLowerCase();
   if (!type.includes('text/html')) return null;
 
-  const bytes = await readPrefix(page, ICON_PAGE_MAX_BYTES);
+  const bytes = await readPrefix(page, ICON_PAGE_MAX_BYTES, signal);
 
   const html = new TextDecoder().decode(bytes);
   const match = html.match(/<title[^>]*>([\s\S]{0,400}?)<\/title>/i);
@@ -442,7 +500,7 @@ async function fetchPageTitle(hostname, signal) {
  * The same shape as the icon route: the host travels in a header, the URL carries only its
  * hash, and nothing about the caller, an account or a vault is involved.
  */
-async function handleTitle(request, url) {
+async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   if (request.method !== 'GET') return json({ error: 'method' }, 405);
 
   const hostname = (request.headers.get('x-page-host') ?? '').trim();
@@ -452,7 +510,7 @@ async function handleTitle(request, url) {
   if (claimed !== (await hostHash(hostname))) return json({ error: 'bad_hash' }, 400);
 
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), ICON_TIMEOUT_MS);
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
 
   try {
     const title = await fetchPageTitle(hostname, abort.signal);
@@ -468,8 +526,8 @@ async function handleApi(request, env, url) {
   const path = url.pathname.slice(API_PREFIX.length);
 
   if (path === '/health') return json({ ok: true, version: VERSION });
-  if (path === ICON_PATH) return handleIcon(request, url);
-  if (path === TITLE_PATH) return handleTitle(request, url);
+  if (path === ICON_PATH) return handleIcon(request, url, iconTimeoutOf(env));
+  if (path === TITLE_PATH) return handleTitle(request, url, iconTimeoutOf(env));
 
   if (path.startsWith('/a/')) {
     const rest = path.slice('/a/'.length);
