@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import worker, { LIMITS } from '../src/index.js';
-import { ACCOUNT_REF_HEX, accountRef, logEvent } from '../src/events.js';
+import { ACCOUNT_REF_HEX, accountRef, digestHex, logEvent } from '../src/events.js';
 import { Vault } from '../src/vault.js';
 import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
@@ -27,7 +27,7 @@ const ACCOUNT = await deriveAccount(PHRASE);
 /* The only field an account may appear as: the prefix of its digest, never the id. */
 const REF = createHash('sha256').update(ACCOUNT.accountId).digest('hex').slice(0, ACCOUNT_REF_HEX);
 const SOURCE = '203.0.113.7';
-const FIELDS = new Set(['event', 'route', 'reason', 'account', 'retry_after']);
+const FIELDS = new Set(['event', 'route', 'reason', 'account', 'source', 'retry_after']);
 
 /* --------------------------------------------------------------- the helper itself */
 
@@ -254,6 +254,50 @@ test('the fifth failure locks the account, and the refusal that reads the lock w
   });
 });
 
+test('a lock names the source it counted, as a digest of the value the Worker forwarded', async () => {
+  const harness = vaultObject();
+  await provision(harness);
+
+  const source = 'c'.repeat(64);
+  const at = (path, body) =>
+    new Request(`https://vault${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-vault-source': source },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+
+  const { result, lines } = await withEvents(async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await harness.vault.fetch(at('/challenge'));
+      const refused = await read(await harness.vault.fetch(at('/login', { proof: 'x'.repeat(43) })));
+      assert.equal(refused.status, 401, `attempt ${attempt}`);
+    }
+    await harness.vault.fetch(at('/challenge'));
+    return read(await harness.vault.fetch(at('/login', { proof: 'x'.repeat(43) })));
+  });
+
+  assert.equal(result.status, 429);
+  const events = parsed(lines);
+  assert.equal(events.length, 6, 'five failures and the lock');
+
+  /* The digest of the digest: the object never had the address, and the line does not carry the
+     value the Worker forwarded either. */
+  const expected = await digestHex(source, ACCOUNT_REF_HEX);
+  for (const event of events) assert.equal(event.source, expected);
+  for (const line of lines) {
+    assert.equal(line.includes(source), false, 'the forwarded value is not written');
+  }
+
+  assert.deepEqual(events.at(-1), {
+    event: 'signin_locked',
+    route: 'signin',
+    reason: 'locked',
+    account: REF,
+    source: expected,
+    retry_after: 900
+  });
+});
+
 test('a creation refused at the cap writes create_refused cap_full', async () => {
   const harness = vaultObject({ full: true });
   const challenge = await blind(harness.vault);
@@ -315,6 +359,54 @@ test('a creation with a malformed body writes create_refused without an account'
 });
 
 /* ------------------------------------------------------------------- the Worker */
+
+test('the Worker forwards a digest of the source, replacing any value the caller sent', async () => {
+  const seen = [];
+  const env = {
+    VAULTS: {
+      idFromName: (name) => ({ name }),
+      get: () => ({
+        fetch: async (request) => {
+          seen.push(request);
+          return new Response(JSON.stringify({ ok: true }), {
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+      })
+    }
+  };
+
+  const claimed = 'f'.repeat(64);
+  await worker.fetch(
+    api(`/a/${ACCOUNT.accountId}/login`, {
+      method: 'POST',
+      body: { proof: 'x'.repeat(43) },
+      headers: { 'x-vault-source': claimed }
+    }),
+    env
+  );
+
+  const expected = await digestHex(`vault\n${SOURCE}`);
+  assert.equal(seen.length, 1, 'the object was asked once');
+  assert.equal(seen[0].headers.get('x-vault-source'), expected);
+  assert.notEqual(seen[0].headers.get('x-vault-source'), claimed, 'the caller cannot choose it');
+  assert.equal(seen[0].headers.get('cf-connecting-ip'), SOURCE, 'the address is still forwarded');
+  assert.equal(seen[0].headers.get('x-vault-source').includes('203.0.113.7'), false);
+
+  /* A different address is a different source, which is what the object counts against. */
+  await worker.fetch(
+    api(`/a/${ACCOUNT.accountId}/login`, {
+      method: 'POST',
+      body: { proof: 'x'.repeat(43) },
+      source: '198.51.100.9'
+    }),
+    env
+  );
+  assert.notEqual(
+    seen[1].headers.get('x-vault-source'),
+    seen[0].headers.get('x-vault-source')
+  );
+});
 
 function workerHarness({ refuse = [], throwOnObject = false } = {}) {
   const env = {

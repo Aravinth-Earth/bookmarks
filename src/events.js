@@ -16,15 +16,20 @@
  *                exception surfaced before a class was known
  *   reason       the fixed code the refusing branch answered with: bad_proof,
  *                challenge_expired, no_account, too_large, cap_full, invalid, mismatch, locked,
- *                over_limit, bad_host, blocked_host, bad_hash, timeout, fetch_failed, unhandled
+ *                throttled, over_limit, bad_host, blocked_host, bad_hash, timeout, fetch_failed,
+ *                unhandled
  *   account      the first 12 hex characters of SHA-256(account id). Present when the branch
  *                holds the account, absent when it does not. Never the id itself.
+ *   source       the first 12 hex characters of SHA-256 over the source digest the Worker
+ *                forwarded. Present when the branch counted a sign-in against a source.
  *   retry_after  whole seconds; only on `rate_limited` and `signin_locked`
  *
  * Deliberately absent, and never accepted as a field: the account id, the phrase, the auth
  * secret, a proof, a nonce, a session token, a sealed vault blob, a hostname, or a caller's
  * address. Callers pass a fixed code and at most an account id, and the id leaves only as a
  * digest prefix. The rate limiter already keys on its own digest; that value never arrives here.
+ * `source` is digested here too, so a value that was not already a digest could still not be
+ * written as one.
  *
  * A refused request writes one line and a served one writes none, so the volume follows how
  * rare the event is rather than how much traffic there is. Nothing here returns a value or may
@@ -46,14 +51,25 @@ function hexPrefix(bytes, length) {
 }
 
 /**
+ * The SHA-256 of a value, as lowercase hex.
+ *
+ * One digest implementation for the Worker and the account object: the sign-in lockout keys a
+ * failure on a digest, and a second spelling of the same hash would be a second thing to keep
+ * right.
+ */
+export async function digestHex(value, length = 64) {
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(String(value)));
+  return hexPrefix(new Uint8Array(digest), length);
+}
+
+/**
  * A stable, one-way handle for an account.
  *
  * Events about one account have to be groupable without the log holding the id that routes
  * requests to it, so the id is digested and only a prefix of the digest leaves.
  */
 export async function accountRef(accountId) {
-  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(String(accountId)));
-  return hexPrefix(new Uint8Array(digest), ACCOUNT_REF_HEX);
+  return digestHex(accountId, ACCOUNT_REF_HEX);
 }
 
 /**
@@ -72,6 +88,14 @@ export async function logEvent(name, fields = {}, sink = console.log) {
       line.account = await accountRef(fields.account);
     } catch {
       /* An id that cannot be digested is left out rather than written raw. */
+    }
+  }
+
+  if (typeof fields.source === 'string' && fields.source !== '') {
+    try {
+      line.source = await digestHex(fields.source, ACCOUNT_REF_HEX);
+    } catch {
+      /* A source that cannot be digested is left out rather than written raw. */
     }
   }
 

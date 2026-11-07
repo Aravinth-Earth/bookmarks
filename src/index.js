@@ -10,7 +10,7 @@
  * opens anything.
  */
 
-import { logEvent } from './events.js';
+import { digestHex, logEvent } from './events.js';
 
 const CANONICAL = '/w/bookmarks';
 /* The app's own host. Anything under the old www path is sent here, so the app is never used
@@ -95,6 +95,32 @@ function tooMany(className) {
       'retry-after': String(LIMITS[className].period)
     }
   });
+}
+
+/**
+ * The source a sign-in is counted against, as a digest.
+ *
+ * The edge writes `cf-connecting-ip` on every request, and the object keys a failed proof on
+ * this value so one place cannot spend another's attempts. Only the digest is forwarded, so the
+ * object never holds an address, and the header is set here rather than passed through: a value
+ * the caller sent is replaced, not read.
+ */
+async function sourceDigest(request) {
+  return digestHex(`vault\n${request.headers.get('cf-connecting-ip') ?? ''}`);
+}
+
+/** The caller's request again, at the object, carrying the source the Worker decided on. */
+function forwardTo(stub, target, request, source) {
+  const headers = new Headers(request.headers);
+  headers.set('x-vault-source', source);
+
+  const init = { method: request.method, headers };
+  if (request.body) {
+    init.body = request.body;
+    /* A body that arrives as a stream has to say it is sent once. */
+    init.duplex = 'half';
+  }
+  return stub.fetch(new Request(target, init));
 }
 
 /**
@@ -906,8 +932,8 @@ async function handleApi(request, env, url) {
 
     const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
     const target = new URL(`https://vault${forward}`, 'https://vault');
-    return limited(env, ROUTE_CLASS[forward], request, () =>
-      stub.fetch(new Request(target, request))
+    return limited(env, ROUTE_CLASS[forward], request, async () =>
+      forwardTo(stub, target, request, await sourceDigest(request))
     );
   }
 

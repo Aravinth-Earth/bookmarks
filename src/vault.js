@@ -12,7 +12,7 @@
  * `now` is injectable so expiry and lockout are testable without waiting.
  */
 
-import { logEvent } from './events.js';
+import { digestHex, logEvent } from './events.js';
 
 /* One paid unit is about ten bookmarks; 10 units is about a hundred. The cap is bytes because
    the server cannot count entries in a sealed vault. */
@@ -38,8 +38,36 @@ const LAST_SEEN_STEP_MS = 60 * 60 * 1000;
 const CLIENT_KINDS = new Set(['mobile', 'desktop']);
 /* One sign-in is one place. The oldest are dropped rather than accumulated forever. */
 const MAX_SESSIONS = 20;
-const MAX_FAILURES = 5;
-const LOCKOUT_MS = 15 * 60 * 1000;
+
+/* A sign-in failure is counted against the source it came from, not the account. Five wrong
+   proofs from one place lock that place for fifteen minutes and leave every other place — the
+   owner's included — able to sign in. */
+export const MAX_FAILURES = 5;
+export const LOCKOUT_MS = 15 * 60 * 1000;
+/* Failures older than this are forgotten, so a typo last month is not part of today's count.
+   It matches the lock, so the entry a lock leaves behind has already aged out when it expires. */
+const FAILURE_WINDOW_MS = LOCKOUT_MS;
+/* How many sources one account object remembers. A caller that invents sources cannot grow the
+   object: the oldest entry is evicted to make room, and losing an entry can only forget
+   failures, never extend a lock. */
+export const MAX_TRACKED_SOURCES = 64;
+
+/* The whole-account guard against a distributed attempt. It throttles and never locks: the
+   count only covers the last minute, the wait doubles from a second and stops at thirty, and
+   the moment a wait ends is written at most thirty seconds ahead, so no arrangement of sources
+   can keep the owner out for longer than that cap. Twenty failures inside a minute is more than
+   four sources can spend, because each of them is locked at five. */
+export const ACCOUNT_FREE_FAILURES = 20;
+const ACCOUNT_WINDOW_MS = 60_000;
+const ACCOUNT_RETRY_FIRST_MS = 1_000;
+export const ACCOUNT_RETRY_MAX_MS = 30_000;
+
+const SOURCE_PREFIX = 'source:';
+const ATTEMPTS_KEY = 'attempts';
+/* The Worker's digest of the caller's address. A malformed header is not a source. */
+const SOURCE_DIGEST = /^[0-9a-f]{64}$/;
+/* The one bucket used when the object was reached without a source, as a test or a binding is. */
+const UNATTRIBUTED = 'unattributed';
 
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
 const AUTH_SECRET = /^[A-Za-z0-9_-]{43}$/;
@@ -131,6 +159,20 @@ async function sha256(text) {
 
 async function sessionHash(token) {
   return toBase64Url(await sha256(token));
+}
+
+/**
+ * The source a sign-in is counted against, or null when the request did not come through the
+ * Worker.
+ *
+ * The Worker digests the caller's address and forwards only that digest, replacing any value
+ * the caller sent, so this reads a digest and never an address. A request that reaches the
+ * object without the header — a test, or an operator call through the binding — has nothing to
+ * distinguish it from another such request, so they share one bucket.
+ */
+function sourceOf(request) {
+  const header = request.headers.get('x-vault-source') ?? '';
+  return SOURCE_DIGEST.test(header) ? header : null;
 }
 
 async function verifyProof(authSecret, accountId, nonce, proof) {
@@ -350,16 +392,37 @@ export class Vault {
     }
 
     const now = this.now();
-    const lock = (await this.storage.get('lock')) ?? { failures: 0, until: 0 };
-    if (lock.until > now) {
-      const retryAfter = Math.ceil((lock.until - now) / 1000);
+    const source = sourceOf(request);
+    /* Counted per source: the key is a digest of the account and the source, so a caller who
+       invents sources writes nothing that names one, and no source can spend another's budget. */
+    const failureKey = await this.failureKey(account.accountId, source);
+
+    const stored = await this.storage.get(failureKey);
+    const failures = this.sourceFailures(stored, now);
+    if (failures.until > now) {
+      const retryAfter = Math.ceil((failures.until - now) / 1000);
       await logEvent('signin_locked', {
         route: 'signin',
         reason: 'locked',
         account: account.accountId,
+        source,
         retry_after: retryAfter
       });
       return json({ error: 'locked', retryAfter }, 429);
+    }
+
+    /* The account-level guard, which answers a wait and never a lock. A distributed attempt can
+       delay the owner by at most the cap below; it cannot keep him out. */
+    const attempts = await this.storage.get(ATTEMPTS_KEY);
+    const retryAfter = this.throttleOf(attempts, now);
+    if (retryAfter > 0) {
+      await logEvent('signin_locked', {
+        route: 'signin',
+        reason: 'throttled',
+        account: account.accountId,
+        retry_after: retryAfter
+      });
+      return json({ error: 'throttled', retryAfter }, 429);
     }
 
     const nonce = await this.storage.get('nonce');
@@ -397,19 +460,30 @@ export class Vault {
       await logEvent('signin_failed', {
         route: 'signin',
         reason: 'bad_proof',
-        account: account.accountId
+        account: account.accountId,
+        source
       });
 
-      const failures = lock.failures + 1;
-      const locked = failures >= MAX_FAILURES;
-      await this.storage.put('lock', {
-        failures: locked ? 0 : failures,
-        until: locked ? now + LOCKOUT_MS : 0
-      });
+      /* Five from one source is that source's lock; a correct proof is what clears it, and the
+         count also ages out on its own. */
+      const count = failures.failures + 1;
+      const locking = count >= MAX_FAILURES;
+      await this.recordSource(
+        failureKey,
+        {
+          failures: locking ? 0 : count,
+          lastAt: now,
+          until: locking ? now + LOCKOUT_MS : 0
+        },
+        stored === undefined
+      );
+      await this.storage.put(ATTEMPTS_KEY, this.nextAttempts(attempts, now));
       return json({ error: 'bad_proof' }, 401);
     }
 
-    await this.storage.put('lock', { failures: 0, until: 0 });
+    /* A correct proof clears this source immediately, and the account's throttle with it. */
+    await this.storage.delete(failureKey);
+    await this.storage.delete(ATTEMPTS_KEY);
 
     /* The flag can be set after the account already exists: the next login upgrades it. */
     account = await this.claimOwner(account);
@@ -437,6 +511,80 @@ export class Vault {
       paidUntil: account.paidUntil ?? null,
       places
     });
+  }
+
+  /** The storage key a source's failures are counted under: two digests, never an address. */
+  async failureKey(accountId, source) {
+    const account = await digestHex(accountId);
+    return `${SOURCE_PREFIX}${await digestHex(`${account}\n${source ?? UNATTRIBUTED}`)}`;
+  }
+
+  /**
+   * What one source carries: its failures, and the end of a lock when it has earned one.
+   *
+   * A count older than the window is gone. The lock lasts exactly the window, so an entry that
+   * has come back here has also aged out and starts again at nothing.
+   */
+  sourceFailures(entry, now) {
+    if (!entry || now - (entry.lastAt ?? 0) >= FAILURE_WINDOW_MS) {
+      return { failures: 0, lastAt: now, until: 0 };
+    }
+    return { failures: entry.failures ?? 0, lastAt: entry.lastAt ?? now, until: entry.until ?? 0 };
+  }
+
+  /**
+   * Store one source's state, keeping the table bounded.
+   *
+   * A new key is admitted only after the oldest entry has gone, so a caller who invents sources
+   * cannot grow the object. Evicting can only forget failures: a lock lives inside its entry and
+   * nowhere else, so the worst an eviction does is let a source try again.
+   */
+  async recordSource(key, state, isNew) {
+    if (isNew) {
+      const entries = [...(await this.storage.list({ prefix: SOURCE_PREFIX }))].sort(
+        (left, right) => (left[1].lastAt ?? 0) - (right[1].lastAt ?? 0)
+      );
+      for (const [oldest] of entries.slice(
+        0,
+        Math.max(0, entries.length - MAX_TRACKED_SOURCES + 1)
+      )) {
+        await this.storage.delete(oldest);
+      }
+    }
+    await this.storage.put(key, state);
+  }
+
+  /**
+   * The wait the whole account has earned, in seconds, or zero.
+   *
+   * Only a wait that is still running counts, and the wait is stored as a moment, not a lock:
+   * the longest one written is the cap below, so an answer of thirty seconds is the worst any
+   * arrangement of sources can produce and the next attempt comes after it.
+   */
+  throttleOf(entry, now) {
+    if (!entry || (entry.until ?? 0) <= now) return 0;
+    return Math.ceil((entry.until - now) / 1000);
+  }
+
+  /**
+   * One more failure in the account's minute, or a fresh minute.
+   *
+   * The first twenty failures inside the window cost nothing, because a per-source lock already
+   * stops five. Past that each failure buys a wait that doubles from a second and stops at the
+   * cap, so a distributed attempt loses its guessing rate without ever being locked out.
+   */
+  nextAttempts(entry, now) {
+    const fresh = !entry || now - (entry.firstAt ?? 0) >= ACCOUNT_WINDOW_MS;
+    const failures = fresh ? 1 : (entry.failures ?? 0) + 1;
+    const firstAt = fresh ? now : entry.firstAt;
+
+    if (failures <= ACCOUNT_FREE_FAILURES) return { failures, firstAt, until: 0 };
+
+    const ms = Math.min(
+      ACCOUNT_RETRY_FIRST_MS * 2 ** (failures - ACCOUNT_FREE_FAILURES - 1),
+      ACCOUNT_RETRY_MAX_MS
+    );
+    return { failures, firstAt, until: now + ms };
   }
 
   async logout(request) {
