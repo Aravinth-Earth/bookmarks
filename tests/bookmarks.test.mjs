@@ -13,6 +13,7 @@ import {
   MAX_NAME_LENGTH,
   MAX_URL_LENGTH,
   SCHEMA,
+  SEARCH_CLEAR_DELAY_MS,
   TOMBSTONE_DAYS,
   addBookmark,
   createDocument,
@@ -22,6 +23,7 @@ import {
   newerPrefs,
   normalizeUrl,
   recordClick,
+  searchNarrowsList,
   sortBookmarks,
   togglePin,
   updateBookmark
@@ -222,6 +224,24 @@ test('filterBookmarks matches the name, the host and the URL, case-insensitively
   assert.equal(filterBookmarks(document, 'news').length, 1);
   assert.equal(filterBookmarks(document, '/x').length, 1);
   assert.equal(filterBookmarks(document, 'nothing').length, 0);
+});
+
+test('searchNarrowsList is true only while a query hides some of the list', () => {
+  const one = seed();
+  const two = addBookmark(one.document, { url: 'https://news.example.org/x', name: 'News' }, at(T1));
+  const document = two.document;
+
+  assert.equal(searchNarrowsList(document, ''), false);
+  assert.equal(searchNarrowsList(document, '   '), false);
+  /* Every bookmark matches, so the list is what it was before the search. */
+  assert.equal(searchNarrowsList(document, 'example'), false);
+  assert.equal(searchNarrowsList(document, 'news'), true);
+  assert.equal(searchNarrowsList(document, 'nothing'), true);
+});
+
+test('SEARCH_CLEAR_DELAY_MS pauses for about five seconds', () => {
+  assert.equal(Number.isInteger(SEARCH_CLEAR_DELAY_MS), true);
+  assert.equal(SEARCH_CLEAR_DELAY_MS, 5000);
 });
 
 test('sortBookmarks orders by each mode, with pinned first where names do not matter', () => {

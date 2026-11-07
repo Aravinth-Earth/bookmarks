@@ -8,12 +8,14 @@
  */
 
 import {
+  SEARCH_CLEAR_DELAY_MS,
   addBookmark,
   createDocument,
   deleteBookmark,
   filterBookmarks,
   mergeDocuments,
   recordClick,
+  searchNarrowsList,
   sortBookmarks,
   togglePin,
   updateBookmark
@@ -72,6 +74,8 @@ let placesCount = null;
 let saving = false;
 let dirty = false;
 let saveStamp = '';
+/* The pending clear of an opened search, so typing again can cancel it. */
+let searchClearTimer = 0;
 
 /* ------------------------------------------------------------------ elements */
 
@@ -877,6 +881,7 @@ function enter({ accountId, authSecret, key, version, sealed, document: vaultDoc
   showLockError('');
 
   applyPrefs();
+  cancelSearchClear();
   searchInput.value = '';
 
   render();
@@ -1416,6 +1421,7 @@ async function handleAdd(event) {
     state.document = next;
     addUrl.value = '';
     addName.value = '';
+    cancelSearchClear();
     searchInput.value = '';
     render();
     setAddForm(false);
@@ -1439,6 +1445,7 @@ async function handleAdd(event) {
     }
   } catch (error) {
     if (error.code === 'DUPLICATE') {
+      cancelSearchClear();
       searchInput.value = '';
       render();
       const row = list.querySelector(`[data-id="${CSS.escape(error.existingId)}"]`);
@@ -1732,6 +1739,34 @@ function openEditModal(bookmark) {
   });
 }
 
+/**
+ * A search is how one bookmark is found. Opening it schedules the field and the filtered list
+ * to clear, so the person lands back on everything instead of a filter they no longer typed.
+ *
+ * Nothing is scheduled unless the query is actually narrowing the list, and typing again
+ * cancels the pending clear. The callback re-checks both the query and the document, so a
+ * render, a reload or a lock between the open and the delay leaves the field alone.
+ */
+function scheduleSearchClear() {
+  if (!state.document || !searchNarrowsList(state.document, searchInput.value)) return;
+
+  const query = searchInput.value;
+  cancelSearchClear();
+  searchClearTimer = setTimeout(() => {
+    searchClearTimer = 0;
+    if (!state.document || searchInput.value !== query) return;
+    if (!searchNarrowsList(state.document, query)) return;
+    searchInput.value = '';
+    render();
+  }, SEARCH_CLEAR_DELAY_MS);
+}
+
+function cancelSearchClear() {
+  if (!searchClearTimer) return;
+  clearTimeout(searchClearTimer);
+  searchClearTimer = 0;
+}
+
 function handleListClick(event) {
   const button = event.target.closest('button[data-action]');
   if (button) {
@@ -1773,6 +1808,9 @@ function handleListClick(event) {
   state.document = recordClick(state.document, bookmark.id, Date.now);
   const counter = row.querySelector('.clicks');
   if (counter) counter.textContent = String(bookmark.clickCount + 1);
+
+  /* The browser has the page; the filtered list behind it is no longer being read. */
+  scheduleSearchClear();
 
   const reorder = sortInput.value === 'clicks' || sortInput.value === 'lastClicked';
   setTimeout(() => {
@@ -2293,7 +2331,10 @@ function bindEvents() {
   });
   list.addEventListener('click', handleListClick);
 
-  searchInput.addEventListener('input', render);
+  searchInput.addEventListener('input', () => {
+    cancelSearchClear();
+    render();
+  });
 
   sortInput.addEventListener('change', () => {
     setPrefs({ sort: sortInput.value });

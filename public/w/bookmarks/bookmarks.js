@@ -14,6 +14,10 @@ export const SCHEMA = 1;
 export const MAX_BOOKMARKS = 500;
 export const MAX_URL_LENGTH = 2048;
 export const MAX_NAME_LENGTH = 120;
+/* How long the field and the filtered list stay as they are after a bookmark is opened from a
+   search. A search exists to find one bookmark; once it is open, the filter is no longer what
+   the person is reading. */
+export const SEARCH_CLEAR_DELAY_MS = 5000;
 /* A device offline for longer than this can resurrect a bookmark. Six months is the trade
    against a tombstone list that grows forever. */
 export const TOMBSTONE_DAYS = 180;
@@ -312,6 +316,19 @@ export function filterBookmarks(document, query) {
       .toLowerCase()
       .includes(needle)
   );
+}
+
+/**
+ * Whether a query is narrowing the list.
+ *
+ * An empty query, and a query every bookmark matches, both leave the list as it was: opening a
+ * bookmark from either of them changes nothing, so there is nothing to clear afterwards.
+ */
+export function searchNarrowsList(document, query) {
+  assertDocument(document, 'the document');
+  const needle = typeof query === 'string' ? query.trim() : '';
+  if (needle === '') return false;
+  return filterBookmarks(document, query).length < document.bookmarks.length;
 }
 
 /**
