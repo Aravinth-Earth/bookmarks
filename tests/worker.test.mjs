@@ -703,6 +703,14 @@ const REFUSED_LOCATIONS = [
   'https://127.0.0.1.nip.io/favicon.ico'
 ];
 
+/* A hop that names a port the caller never named. */
+const PORT_LOCATIONS = [
+  'https://example.com:8443/favicon.ico',
+  'https://example.com:80/favicon.ico',
+  'https://example.com:22/',
+  'https://example.com:6379/favicon.ico'
+];
+
 test('an icon redirect is not followed into a private, loopback or metadata address', async () => {
   for (const location of REFUSED_LOCATIONS) {
     const { asked, implementation } = stubFetch({
@@ -739,11 +747,57 @@ test('a title redirect is not followed into a private, loopback or metadata addr
   }
 });
 
+test('a redirect that names a port is not followed on either proxy', async () => {
+  for (const location of PORT_LOCATIONS) {
+    const icon = stubFetch({
+      [`https://${ICON_HOST}/favicon.ico`]: redirectTo(location),
+      [`https://${ICON_HOST}/`]: redirectTo(location)
+    });
+
+    const iconResponse = await withFetch(icon.implementation, () =>
+      worker.fetch(iconRequest(), harness().env)
+    );
+
+    assert.equal(iconResponse.status, 404, location);
+    for (const url of icon.asked) {
+      assert.equal(new URL(url).port, '', `${location} is never contacted: ${url}`);
+    }
+
+    const title = stubFetch({ [`https://${ICON_HOST}/`]: redirectTo(location) });
+
+    const titleResponse = await withFetch(title.implementation, () =>
+      worker.fetch(titleRequest(), harness().env)
+    );
+
+    assert.equal(titleResponse.status, 404, location);
+    assert.equal((await titleResponse.json()).error, 'no_title', location);
+    assert.deepEqual(title.asked, [`https://${ICON_HOST}/`], `${location} is never contacted`);
+  }
+});
+
+test('a redirect that names the default port is followed', async () => {
+  const followed = stubFetch({
+    [`https://${ICON_HOST}/favicon.ico`]: redirectTo('https://a.example.com:443/favicon.ico'),
+    'https://a.example.com/favicon.ico': pngResponse()
+  });
+
+  const response = await withFetch(followed.implementation, () =>
+    worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(followed.asked, [
+    `https://${ICON_HOST}/favicon.ico`,
+    'https://a.example.com/favicon.ico'
+  ]);
+});
+
 test('a page-declared icon at a refused destination is not fetched', async () => {
   for (const href of [
     'https://10.0.0.1/i.png',
     'http://example.com/i.png',
     '//169.254.169.254/i.png',
+    'https://example.com:8443/i.png',
     'https://[::1]/i.png'
   ]) {
     const { asked, implementation } = stubFetch({
