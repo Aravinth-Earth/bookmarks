@@ -233,6 +233,24 @@ try {
   problems.push(`logs: ${error.message}`);
 }
 
+/* 7. Every module the page imports is in the offline shell. A new module that is left out of
+   SHELL works on the first visit and then fails once the page is offline, which is the one state
+   the page cannot report. Both lists are read from the files rather than written down again. */
+try {
+  const page = readFileSync(join(publicDir, 'w/bookmarks/app.js'), 'utf8');
+  const worker = readFileSync(join(publicDir, 'w/bookmarks/sw.js'), 'utf8');
+  const imported = [...page.matchAll(/from '\.\/([\w-]+\.js)'/g)].map((match) => match[1]);
+  const shell = new Set([...worker.matchAll(/'\/w\/bookmarks\/([\w-]+\.js)'/g)].map((match) => match[1]));
+
+  if (imported.length === 0) problems.push('shell: no module imports found in app.js');
+
+  for (const name of imported) {
+    if (!shell.has(name)) problems.push(`shell: app.js imports ${name}, which sw.js does not cache`);
+  }
+} catch (error) {
+  problems.push(`shell: ${error.message}`);
+}
+
 if (problems.length) {
   console.error('check failed:');
   for (const problem of problems) console.error(`  - ${problem}`);
