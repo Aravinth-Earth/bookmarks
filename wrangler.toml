@@ -107,5 +107,15 @@ class_name = "Vault"
 name = "REGISTRY"
 class_name = "Registry"
 
+# Event lines are the only thing this Worker intends to log, and `src/events.js` digests the
+# account id before it writes one. Invocation logging is the other half of the same record: it
+# writes one line per request with the request's own path, and every account route carries
+# `/a/<accountId>/`, so leaving it on publishes the id that routes requests to an account and
+# undoes the digesting done for the event lines. Redaction cannot help here, because the value
+# is a path segment rather than a query parameter. Refused requests still leave their event
+# line; served requests leave nothing, which is the volume this app wants anyway.
 [observability]
 enabled = true
+
+[observability.logs]
+invocation_logs = false
