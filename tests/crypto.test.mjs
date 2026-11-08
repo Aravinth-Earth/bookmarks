@@ -22,6 +22,7 @@ import {
   PAD_BUCKET_BYTES,
   PAD_VERSION,
   PBKDF2_ITERATIONS,
+  VAULT_AD_VERSION,
   WORD_COUNT,
   accountIdFromPhrase,
   authKeyFromBytes,
@@ -32,9 +33,12 @@ import {
   keyFromBytes,
   normalizePhrase,
   open,
+  openVault,
   phraseProblem,
   proveAuth,
-  seal
+  seal,
+  sealVault,
+  vaultAssociated
 } from '../public/w/bookmarks/crypto.js';
 import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
 
@@ -344,4 +348,54 @@ test('a document just over a bucket boundary moves to the next bucket', async ()
   assert.equal(ciphertextBytes(sealedOver), PAD_BUCKET_BYTES * 2 + GCM_TAG_BYTES);
   assert.deepEqual(await open(key, sealedAt, accountId), atBoundary);
   assert.deepEqual(await open(key, sealedOver, accountId), overBoundary);
+});
+
+/* ---------------------------------------------------- the version in the associated data */
+
+test('a vault blob is sealed at its version and opens only at that version', async () => {
+  const accountId = await accountIdFromPhrase(PHRASE_A);
+  const key = await deriveVaultKey(PHRASE_A);
+  const document = { bookmarks: [{ url: 'https://example.com', clicks: 1 }], prefs: { view: 'all' } };
+
+  const sealed = await sealVault(key, document, accountId, 7);
+  assert.equal(sealed.at, 7, 'the blob names the version it was sealed at');
+  assert.deepEqual(await openVault(key, sealed, accountId, 7), document);
+
+  /* The server reports another number for the same bytes: that is the replay this closes. The
+     blob is marked, so it is not retried with the older associated data either. */
+  await assert.rejects(
+    () => openVault(key, sealed, accountId, 8, { allowLegacy: true }),
+    /not sealed under this key/,
+    'an older ciphertext must not open under a newer version'
+  );
+  await assert.rejects(() => openVault(key, sealed, accountId, 6), /not sealed under this key/);
+});
+
+test('the associated data names the version, and the account beside it', async () => {
+  const accountId = await accountIdFromPhrase(PHRASE_A);
+  const otherAccount = await accountIdFromPhrase(PHRASE_B);
+
+  assert.equal(vaultAssociated(accountId, 1), `${VAULT_AD_VERSION}\n${accountId}\n1`);
+  assert.notEqual(vaultAssociated(accountId, 1), vaultAssociated(accountId, 2), 'the version counts');
+  assert.notEqual(vaultAssociated(accountId, 1), vaultAssociated(otherAccount, 1), 'the account counts');
+
+  assert.throws(() => vaultAssociated(accountId, 0), /positive integer/);
+  assert.throws(() => vaultAssociated(accountId, 1.5), /positive integer/);
+  assert.throws(() => vaultAssociated('', 1), /names the account/);
+});
+
+test('a blob sealed before the version was bound still opens, once the caller allows it', async () => {
+  const accountId = await accountIdFromPhrase(PHRASE_A);
+  const key = await deriveVaultKey(PHRASE_A);
+  const document = { bookmarks: [{ url: 'https://example.com', clicks: 3 }] };
+
+  /* The shape every existing vault is in: the account id is the whole associated data. */
+  const legacy = await seal(key, document, accountId);
+  assert.equal('at' in legacy, false, 'the old shape carries no version');
+
+  assert.deepEqual(await openVault(key, legacy, accountId, 4, { allowLegacy: true }), document);
+
+  /* A device that has already written a bound blob refuses the old shape, so a pre-upgrade
+     ciphertext cannot be served to it again later. */
+  await assert.rejects(() => openVault(key, legacy, accountId, 5), /not sealed under this key/);
 });
