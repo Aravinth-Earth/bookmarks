@@ -924,7 +924,13 @@ async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
         'content-length': String(bytes.byteLength),
         'cache-control': 'public, max-age=2592000, immutable',
         'x-content-type-options': 'nosniff',
-        'content-security-policy': "default-src 'none'"
+        /* These bytes come from a host the caller named, and one of the accepted types is SVG,
+           which can carry script. The page only ever reads an icon as a subresource, so it is
+           answered as a download; and a browser that did navigate to it lands in an opaque
+           origin where nothing loads and no script runs, rather than on our origin beside the
+           sealed vault. */
+        'content-disposition': 'attachment',
+        'content-security-policy': "default-src 'none'; sandbox"
       }
     });
   } catch {

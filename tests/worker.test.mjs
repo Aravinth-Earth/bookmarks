@@ -409,6 +409,24 @@ test('a page that declares its icon is followed, once', async () => {
   ]);
 });
 
+test('a served icon is a download in an opaque origin, never a document on our origin', async () => {
+  const response = await withFetch(
+    async () =>
+      new Response('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', {
+        headers: { 'content-type': 'image/svg+xml' }
+      }),
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-disposition'), 'attachment');
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+
+  const policy = response.headers.get('content-security-policy') ?? '';
+  assert.match(policy, /default-src 'none'/);
+  assert.match(policy, /sandbox/, 'a document that reached these bytes is sandboxed');
+});
+
 test('an icon behind a redirect is followed by hand', async () => {
   const asked = [];
 
