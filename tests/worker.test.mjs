@@ -483,17 +483,75 @@ test('the site stylesheets are proxied with a cache header', async () => {
   const asked = [];
 
   const response = await withFetch(
-    async (url) => {
-      asked.push(url);
+    async (url, init) => {
+      asked.push({ url, init });
       return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
     },
     () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
   );
 
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get('content-type'), 'text/css');
+  assert.equal(response.headers.get('content-type'), 'text/css; charset=utf-8');
   assert.match(response.headers.get('cache-control'), /max-age=86400/);
-  assert.deepEqual(asked, ['https://www.332321.xyz/css/tokens.css']);
+  assert.deepEqual(asked.map((one) => one.url), ['https://www.332321.xyz/css/tokens.css']);
+});
+
+test('the stylesheet proxy copies no upstream header and follows no redirect', async () => {
+  const asked = [];
+
+  const response = await withFetch(
+    async (url, init) => {
+      asked.push({ url, init });
+      return new Response(':root{}', {
+        headers: {
+          'content-type': 'text/css',
+          'set-cookie': 'session=leaked; Path=/; HttpOnly',
+          'x-upstream-private': 'yes',
+          'access-control-allow-origin': '*',
+          etag: '"abc"'
+        }
+      });
+    },
+    () => worker.fetch(new Request('https://b.332321.xyz/css/themes.css'), harness().env)
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('set-cookie'), null);
+  assert.equal(response.headers.get('x-upstream-private'), null);
+  assert.equal(response.headers.get('access-control-allow-origin'), null);
+  assert.equal(response.headers.get('etag'), '"abc"');
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(asked[0].init.redirect, 'manual');
+});
+
+test('the stylesheet proxy refuses a redirect, a non-CSS answer and a non-read method', async () => {
+  const redirected = await withFetch(
+    () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://elsewhere.example/x.css', 'content-type': 'text/css' }
+      }),
+    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
+  );
+  assert.equal(redirected.status, 502);
+
+  const html = await withFetch(
+    () => new Response('<p>no</p>', { headers: { 'content-type': 'text/html' } }),
+    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
+  );
+  assert.equal(html.status, 502);
+
+  const asked = [];
+  const written = await withFetch(
+    async (url) => {
+      asked.push(String(url));
+      return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
+    },
+    () =>
+      worker.fetch(new Request('https://b.332321.xyz/css/tokens.css', { method: 'POST' }), harness().env)
+  );
+  assert.equal(written.status, 405);
+  assert.equal(asked.length, 0);
 });
 
 /* -------------------------------------------------------------- title service */
