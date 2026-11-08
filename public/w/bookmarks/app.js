@@ -20,7 +20,13 @@ import {
   togglePin,
   updateBookmark
 } from './bookmarks.js';
-import { deriveAccount, generatePhrase, open, phraseProblem, seal } from './crypto.js';
+import {
+  deriveAccount,
+  generatePhrase,
+  openVault,
+  phraseProblem,
+  sealVault
+} from './crypto.js';
 import { CLIPBOARD_CLEAR_MS, clearPhraseField, overwriteClipboard } from './hygiene.js';
 import { createLockSignal } from './lock-signal.js';
 import {
@@ -478,7 +484,14 @@ async function saveNow({ push = true } = {}) {
          written once the key is gone. */
       if (!state.key) return;
       state.version += 1;
-      const sealed = await seal(state.key, state.document, state.accountId);
+      /* Sealed at the number the server will give it, so a later read under any other number
+         refuses instead of handing back older bytes. */
+      const sealed = await sealVault(
+        state.key,
+        state.document,
+        state.accountId,
+        state.remoteVersion + 1
+      );
       await store.save(state.accountId, sealed, state.version);
       state.sealed = sealed;
     } while (dirty);
@@ -728,6 +741,40 @@ function authMaterial() {
 }
 
 /**
+ * Whether a blob sealed before the version was bound may still be opened.
+ *
+ * This device answers yes only while its own copy is in the old shape: once it has written a
+ * bound blob, the vault has moved, and a server that later serves an unmarked ciphertext is
+ * serving something older than what this device already has. A device whose first read is the
+ * old shape still opens it, which is what keeps an existing vault readable across the change.
+ */
+function legacyBlobAllowed() {
+  return state.sealed?.at === undefined;
+}
+
+/** The number a device's own copy was sealed at, falling back to its stored version. */
+function localSealVersion(stored) {
+  return Number.isInteger(stored?.sealed?.at) ? stored.sealed.at : stored.version;
+}
+
+/**
+ * The blob to send at `baseVersion`: it must be sealed at the number it is about to occupy on
+ * the server, since that number is part of its associated data. A local save made at a guess
+ * that has since moved — an offline edit, another device ahead — is re-sealed here instead of
+ * being sent bound to a version the server will not give it.
+ */
+async function sealedForPush(baseVersion) {
+  const wanted = baseVersion + 1;
+  if (state.sealed?.at === wanted) return state.sealed;
+
+  const sealed = await sealVault(state.key, state.document, state.accountId, wanted);
+  state.version += 1;
+  await store.save(state.accountId, sealed, state.version);
+  state.sealed = sealed;
+  return sealed;
+}
+
+/**
  * One reconcile: sign in if needed, read the server's blob, merge it into this device, then
  * push if this device knows something the server does not. A conflict is merged and retried
  * once; a second conflict means two devices are writing faster than one can settle.
@@ -773,7 +820,9 @@ async function syncNow() {
 
     if (remote) {
       state.remoteVersion = remote.version;
-      const remoteDocument = await open(state.key, remote, state.accountId);
+      const remoteDocument = await openVault(state.key, remote, state.accountId, remote.version, {
+        allowLegacy: legacyBlobAllowed()
+      });
       const { document: merged } = mergeDocuments(state.document, remoteDocument);
 
       if (fingerprint(merged) !== fingerprint(state.document)) {
@@ -794,12 +843,18 @@ async function syncNow() {
       state.remoteVersion = 0;
     }
 
-    let result = await sync.push(state.remoteVersion, state.sealed);
+    let result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
 
     if (result.conflict) {
       state.remoteVersion = result.currentVersion;
       if (result.current) {
-        const conflictDocument = await open(state.key, result.current, state.accountId);
+        const conflictDocument = await openVault(
+          state.key,
+          result.current,
+          state.accountId,
+          result.current.version,
+          { allowLegacy: legacyBlobAllowed() }
+        );
         const { document: merged } = mergeDocuments(state.document, conflictDocument);
         state.document = merged;
         absorbed = true;
@@ -807,7 +862,7 @@ async function syncNow() {
         render();
         await saveNow({ push: false });
       }
-      result = await sync.push(state.remoteVersion, state.sealed);
+      result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
       if (result.conflict) {
         throw new SyncError('CONFLICT', 'Another device is changing the vault.');
       }
@@ -917,7 +972,13 @@ async function tryRemembered() {
     const stored = await store.load(remembered.accountId);
     if (!stored.sealed) throw new Error('the remembered key has no vault');
 
-    const vaultDocument = await open(key, stored.sealed, remembered.accountId);
+    const vaultDocument = await openVault(
+      key,
+      stored.sealed,
+      remembered.accountId,
+      localSealVersion(stored),
+      { allowLegacy: true }
+    );
     enter({
       accountId: remembered.accountId,
       authSecret: null,
@@ -957,7 +1018,9 @@ async function handleUnlock(event) {
     const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
     const stored = await store.load(accountId);
     const vaultDocument = stored.sealed
-      ? await open(vaultKey, stored.sealed, accountId)
+      ? await openVault(vaultKey, stored.sealed, accountId, localSealVersion(stored), {
+          allowLegacy: true
+        })
       : createDocument();
 
     if (rememberInput.checked) await store.remember(accountId, vaultKey, authKey);
@@ -1198,7 +1261,7 @@ function openCreateModal() {
 async function createNewVault(phrase, remember) {
   const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
   const vaultDocument = createDocument();
-  const sealed = await seal(vaultKey, vaultDocument, accountId);
+  const sealed = await sealVault(vaultKey, vaultDocument, accountId, 1);
 
   await store.save(accountId, sealed, 1);
   if (remember) await store.remember(accountId, vaultKey, authKey);
@@ -1250,15 +1313,29 @@ async function handleRestore() {
 
   try {
     const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
-    const vaultDocument = await open(vaultKey, sealed, accountId);
+    const vaultDocument = await openVault(vaultKey, sealed, accountId, sealed.at ?? 1, {
+      allowLegacy: sealed.at === undefined
+    });
     const stored = await store.load(accountId);
 
     const version = Math.max(stored.version, 0) + 1;
-    await store.save(accountId, sealed, version);
+    /* The backup is re-sealed at the number this device will store it under: the blob it came
+       from was bound to its own version, and a record that names a number the bytes were not
+       sealed at would not open again. */
+    const resealed = await sealVault(vaultKey, vaultDocument, accountId, 1);
+    await store.save(accountId, resealed, version);
     if (rememberInput.checked) await store.remember(accountId, vaultKey, authKey);
     else await store.forget();
 
-    enter({ accountId, authSecret, authKey, key: vaultKey, version, sealed, document: vaultDocument });
+    enter({
+      accountId,
+      authSecret,
+      authKey,
+      key: vaultKey,
+      version,
+      sealed: resealed,
+      document: vaultDocument
+    });
     announce('Backup restored.');
   } catch (error) {
     showLockError(messageFor(error));

@@ -36,6 +36,14 @@ export const PAD_BUCKET_BYTES = 1024;
 /* The envelope's own marker. An old blob is a bare document and carries no marker, so it opens
    exactly as it always did. */
 export const PAD_VERSION = 2;
+/* The vault blob's associated data names the version the blob was sealed at, so a server that
+   serves an older ciphertext under a newer number no longer produces a readable vault. A blob
+   sealed before this existed names no version and its associated data is the account id alone;
+   `openVault` accepts that shape once, for as long as the device has not written in the bound
+   shape itself. */
+export const VAULT_AD_VERSION = 2;
+/* Separates the three fields so no account id can be read as a longer one plus a version. */
+const VAULT_AD_SEPARATOR = '\n';
 export const ACCOUNT_ID_BYTES = 16;
 /* 16 bytes, base64url, unpadded. */
 export const ACCOUNT_ID_LENGTH = 22;
@@ -415,5 +423,56 @@ export async function open(key, sealed, associated) {
     return unwrap(JSON.parse(decoder.decode(plaintext)));
   } catch {
     throw new Error('bookmarks: a sealed value carries JSON');
+  }
+}
+
+/**
+ * The associated data of a vault blob: the account it belongs to and the version it was sealed
+ * at. The version is what a server cannot change without the blob refusing to open, so an older
+ * ciphertext replayed under a newer number is a refusal rather than a resurrected deletion.
+ */
+export function vaultAssociated(accountId, version) {
+  if (typeof accountId !== 'string' || accountId === '') {
+    throw new Error('bookmarks: a vault blob names the account it belongs to');
+  }
+  if (!Number.isInteger(version) || version < 1) {
+    throw new Error('bookmarks: a vault version is a positive integer');
+  }
+  return [VAULT_AD_VERSION, accountId, version].join(VAULT_AD_SEPARATOR);
+}
+
+/**
+ * Seal a vault document at the version it is about to be stored under. The returned record names
+ * that version, so a reader never has to guess what its associated data was.
+ */
+export async function sealVault(key, value, accountId, version) {
+  const sealed = await seal(key, value, vaultAssociated(accountId, version));
+  return { ...sealed, at: version };
+}
+
+/**
+ * Open a vault blob at the version the server (or this device) says it holds.
+ *
+ * A blob that names the shape it was sealed in must open under exactly that shape — a marked
+ * record is never retried with older associated data, so a bound blob cannot be read at another
+ * version. Only an unmarked record, sealed before the version was bound, may be opened with the
+ * old associated data, and only when the caller allows it: a device that has written in the bound
+ * shape refuses the old shape from then on, which is what stops a pre-upgrade ciphertext being
+ * served again later.
+ */
+export async function openVault(key, sealed, accountId, version, { allowLegacy = false } = {}) {
+  let bound;
+  try {
+    return await open(key, sealed, vaultAssociated(accountId, version));
+  } catch (error) {
+    bound = error;
+  }
+
+  if (sealed?.at !== undefined || !allowLegacy) throw bound;
+
+  try {
+    return await open(key, sealed, accountId);
+  } catch {
+    throw bound;
   }
 }

@@ -292,15 +292,20 @@ export function exportBrowserBookmarks(document) {
 /**
  * The backup envelope. It carries the sealed vault and nothing else: no account id, no
  * timestamps of use, and nothing that would let the file be read without the phrase.
+ *
+ * `at` is the version the vault was sealed at. It is part of the associated data, so a backup
+ * that dropped it could not be opened again; it names a counter, not a person or a device.
  */
 export function exportSealed(sealed, now = Date.now) {
   if (!sealed || typeof sealed.iv !== 'string' || typeof sealed.ct !== 'string') {
     throw fail('INVALID_VAULT', 'there is no sealed vault to export');
   }
+  const vault = { iv: sealed.iv, ct: sealed.ct };
+  if (Number.isInteger(sealed.at)) vault.at = sealed.at;
   return {
     format: SEALED_FORMAT,
     exported_at: new Date(now()).toISOString(),
-    vault: { iv: sealed.iv, ct: sealed.ct }
+    vault
   };
 }
 
@@ -320,7 +325,11 @@ export function parseSealed(payload) {
   if (!vault || typeof vault.iv !== 'string' || typeof vault.ct !== 'string') {
     throw fail('INVALID_VAULT', 'that backup carries no sealed vault');
   }
-  return { iv: vault.iv, ct: vault.ct };
+  /* A backup written before the version was bound carries no `at`; it opens with the old
+     associated data. */
+  const sealed = { iv: vault.iv, ct: vault.ct };
+  if (Number.isInteger(vault.at)) sealed.at = vault.at;
+  return sealed;
 }
 
 /** Re-exported so a caller does not need to reach into the model for the one URL rule. */
