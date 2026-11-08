@@ -1,7 +1,8 @@
 # Bookmarks
 
 An end-to-end encrypted, local-first bookmark vault, served at
-<https://b.332321.xyz/w/bookmarks/>.
+<https://b.332321.xyz/w/bookmarks/>. The local vault is free for everyone, for good; the hosted
+sync service is the paid part, and it is still being built.
 
 The vault is sealed in the browser with AES-256-GCM under a key derived from a 13-word phrase.
 The Worker holds one ciphertext blob per account and cannot read any of it; beside the blob it
@@ -80,20 +81,34 @@ and merges.
 Creation is open but bounded: one Registry object caps how many accounts may exist. The cap
 is **1 while the service is being tested** — set in `wrangler.toml` as `MAX_ACCOUNTS`, falling
 back to 50 in `src/registry.js` when the var is absent. At the cap the server answers
-`429 {error:"full"}`.
+`429 {error:"full"}`. Hosted sync is invite-only during this test, and no one is charged for it.
 
-## Plans and limits
+## What is free and what is paid
 
-| Plan | Sync | Vault | How it is chosen |
+The local vault is free for everyone, forever. There is no account to hold it, no trial, no
+subscription and no expiry: adding, editing, searching, importing and exporting all work with no
+network, and the bookmark list is never deleted because time passed. Self-hosting this Worker is
+free as well; the code is AGPL-3.0-or-later.
+
+Hosted sync is the paid part of the service, and it is not finished. It keeps one sealed copy per
+account on this server, so a second device that enters the same phrase can pull it. Today a few
+testers are invited and nobody pays; when it opens, a subscription buys the hosted copy and the
+space it uses, not the vault.
+
+| Plan | Hosted copy | Size | How it is chosen |
 |---|---|---|---|
-| Owner | no expiry | 100 units (~1 MB) | The account id set as `OWNER_ACCOUNT_ID` |
-| Free | 30 days, then 7 days read-only | ~11 units (~120 KB) | Everyone else |
-| Paid | no expiry | the units bought | Planned |
+| Owner | kept while the account exists | 100 units (~1 MB) | The account id set as `OWNER_ACCOUNT_ID` |
+| Member | kept while the account exists | ~11 units (~120 KB) | Everyone else |
 
-One unit is about ten bookmarks (14,000 sealed characters). The countdown is shown in the app.
-When a free trial ends the server copy becomes read-only for a week and is then deleted; **the
-bookmarks stay on the device throughout**, and a sealed backup can be exported at any time. The
-Registry releases the slot on deletion, so the cap frees itself.
+One unit is about ten bookmarks (14,000 sealed characters). The account record names the member
+plan `free`, which means only that no units were bought; it carries no deadline, and the size
+above is a limit on the hosted copy, never a period of time. Nothing on the server becomes
+read-only.
+
+An account that is created and then never used — no sign-in, no vault — is released after a day,
+and its slot goes back to the cap. That release is about a reserved slot nobody is using, not a
+trial: an account that has ever been signed in to or written is kept for as long as the service
+holds it, and nothing deletes it.
 
 The limit is bytes, not bookmarks: the vault is sealed, and the server cannot read it. Sealed
 blobs are padded to whole 1 KiB buckets before sealing, so the stored length names a size band —
@@ -108,8 +123,9 @@ Ownership is named, never positional. Copy the Account id from Settings, then se
 npx wrangler secret put OWNER_ACCOUNT_ID   # paste the id from Settings
 ```
 
-The id routes requests to the account and cannot log in. If the account already exists as free,
-the next login upgrades it to the owner plan. No one can become the owner by arriving first.
+The id routes requests to the account and cannot log in. If the account already exists on the
+member plan, the next login upgrades it to the owner plan. No one can become the owner by
+arriving first.
 
 ## Request limits
 

@@ -85,7 +85,6 @@ let nameTouched = false;
 let lastSyncedAt = 0;
 let plan = null;
 let units = 0;
-let trialEndsAt = null;
 /* How many places are signed in to this account, as of the last sign-in or the last check. */
 let placesCount = null;
 /* The account's own dates, as the sign-in answer carried them, in milliseconds. */
@@ -128,7 +127,6 @@ const empty = $('empty');
 const viewHint = $('view-hint');
 const vaultStatus = $('vault-status');
 const status = $('status');
-const planNote = $('plan-note');
 const syncRefusal = $('sync-refusal');
 const syncRefusalDismiss = $('sync-refusal-dismiss');
 
@@ -585,44 +583,14 @@ function setSyncStatus(label) {
   updateStatusLine();
 }
 
-function trialDaysLeft() {
-  if (typeof trialEndsAt !== 'number') return null;
-  return Math.ceil((trialEndsAt - Date.now()) / 86_400_000);
-}
-
 function applyPlan(payload) {
   plan = payload?.plan ?? null;
   units = Number.isInteger(payload?.units) ? payload.units : 0;
-  trialEndsAt = typeof payload?.trialEndsAt === 'number' ? payload.trialEndsAt : null;
   if (Number.isInteger(payload?.places)) placesCount = payload.places;
   /* The same answer carries the account's own dates, so Settings needs no second request. Only a
      proof of the phrase receives them, and this client has one by the time it reads them. */
   vaultCreatedAt = typeof payload?.createdAt === 'number' ? payload.createdAt : null;
   lastActivityAt = typeof payload?.lastSeenAt === 'number' ? payload.lastSeenAt : null;
-  renderPlanNote();
-}
-
-/** The owner and paying accounts carry no banner; a free trial carries a live countdown. */
-function renderPlanNote() {
-  if (!syncEnabled() || !plan || plan === 'owner' || plan === 'paid') {
-    planNote.hidden = true;
-    return;
-  }
-
-  const days = trialDaysLeft();
-  planNote.hidden = false;
-  planNote.classList.toggle('ended', days !== null && days <= 0);
-
-  if (days === null) {
-    planNote.textContent = 'Free sync.';
-    return;
-  }
-  if (days <= 0) {
-    planNote.textContent =
-      'Free sync has ended. Your bookmarks are still on this device — export a sealed backup from Settings before the server copy is deleted.';
-    return;
-  }
-  planNote.textContent = `Free sync · ${days} day${days === 1 ? '' : 's'} left. Your bookmarks stay on this device either way.`;
 }
 
 /**
@@ -706,10 +674,6 @@ function planLabel() {
   if (!syncEnabled()) return 'sync off';
   if (plan === 'owner') return units > 0 ? `owner account · ${units * 10} entries` : 'owner account';
   if (plan === 'paid') return units > 0 ? `paid · ${units * 10} entries` : 'paid';
-  if (plan === 'free') {
-    const days = trialDaysLeft();
-    return days !== null && days > 0 ? `free trial · ${days} days left` : 'free trial ended · read-only';
-  }
   return 'sync on';
 }
 
@@ -729,12 +693,6 @@ function handleSyncError(error) {
   if (failure.kind === 'cap') {
     setSyncStatus(failure.label);
     showSyncRefusal();
-    return;
-  }
-  if (failure.kind === 'trial') {
-    trialEndsAt = Date.now();
-    renderPlanNote();
-    setSyncStatus(failure.label);
     return;
   }
   /* This branch can hold the vault key without the phrase, so creating the account needs it. */
@@ -2234,6 +2192,10 @@ function openSettings() {
         class: 'modal-note',
         text: `${count} bookmarks in this vault · version ${state.version} · ${planLabel()}.`
       }),
+      el('p', {
+        class: 'modal-note',
+        text: 'Sync keeps a sealed copy on the server. Your local vault never expires.'
+      }),
       el('h3', { class: 'settings-heading', text: 'Account' }),
       el('div', { class: 'settings-list' }, [
         stampRow('Vault created', () => vaultCreatedAt),
@@ -2424,10 +2386,8 @@ async function lockVault({ broadcast = true } = {}) {
   lastSyncedAt = 0;
   plan = null;
   units = 0;
-  trialEndsAt = null;
   vaultCreatedAt = null;
   lastActivityAt = null;
-  planNote.hidden = true;
   list.replaceChildren();
   showLock('Locked. Enter your phrase to reopen the vault.', { hasVault: true });
 

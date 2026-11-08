@@ -40,8 +40,8 @@ export class SyncError extends Error {
  *
  * The page owns the words it shows for a refusal that needs an address in it, so the cap case
  * carries no `message`: it is the only failure with its own persistent notice. Every other case
- * returns one sentence that a wrong phrase, a dead connection, a trial that has ended and a full
- * server cannot share — those are different events and reading one as another is a lie.
+ * returns one sentence that a wrong phrase, a dead connection, an account that does not exist and
+ * a full server cannot share — those are different events and reading one as another is a lie.
  */
 export function describeSyncFailure(error) {
   const code = typeof error?.code === 'string' ? error.code : 'NETWORK';
@@ -50,12 +50,6 @@ export function describeSyncFailure(error) {
   switch (code) {
     case 'FULL':
       return { kind: 'cap', label: 'No new accounts' };
-    case 'TRIAL_ENDED':
-      return {
-        kind: 'trial',
-        label: 'Read-only',
-        message: 'The free sync period has ended. This device keeps every bookmark.'
-      };
     case 'LOGIN_FAILED':
       return status === 401
         ? {
@@ -291,9 +285,6 @@ export class SyncClient {
     if (response.status === 401) {
       this.token = null;
       throw new SyncError('UNAUTHORIZED', 'The session expired.');
-    }
-    if (response.status === 402) {
-      throw new SyncError('TRIAL_ENDED', 'The free sync period has ended.', { status: 402 });
     }
     if (response.status === 409) {
       return {

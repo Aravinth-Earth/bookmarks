@@ -95,7 +95,17 @@ const bannedCopy = [
   'does not appear in a request path that platform logs record',
   'no third party ever learns that this vault contains that site',
   'no third-party anything',
-  'nothing else identifies you'
+  'nothing else identifies you',
+  /* The old model: a timed free sync. The local vault is free forever and only the hosted copy
+     is paid, so copy that puts an end date on sync is a claim the product does not make. */
+  '30 days',
+  'read-only week',
+  'free trial',
+  'trial ends',
+  'trial has ended',
+  'trial period',
+  'free sync has ended',
+  '7 days read-only'
 ];
 /* Nothing personal belongs in a page strangers load. */
 const personal = ['aravinth', '@332321.xyz', 'simplelogin'];

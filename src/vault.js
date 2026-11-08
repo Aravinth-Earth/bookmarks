@@ -19,17 +19,17 @@ import { digestHex, logEvent } from './events.js';
 export const UNIT_CT_CHARS = 14_000;
 /* The owner's balance. It is a number like anyone else's, so the paid path is the same code. */
 export const OWNER_UNITS = 100;
-/* About 11 units: roughly a hundred bookmarks with icons. */
+/* The hosted copy a member of the service holds: about 11 units, roughly a hundred bookmarks
+   with icons. It is a size, not a period — no account expires. */
 export const FREE_MAX_CT_CHARS = 160_000;
-export const FREE_TRIAL_MS = 30 * 24 * 60 * 60 * 1000;
-export const READ_ONLY_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 const OWNER_RECHECK_MS = 365 * 24 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 3;
 const NONCE_TTL_MS = 60_000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /* An account that is created and then never signed in to or written is holding a slot it is not
    using. The alarm releases it after this long, so one abandoned creation cannot occupy the cap
-   for the whole trial. Signing in or writing a vault counts as use and cancels the release. */
+   indefinitely. Signing in or writing a vault counts as use and cancels the release; an account
+   that is ever used is kept for good. */
 export const UNUSED_RELEASE_MS = 24 * 60 * 60 * 1000;
 /* A session's last-seen stamp is written only when it is this stale, so an ordinary read or
    write does not each cost a storage write. */
@@ -298,15 +298,7 @@ export class Vault {
     }
 
     if (existing) {
-      return json(
-        {
-          ok: true,
-          created: false,
-          plan: existing.plan ?? 'free',
-          trialEndsAt: existing.trialEndsAt ?? null
-        },
-        200
-      );
+      return json({ ok: true, created: false, plan: existing.plan ?? 'free' }, 200);
     }
 
     /* The cap lives in one object, so creation is serialised against it. An existing account
@@ -333,11 +325,11 @@ export class Vault {
       }
     }
 
-    /* Creation always starts free. Ownership is only granted after a successful proof of the
-       phrase, so a leaked owner id cannot be used to pre-create the account and claim the plan. */
+    /* Creation always starts on the free plan. Ownership is only granted after a successful
+       proof of the phrase, so a leaked owner id cannot be used to pre-create the account and
+       claim the plan. */
     const now = this.now();
     const plan = 'free';
-    const trialEndsAt = now + FREE_TRIAL_MS;
     const units = 0;
 
     await this.storage.put('account', {
@@ -347,16 +339,16 @@ export class Vault {
       units,
       createdAt: now,
       lastSeenAt: now,
-      trialEndsAt,
       paidUntil: null
     });
 
     if (typeof this.storage.setAlarm === 'function') {
-      /* Whichever comes first: the unused-account release or the end of the trial. */
-      await this.storage.setAlarm(Math.min(trialEndsAt, now + UNUSED_RELEASE_MS));
+      /* The only deadline an account ever carries: the release of a slot that was reserved and
+         then never used. Use cancels it, and an account that is used is never scheduled again. */
+      await this.storage.setAlarm(now + UNUSED_RELEASE_MS);
     }
 
-    return json({ ok: true, created: true, plan, trialEndsAt }, 201);
+    return json({ ok: true, created: true, plan }, 201);
   }
 
   /**
@@ -510,7 +502,6 @@ export class Vault {
       expiresAt,
       plan: account.plan ?? 'free',
       units: account.units ?? 0,
-      trialEndsAt: account.trialEndsAt ?? null,
       paidUntil: account.paidUntil ?? null,
       /* The account's own dates, in milliseconds. They are only ever sent in this answer, which
          needs a proof of the phrase, so the owner can read when the vault was created and when
@@ -645,10 +636,6 @@ export class Vault {
     const account = await this.storage.get('account');
     if (!account) return json({ error: 'no_account' }, 404);
 
-    if (this.trialEnded(account)) {
-      return json({ error: 'trial_ended' }, 402);
-    }
-
     const body = await readJson(request, MAX_VAULT_BODY);
     if (body.tooLarge) return json({ error: 'too_large' }, 413);
     if (!body.value || typeof body.value !== 'object') return json({ error: 'invalid' }, 400);
@@ -700,14 +687,14 @@ export class Vault {
     if (!owner || owner !== account.accountId) return account;
     if (account.plan === 'owner' && account.units === OWNER_UNITS) return account;
 
-    const upgraded = { ...account, plan: 'owner', units: OWNER_UNITS, trialEndsAt: null };
+    const upgraded = { ...account, plan: 'owner', units: OWNER_UNITS };
     await this.storage.put('account', upgraded);
     return upgraded;
   }
 
   /**
    * Dates, sizes and counts for an operator view: how much space an account holds against its
-   * cap, when it was last seen, whether its trial has run out.
+   * cap, and when it was last seen.
    *
    * The phrase, the auth secret, the session records and the sealed blob are not in the answer.
    */
@@ -728,18 +715,19 @@ export class Vault {
       units: account.units ?? 0,
       createdAt: account.createdAt ?? null,
       lastSeenAt: account.lastSeenAt ?? null,
-      trialEndsAt: account.trialEndsAt ?? null,
       paidUntil: account.paidUntil ?? null,
       vaultVersion: vault.version ?? 0,
       ctChars: typeof vault.ct === 'string' ? vault.ct.length : 0,
       updatedAt: vault.updatedAt ?? null,
       capChars: this.capChars(account),
-      readOnly: this.trialEnded(account),
       sessions
     });
   }
 
-  /** Paid and owner accounts hold a number of units; free accounts hold a fixed trial size. */
+  /**
+   * Paid and owner accounts hold a number of units; a free account holds the fixed size of the
+   * hosted copy that comes with the service. The cap is a size, never a deadline.
+   */
   capChars(account) {
     if (account.plan === 'owner' || account.plan === 'paid') {
       const units = Number.isInteger(account.units) ? account.units : 0;
@@ -748,16 +736,12 @@ export class Vault {
     return FREE_MAX_CT_CHARS;
   }
 
-  /** A free trial that has run out is read-only: the data can still be read and exported. */
-  trialEnded(account) {
-    if (!account || account.plan === 'owner' || account.plan === 'paid') return false;
-    if (account.paidUntil && account.paidUntil > this.now()) return false;
-    return typeof account.trialEndsAt === 'number' && this.now() >= account.trialEndsAt;
-  }
-
   /**
-   * The deadline the runtime wakes this object for: the end of the trial, then the end of the
-   * read-only grace, then deletion. An owner or a paying account is rescheduled a year out.
+   * The deadline the runtime wakes this object for.
+   *
+   * Creation arms one alarm, for the release of an account that was never used. An account that
+   * has been signed in to or written is never deleted and is not rescheduled; an owner or a
+   * paying account is only rechecked a year out, and that check never deletes it either.
    */
   async alarm() {
     const account = await this.storage.get('account');
@@ -772,7 +756,7 @@ export class Vault {
     }
 
     /* An account nobody signed in to and nobody wrote to is only holding a slot. Release it
-       after the idle window instead of reserving the cap for the whole trial. */
+       after the idle window instead of reserving the cap indefinitely. */
     if (await this.isUnused(account)) {
       const releaseAt = (account.createdAt ?? 0) + UNUSED_RELEASE_MS;
       if (now < releaseAt) {
@@ -784,18 +768,8 @@ export class Vault {
       return;
     }
 
-    const trialEnds = account.trialEndsAt ?? 0;
-    if (now < trialEnds) {
-      await this.storage.setAlarm(trialEnds);
-      return;
-    }
-    if (now < trialEnds + READ_ONLY_GRACE_MS) {
-      await this.storage.setAlarm(trialEnds + READ_ONLY_GRACE_MS);
-      return;
-    }
-
-    await this.releaseSlot(account.accountId);
-    await this.storage.deleteAll();
+    /* A used account is kept. There is no deadline that deletes it: the local vault is free
+       forever, and the hosted copy of an account that is in use is never taken away by time. */
   }
 
   /**
@@ -808,7 +782,7 @@ export class Vault {
     return (await this.storage.list({ prefix: 'session:' })).size === 0;
   }
 
-  /** Give the account's slot back, so the cap frees itself as trials end. */
+  /** Give the account's slot back, so the cap frees itself as unused accounts are released. */
   async releaseSlot(accountId) {
     const registry = this.env?.REGISTRY;
     if (!registry) return;
