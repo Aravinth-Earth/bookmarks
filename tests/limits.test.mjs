@@ -150,6 +150,40 @@ test('a burst on the icon and title routes is refused before anything is fetched
   );
 });
 
+test('the stylesheet proxy spends the same fetch budget as the icon route', async () => {
+  const { env: limiters } = limits();
+  const { env } = harness(limiters);
+  let upstream = 0;
+
+  await withFetch(
+    async () => {
+      upstream += 1;
+      return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
+    },
+    async () => {
+      const sheet = new Request('https://b.332321.xyz/css/tokens.css', {
+        headers: { 'cf-connecting-ip': SOURCE }
+      });
+
+      for (let at = 0; at < LIMITS.fetch.limit; at += 1) {
+        const response = await worker.fetch(sheet, env);
+        assert.equal(response.status, 200, `stylesheet request ${at + 1} is served`);
+      }
+
+      const before = upstream;
+      const refused = await worker.fetch(sheet, env);
+      assert.equal(refused.status, 429);
+      assert.equal(refused.headers.get('retry-after'), '10');
+      assert.equal(upstream, before, 'the refused request fetched nothing');
+
+      /* The class is shared, so the icon route is already spent. */
+      const icon = await worker.fetch(api(ICON.path, { headers: ICON.headers }), env);
+      assert.equal(icon.status, 429);
+      assert.equal(upstream, before, 'the refused icon fetched nothing');
+    }
+  );
+});
+
 test('vault reads and writes are the cheapest class, counted apart from sign-in', async () => {
   const { env: limiters } = limits();
   const { env, calls } = harness(limiters);

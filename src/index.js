@@ -63,6 +63,65 @@ function redirect(url, pathname) {
   });
 }
 
+/* The site's two stylesheets live on the site host and are served from the app host, which is
+   the one that holds the sealed vault. The request names one fixed origin and one of two fixed
+   paths, follows no redirect, and answers with a header set written here rather than copied from
+   the site: a header the site sets — a cookie in particular — would otherwise be stored against
+   the vault's own origin. */
+const STYLESHEET_TIMEOUT_MS = 5000;
+
+function stylesheetUnavailable() {
+  return new Response(null, {
+    status: 502,
+    headers: { 'cache-control': 'no-store' }
+  });
+}
+
+async function proxyStylesheet(pathname, request) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    return new Response(null, {
+      status: 405,
+      headers: { allow: 'GET, HEAD', 'cache-control': 'no-store' }
+    });
+  }
+
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), STYLESHEET_TIMEOUT_MS);
+
+  try {
+    const upstream = await fetch(`https://www.332321.xyz${pathname}`, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: abort.signal,
+      headers: { accept: 'text/css' }
+    });
+
+    /* Only a direct 200 that says it is CSS is passed on. A redirect is refused rather than
+       followed, so the destination is never a host this file did not name. */
+    const type = upstream.headers.get('content-type') ?? '';
+    if (upstream.status !== 200 || !/^text\/css\b/i.test(type)) {
+      if (upstream.body) await upstream.body.cancel().catch(() => {});
+      return stylesheetUnavailable();
+    }
+
+    const headers = {
+      'content-type': 'text/css; charset=utf-8',
+      'cache-control': 'public, max-age=86400',
+      'x-content-type-options': 'nosniff'
+    };
+    const etag = upstream.headers.get('etag');
+    const lastModified = upstream.headers.get('last-modified');
+    if (etag) headers.etag = etag;
+    if (lastModified) headers['last-modified'] = lastModified;
+
+    return new Response(request.method === 'HEAD' ? null : upstream.body, { status: 200, headers });
+  } catch {
+    return stylesheetUnavailable();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Has this source spent its class's budget?
  *
@@ -1116,10 +1175,7 @@ export default {
     if (url.pathname === CANONICAL) return redirect(url, `${CANONICAL}/`);
 
     if (SITE_STYLESHEETS.has(url.pathname)) {
-      const upstream = await fetch(`https://www.332321.xyz${url.pathname}`);
-      const headers = new Headers(upstream.headers);
-      headers.set('cache-control', 'public, max-age=86400');
-      return new Response(upstream.body, { status: upstream.status, headers });
+      return limited(env, 'fetch', request, () => proxyStylesheet(url.pathname, request));
     }
 
     if (url.pathname === API_PREFIX || url.pathname.startsWith(`${API_PREFIX}/`)) {
