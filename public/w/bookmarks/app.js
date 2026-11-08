@@ -22,6 +22,7 @@ import {
 } from './bookmarks.js';
 import { deriveAccount, generatePhrase, open, phraseProblem, seal } from './crypto.js';
 import { CLIPBOARD_CLEAR_MS, clearPhraseField, overwriteClipboard } from './hygiene.js';
+import { createLockSignal } from './lock-signal.js';
 import {
   ICON_TRIES_KEY,
   SIZE_KEY,
@@ -47,6 +48,10 @@ import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './v
 import { formatStamp } from './stamps.js';
 
 const store = createVault(indexedDbAdapter());
+
+/* Every tab holds its own key, so a lock has to be told to the others rather than assumed
+   to reach them. See lock-signal.js. */
+const lockSignal = createLockSignal();
 
 const state = {
   accountId: null,
@@ -471,6 +476,9 @@ async function saveNow({ push = true } = {}) {
   try {
     do {
       dirty = false;
+      /* A lock may have arrived while the previous pass was still sealing. Nothing further is
+         written once the key is gone. */
+      if (!state.key) return;
       state.version += 1;
       const sealed = await seal(state.key, state.document, state.accountId);
       await store.save(state.accountId, sealed, state.version);
@@ -2374,6 +2382,8 @@ function openSettings() {
           if (!sure) return;
           await store.clear();
           clearDeviceStorage();
+          /* Another tab still holds the key and would write the vault back to this device. */
+          lockSignal.broadcast();
           location.reload();
         }, { danger: true })
       ]),
@@ -2390,9 +2400,16 @@ function openSettings() {
   fillStamps();
 }
 
-async function lockVault() {
-  await sync.logout();
-  await store.forget();
+/**
+ * Drops the key, the open document and the session, here and in every other tab.
+ *
+ * The page's own state goes first, before the first await: a save that is already in flight
+ * checks `state.key`, and a tab that has been told to lock must not seal one more snapshot on its
+ * way out. `sync.logout()` and `store.forget()` then take the session and the remembered key off
+ * the device. Only the tab that started the lock broadcasts — a tab that hears the signal runs
+ * this with `broadcast: false`, so the message cannot travel back and forth.
+ */
+async function lockVault({ broadcast = true } = {}) {
   state.accountId = null;
   state.authKey = null;
   state.authSecret = null;
@@ -2413,6 +2430,11 @@ async function lockVault() {
   planNote.hidden = true;
   list.replaceChildren();
   showLock('Locked. Enter your phrase to reopen the vault.', { hasVault: true });
+
+  if (broadcast) lockSignal.broadcast();
+
+  await sync.logout();
+  await store.forget();
 }
 
 /* --------------------------------------------------------------------- boot */
@@ -2492,6 +2514,11 @@ function bindEvents() {
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') saveNow();
+  });
+
+  /* Another tab locked. Drop this tab's key too, without telling anyone else. */
+  lockSignal.watch(() => {
+    void lockVault({ broadcast: false });
   });
 
   window.addEventListener('online', () => {
