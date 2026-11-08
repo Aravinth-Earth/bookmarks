@@ -14,13 +14,11 @@ import {
   ACCOUNT_FREE_FAILURES,
   ACCOUNT_RETRY_MAX_MS,
   FREE_MAX_CT_CHARS,
-  FREE_TRIAL_MS,
   LOCKOUT_MS,
   MAX_FAILURES,
   MAX_TRACKED_SOURCES,
   MAX_VAULT_BODY,
   OWNER_UNITS,
-  READ_ONLY_GRACE_MS,
   UNIT_CT_CHARS,
   UNUSED_RELEASE_MS,
   Vault
@@ -747,7 +745,6 @@ test('the configured owner id gets the owner plan only after a proven login', as
   const session = await login(harness);
   assert.equal(session.body.plan, 'owner');
   assert.equal(session.body.units, OWNER_UNITS);
-  assert.equal(session.body.trialEndsAt, null);
 
   harness.advance(10 * 365 * DAY);
   const refreshed = await login(harness);
@@ -764,16 +761,17 @@ test('the configured owner id gets the owner plan only after a proven login', as
   assert.deepEqual(harness.released, []);
 });
 
-test('an account that is not named as the owner is free and carries a trial deadline', async () => {
+test('a member account carries no deadline', async () => {
   const harness = object();
   await provision(harness);
 
   const session = await login(harness);
   assert.equal(session.body.plan, 'free');
-  assert.equal(session.body.trialEndsAt, 1_000_000 + FREE_TRIAL_MS);
+  assert.equal(session.body.trialEndsAt, undefined, 'no deadline is sent');
+  assert.equal((await harness.storage.get('account')).trialEndsAt, undefined, 'none is stored');
 });
 
-test('a free vault turns read-only at the deadline and is deleted after the grace', async () => {
+test('an account older than any former trial length still writes', async () => {
   const harness = object();
   await provision(harness);
   const session = await login(harness);
@@ -786,37 +784,42 @@ test('a free vault turns read-only at the deadline and is deleted after the grac
   );
   assert.equal(written.status, 200);
 
-  harness.advance(FREE_TRIAL_MS + 1);
+  /* Two years: well past the thirty days and the read-only week the old model had. */
+  harness.advance(2 * 365 * DAY);
 
-  /* A read-only account can still sign in — that is how its owner exports before deletion. */
   const after = await login(harness);
-  const afterAuth = { authorization: `Bearer ${after.body.token}` };
-
-  const readBack = await read(
-    await harness.vault.fetch(request('/vault', { method: 'GET', headers: afterAuth }))
-  );
-  assert.equal(readBack.status, 200, 'the data is still readable');
-
-  const denied = await read(
+  const again = await read(
     await harness.vault.fetch(
       request('/vault', {
         method: 'PUT',
-        headers: afterAuth,
+        headers: { authorization: `Bearer ${after.body.token}` },
         body: { baseVersion: 1, iv: IV, ct: CT }
       })
     )
   );
-  assert.equal(denied.status, 402);
-  assert.equal(denied.body.error, 'trial_ended');
+  assert.equal(again.status, 200, 'the hosted copy is still writable');
+  assert.equal(again.body.version, 2);
+});
 
+test('the alarm does not delete an account that has been used, however old', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+
+  await harness.vault.fetch(
+    request('/vault', {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${session.body.token}` },
+      body: { baseVersion: 0, iv: IV, ct: CT }
+    })
+  );
+
+  harness.advance(2 * 365 * DAY);
   await harness.vault.alarm();
-  assert.ok(harness.storage.raw.has('account'), 'the grace period is not over');
 
-  harness.advance(READ_ONLY_GRACE_MS + 2);
-  await harness.vault.alarm();
-
-  assert.equal(harness.storage.raw.size, 0);
-  assert.deepEqual(harness.released, [ACCOUNT.accountId]);
+  assert.ok(harness.storage.raw.has('account'), 'the account is kept');
+  assert.ok(harness.storage.raw.has('vault'), 'the hosted copy is kept');
+  assert.deepEqual(harness.released, [], 'the slot is not given back');
 });
 
 test('an account created and never used releases its slot after the idle window', async () => {
@@ -870,7 +873,7 @@ test('a released unused account leaves no entry in the registry list', async () 
   assert.equal(after.count, 0);
 });
 
-test('a paid account keeps writing after the trial', async () => {
+test('a paid account writes at any age', async () => {
   const harness = object();
   await provision(harness);
 
@@ -879,11 +882,11 @@ test('a paid account keeps writing after the trial', async () => {
     ...account,
     plan: 'paid',
     units: 10,
-    paidUntil: 1_000_000 + FREE_TRIAL_MS + 90 * DAY
+    paidUntil: 1_000_000 + 90 * DAY
   });
 
   await login(harness);
-  harness.advance(FREE_TRIAL_MS + 1);
+  harness.advance(90 * DAY + 1);
 
   const refreshed = await login(harness);
   const response = await read(
@@ -1184,9 +1187,7 @@ test('admin stats carry dates, sizes and counts, and no secret or blob', async (
     'lastSeenAt',
     'paidUntil',
     'plan',
-    'readOnly',
     'sessions',
-    'trialEndsAt',
     'units',
     'updatedAt',
     'vaultVersion'
@@ -1198,7 +1199,6 @@ test('admin stats carry dates, sizes and counts, and no secret or blob', async (
   assert.equal(body.ctChars, CT.length);
   assert.equal(body.capChars, FREE_MAX_CT_CHARS);
   assert.equal(body.sessions, 1);
-  assert.equal(body.readOnly, false);
   assert.equal(typeof body.createdAt, 'number');
   assert.equal(typeof body.updatedAt, 'number');
 
@@ -1210,15 +1210,17 @@ test('admin stats carry dates, sizes and counts, and no secret or blob', async (
   }
 });
 
-test('admin stats say when the trial has run out, and an owner is not read-only', async () => {
-  const expired = object();
-  await provision(expired);
-  const open = await read(await expired.vault.fetch(request('/admin-stats', { method: 'GET' })));
-  assert.equal(open.body.readOnly, false);
+test('admin stats carry no deadline, at any age', async () => {
+  const aged = object();
+  await provision(aged);
+  const open = await read(await aged.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(open.body.readOnly, undefined);
+  assert.equal(open.body.trialEndsAt, undefined);
 
-  expired.advance(FREE_TRIAL_MS);
-  const shut = await read(await expired.vault.fetch(request('/admin-stats', { method: 'GET' })));
-  assert.equal(shut.body.readOnly, true);
+  aged.advance(2 * 365 * DAY);
+  const old = await read(await aged.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(old.body.plan, 'free', 'age changes no plan');
+  assert.equal(old.body.readOnly, undefined, 'nothing is read-only');
 
   const owner = object({ ownerId: ACCOUNT.accountId });
   await provision(owner);
@@ -1228,8 +1230,8 @@ test('admin stats say when the trial has run out, and an owner is not read-only'
   assert.equal(owned.body.plan, 'owner');
   assert.equal(owned.body.units, OWNER_UNITS);
   assert.equal(owned.body.capChars, OWNER_UNITS * UNIT_CT_CHARS);
-  assert.equal(owned.body.trialEndsAt, null);
-  assert.equal(owned.body.readOnly, false);
+  assert.equal(owned.body.trialEndsAt, undefined);
+  assert.equal(owned.body.readOnly, undefined);
 });
 
 test('admin stats count live places only, and an empty object has no account', async () => {

@@ -11,17 +11,17 @@ import assert from 'node:assert/strict';
 
 import { SyncClient, SyncError, describeSyncFailure } from '../public/w/bookmarks/sync.js';
 
-test('a refused account is not the same failure as a wrong phrase, a lost connection or an ended trial', () => {
+test('a refused account is not the same failure as a wrong phrase, a lost connection or a missing account', () => {
   const failures = [
     describeSyncFailure(new SyncError('FULL', 'full', { status: 429 })),
     describeSyncFailure(new SyncError('LOGIN_FAILED', 'refused', { status: 401 })),
     describeSyncFailure(new TypeError('fetch failed')),
-    describeSyncFailure(new SyncError('TRIAL_ENDED', 'ended', { status: 402 }))
+    describeSyncFailure(new SyncError('NO_ACCOUNT', 'missing', { status: 404 }))
   ];
 
   assert.deepEqual(
     failures.map((failure) => failure.kind),
-    ['cap', 'phrase', 'network', 'trial']
+    ['cap', 'phrase', 'network', 'missing']
   );
 
   const messages = failures.map((failure) => failure.message).filter(Boolean);
