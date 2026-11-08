@@ -338,6 +338,10 @@ const MAX_REDIRECTS = 3;
  *    without complaint. Every host is therefore resolved over DNS over HTTPS before it is
  *    fetched, and refused when any returned address is one the literal rules already refuse.
  *
+ * A hop that names a port is refused as well. The caller names a hostname, never a port, and the
+ * two proxies speak to the default TLS port only; a Location such as `https://host:8443/…` would
+ * otherwise let one caller sweep ports on any host the service can resolve.
+ *
  * The resolution is a separate query from the connection the runtime opens, so the answer that
  * was checked and the address that is connected to are not guaranteed to be the same one: a
  * record that changes between the lookup and the fetch (DNS rebinding) can still reach an
@@ -486,6 +490,19 @@ function ipv6Refused(bytes) {
   }
 
   return false;
+}
+
+/**
+ * True when a URL names a port other than the default one for its scheme.
+ *
+ * The two proxies exist to read an icon and a title over ordinary https, and the caller names a
+ * hostname with no port. A Location that adds one — `https://host:8443/…` — would make the
+ * service a port probe against any host it can resolve, so such a hop is refused rather than
+ * followed. The URL parser drops an explicit `:443` for https, so a non-empty `port` is always a
+ * port the caller did not name.
+ */
+function portRefused(url) {
+  return url.port !== '';
 }
 
 /**
@@ -798,8 +815,8 @@ function iconTypeOf(response) {
  *
  * `redirect: 'follow'` lets a page answer with a Location that reaches a host the caller was
  * never allowed to name, and the runtime would not check it. Every hop is therefore checked
- * before it is asked: https only, and a destination the same rules accept. A refused hop ends
- * the chain with `null`, which the caller treats as no answer.
+ * before it is asked: https only, on the default port, and a destination the same rules accept.
+ * A refused hop ends the chain with `null`, which the caller treats as no answer.
  *
  * `wikipedia.org` serves its icon from `en.wikipedia.org`, so redirects are still followed by
  * hand; the local runtime does not complete that chain on its own.
@@ -811,7 +828,8 @@ async function fetchChain(target, init, signal) {
   let current = new URL(target);
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-    if (current.protocol !== 'https:' || destinationRefused(current.hostname)) return null;
+    if (current.protocol !== 'https:' || portRefused(current)) return null;
+    if (destinationRefused(current.hostname)) return null;
     /* A public name can answer with a private address; the answer is checked before the fetch,
        on the first hop and on every redirect. */
     if (await resolvesRefused(current.hostname, signal)) return null;
@@ -885,7 +903,8 @@ async function discoverIcon(hostname, signal) {
 
   try {
     const url = new URL(href, step.url);
-    if (url.protocol !== 'https:' || destinationRefused(url.hostname)) return null;
+    if (url.protocol !== 'https:' || portRefused(url)) return null;
+    if (destinationRefused(url.hostname)) return null;
     return url.toString();
   } catch {
     return null;
