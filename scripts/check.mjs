@@ -206,6 +206,33 @@ try {
   problems.push(`limits: ${error.message}`);
 }
 
+/* 6. Invocation logging must stay off. Every account route carries `/a/<accountId>/`, and the
+   invocation line is written from the request path, so a config edit that turns it back on
+   publishes the id that `src/events.js` digests on purpose. The event stream is the intended
+   record, and it costs nothing to keep this true. */
+try {
+  const config = readFileSync(join(root, 'wrangler.toml'), 'utf8');
+  const observability = config.match(/^\[observability\]\s*$([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1] ?? '';
+  const logs = config.match(/^\[observability\.logs\]\s*$([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1] ?? '';
+
+  if (!observability) {
+    problems.push('logs: wrangler.toml has no [observability] block');
+  } else if (!/^\s*enabled\s*=\s*true\s*$/m.test(observability)) {
+    problems.push('logs: [observability] is not enabled = true, so refusals are not recorded');
+  }
+
+  if (!logs) {
+    problems.push('logs: wrangler.toml has no [observability.logs] block');
+  } else if (!/^\s*invocation_logs\s*=\s*false\s*$/m.test(logs)) {
+    problems.push(
+      'logs: [observability.logs] does not set invocation_logs = false, ' +
+        'so the account id in an /a/<id>/ path would be logged with every request'
+    );
+  }
+} catch (error) {
+  problems.push(`logs: ${error.message}`);
+}
+
 if (problems.length) {
   console.error('check failed:');
   for (const problem of problems) console.error(`  - ${problem}`);
