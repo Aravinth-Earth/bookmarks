@@ -11,7 +11,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,6 +32,12 @@ function walk(directory) {
 
 const assets = walk(publicDir);
 
+/* The extension is a second parcel of browser modules. A syntax error there fails only when the worker is loaded,
+   which nothing in this repository reaches, so it is parsed here with the page's own modules. */
+const extensionDir = join(root, 'extension');
+const extensionFiles = existsSync(extensionDir) ? walk(extensionDir) : [];
+const extensionNames = extensionFiles.map((path) => relative(extensionDir, path));
+
 /* 0. A scan over nothing proves nothing. */
 if (assets.length === 0) {
   console.error(`check failed: no assets found under ${publicDir}`);
@@ -39,7 +45,7 @@ if (assets.length === 0) {
 }
 
 /* 1. Every browser module must parse. */
-for (const file of assets.filter((path) => path.endsWith('.js'))) {
+for (const file of [...assets, ...extensionFiles].filter((path) => path.endsWith('.js'))) {
   try {
     execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
   } catch (error) {
@@ -260,6 +266,165 @@ try {
 } catch (error) {
   problems.push(`shell: ${error.message}`);
 }
+
+/* 8. The extension is optional, local and silent. Every clause here is a promise made to whoever installs it:
+   it asks for nothing beyond the three permissions the feature needs, it declares nothing that would let another
+   origin reach it, it contacts nobody, and it names the same bridge as the page. A key this guard does not know
+   about is a key nobody reviewed, so the manifest is compared against an allowed set and fails closed. */
+try {
+  const manifest = JSON.parse(readFileSync(join(extensionDir, 'manifest.json'), 'utf8'));
+
+  if (manifest.manifest_version !== 3) {
+    problems.push(`extension: manifest_version is ${manifest.manifest_version}, not 3`);
+  }
+
+  const allowedKeys = new Set([
+    'manifest_version', 'name', 'version', 'description', 'minimum_chrome_version', 'permissions',
+    'background', 'incognito', 'action', 'content_scripts', 'content_security_policy', 'icons', 'author'
+  ]);
+  const named = new Set(['optional_permissions', 'externally_connectable', 'web_accessible_resources', 'sandbox']);
+  for (const key of Object.keys(manifest)) {
+    if (!allowedKeys.has(key) && !named.has(key)) {
+      problems.push(`extension: manifest declares "${key}", which no guard has reviewed`);
+    }
+  }
+
+  const allowedPermissions = new Set(['tabs', 'storage', 'alarms']);
+  for (const permission of manifest.permissions ?? []) {
+    if (!allowedPermissions.has(permission)) {
+      problems.push(`extension: manifest asks for "${permission}", which is not in the reviewed set`);
+    }
+  }
+  if ((manifest.permissions ?? []).length === 0) {
+    problems.push('extension: manifest declares no permissions, so this guard is inspecting nothing');
+  }
+  if ((manifest.host_permissions ?? []).length > 0) {
+    problems.push('extension: manifest declares host_permissions, which is a warning it does not need');
+  }
+
+  /* These four are the ways a manifest widens its own reach after review: a second origin that can message the
+     worker, a resource any page may load, or permissions granted later without a reinstall. */
+  for (const key of ['optional_permissions', 'externally_connectable', 'web_accessible_resources', 'sandbox']) {
+    if (key in manifest) {
+      problems.push(`extension: manifest declares "${key}", which widens reach beyond the reviewed surface`);
+    }
+  }
+
+  if (manifest.background?.type !== 'module') {
+    problems.push('extension: the service worker is not declared as a module, so its imports would not load');
+  }
+
+  const csp = manifest.content_security_policy?.extension_pages ?? '';
+  if (!/\bconnect-src 'none'/.test(csp)) {
+    problems.push('extension: the extension pages do not set connect-src \'none\', so a fetch would be allowed');
+  }
+
+  /* A content script may only be injected into the vault, and only if the file it names is actually present. */
+  const vault = new URL('https://b.332321.xyz/w/bookmarks/');
+  const names = extensionNames;
+  if (names.length === 0) problems.push('extension: no files found');
+
+  const declared = manifest.content_scripts ?? [];
+  for (const script of declared) {
+    for (const match of script.matches ?? []) {
+      let parsed = null;
+      try {
+        parsed = new URL(match.replace('*', 'x'));
+      } catch {
+        parsed = null;
+      }
+      if (parsed === null || parsed.origin !== vault.origin || !parsed.pathname.startsWith(vault.pathname)) {
+        problems.push(`extension: content script matches ${match}, which is not the vault`);
+      }
+    }
+    for (const file of script.js ?? []) {
+      if (!names.includes(file)) {
+        problems.push(`extension: content script names ${file}, which is not in the extension`);
+      }
+    }
+  }
+
+  /* This host set is deliberately smaller than the page's: the page may talk to its own Worker, the extension
+     may talk to nothing. Loopback is not an exception — a local port is still somewhere a URL can be sent. */
+  const extensionHosts = new Set(['b.332321.xyz', '332321.xyz', 'www.332321.xyz']);
+
+  /* Calls that would reach the network, whatever they are handed. A literal-URL scan cannot see
+     `fetch(\`https://${host}/?u=${url}\`)`, which is the shape exfiltration actually takes. */
+  const networkSinks =
+    /\b(fetch|XMLHttpRequest|sendBeacon|WebSocket|EventSource|importScripts|sendNativeMessage|connectNative)\s*\(/;
+
+  for (const name of names) {
+    const text = readFileSync(join(extensionDir, name), 'utf8');
+    const flat = text.toLowerCase().replace(/\s+/g, ' ');
+
+    for (const match of text.matchAll(urlPattern)) {
+      if (match[0].includes('${')) continue;
+      let host;
+      try {
+        host = new URL(match[0]).hostname.toLowerCase();
+      } catch {
+        problems.push(`extension/${name}: unparseable URL ${match[0]}`);
+        continue;
+      }
+      if (extensionHosts.has(host)) continue;
+      problems.push(`extension/${name}: external URL ${match[0]}`);
+      break;
+    }
+
+    if (protocolRelativePattern.test(text)) {
+      problems.push(`extension/${name}: protocol-relative URL`);
+    }
+
+    if (name.endsWith('.js')) {
+      const calls = text.match(networkSinks);
+      if (calls) problems.push(`extension/${name}: makes a ${calls[1]} call, and the extension talks to nobody`);
+    }
+
+    for (const banned of bannedHosts) {
+      if (flat.includes(banned)) problems.push(`extension/${name}: contains "${banned}"`);
+    }
+  }
+
+  /* A constant is read by shape: the version is a number and the two source tags are quoted strings. */
+  const constant = (file, name) => {
+    const text = readFileSync(join(root, file), 'utf8');
+    const quoted = text.match(new RegExp(`\\b${name}\\s*=\\s*'([^']*)'`));
+    if (quoted) return quoted[1];
+    const numeric = text.match(new RegExp(`\\b${name}\\s*=\\s*([0-9]+)`));
+    return numeric ? numeric[1] : null;
+  };
+
+  for (const [file, label] of [
+    ['extension/protocol.js', 'extension'],
+    ['public/w/bookmarks/collector.js', 'page']
+  ]) {
+    if (constant(file, 'BRIDGE_VERSION') === null) {
+      problems.push(`bridge: ${label} declares no BRIDGE_VERSION`);
+    }
+  }
+
+  /* The version is not the whole contract: the two source tags are how each side recognises the other, and a typo
+     in one of them makes every message unmatched with nothing to catch it. */
+  for (const name of ['BRIDGE_SOURCE', 'PAGE_SOURCE']) {
+    const left = constant('extension/protocol.js', name);
+    const right = constant('public/w/bookmarks/collector.js', name);
+    if (left === null || right === null) {
+      problems.push(`bridge: ${name} is missing on one side`);
+    } else if (left !== right) {
+      problems.push(`bridge: ${name} is "${left}" in the extension and "${right}" in the page`);
+    }
+  }
+
+  if (constant('extension/protocol.js', 'BRIDGE_VERSION') !== constant('public/w/bookmarks/collector.js', 'BRIDGE_VERSION')) {
+    problems.push(
+      `bridge: extension is version ${constant('extension/protocol.js', 'BRIDGE_VERSION')}, ` +
+        `the page is ${constant('public/w/bookmarks/collector.js', 'BRIDGE_VERSION')}`
+    );
+  }
+} catch (error) {
+  problems.push(`extension: ${error.message}`);
+}
+
 
 if (problems.length) {
   console.error('check failed:');
