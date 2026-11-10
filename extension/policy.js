@@ -16,8 +16,15 @@ export const MAX_EXCLUSIONS = 200;
    the levels existed and is still accepted, because a stored policy must keep working unedited. */
 export const SCOPES = Object.freeze(['site', 'host', 'path']);
 
+/* How a site is recorded, chosen per site: every page (`address`), one row per hostname (`host`), or one row for the
+   site and everything under it (`site`). A person who reads YouTube all day does not want a row per video, and the
+   same person still wants every page of a documentation site. */
+export const RECORD_LEVELS = Object.freeze(['site', 'host', 'address']);
+export const MAX_LEVELS = 200;
+
 export const DEFAULT_POLICY = Object.freeze({
   enabled: false,
+  levels: Object.freeze([]),
   includeIncognito: false,
   minVisits: 1,
   dailyCap: 0,
@@ -122,6 +129,59 @@ export function normalizeExclude(entry) {
   return { scope, value: host };
 }
 
+/**
+ * One recording rule, normalised, or null when it does not name something that can be matched.
+ *
+ * The rule names a site and what to keep from it. A rule is matched on the host and its subdomains, the same
+ * boundary the `site` exclusion uses, so `youtube.com` covers `www.youtube.com` and not `notyoutube.com`.
+ */
+export function normalizeLevel(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (!RECORD_LEVELS.includes(entry.level)) return null;
+
+  const raw = typeof entry.site === 'string' ? entry.site.trim() : '';
+  if (raw === '') return null;
+
+  const host = raw
+    .toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+    .replace(/[/?#].*$/, '')
+    .replace(/:\d+$/, '');
+
+  if (!host.includes('.') && host !== 'localhost') return null;
+  return { site: host, level: entry.level };
+}
+
+/** The rule that covers this hostname, or null. */
+export function levelFor(host, levels = []) {
+  const name = String(host ?? '').toLowerCase();
+  for (const rule of levels) {
+    if (name === rule.site || name.endsWith(`.${rule.site}`)) return rule;
+  }
+  return null;
+}
+
+/**
+ * The address a visit is recorded under.
+ *
+ * With no rule, or a rule that says `address`, the page itself is kept. `host` records the hostname's root and
+ * `site` records the name the rule was written with — so `www.youtube.com` and `m.youtube.com` stay separate under
+ * `host`, while `site` folds both into one row.
+ */
+export function recordedUrl(url, levels = []) {
+  const canonical = canonicalUrl(url);
+  if (canonical === null) return null;
+
+  const parsed = new URL(canonical);
+  const rule = levelFor(parsed.hostname, levels);
+  if (rule === null || rule.level === 'address') return canonical;
+
+  /* `host` keeps the port, so a local or self-hosted address survives the fold; `site` uses the name the rule was
+     written with. */
+  const name = rule.level === 'host' ? parsed.host : rule.site;
+  return `${parsed.protocol}//${name}/`;
+}
+
 /** A policy as the extension will hold it. Unknown fields are dropped, not carried forward. */
 export function normalizePolicy(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
@@ -138,8 +198,19 @@ export function normalizePolicy(raw) {
     kept.push(normalized);
   }
 
+  const levels = Array.isArray(source.levels) ? source.levels : [];
+  const seenSites = new Set();
+  const keptLevels = [];
+  for (const entry of levels) {
+    const normalized = normalizeLevel(entry);
+    if (normalized === null || seenSites.has(normalized.site)) continue;
+    seenSites.add(normalized.site);
+    keptLevels.push(normalized);
+  }
+
   return {
     enabled: source.enabled === true,
+    levels: keptLevels.slice(0, MAX_LEVELS),
     includeIncognito: source.includeIncognito === true,
     minVisits: whole(source.minVisits, DEFAULT_POLICY.minVisits, 1),
     dailyCap: whole(source.dailyCap, DEFAULT_POLICY.dailyCap, 0),

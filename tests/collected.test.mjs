@@ -58,6 +58,43 @@ test('an address label keeps the host, drops the scheme and decodes the escapes'
   assert.equal(addressLabel('not a url'), 'not a url');
 });
 
+/* A site can ask to be recorded as a hostname or as one row, and the fold has to honour it for rows already stored. */
+const youtubeAndRest = [
+  { url: 'https://www.youtube.com/watch?v=a', host: 'www.youtube.com', visits: 4, lastSeenAt: '2026-11-09T10:00:00.000Z' },
+  { url: 'https://www.youtube.com/watch?v=b', host: 'www.youtube.com', visits: 3, lastSeenAt: '2026-11-09T11:00:00.000Z' },
+  { url: 'https://m.youtube.com/watch?v=c', host: 'm.youtube.com', visits: 2, lastSeenAt: '2026-11-09T12:00:00.000Z' },
+  { url: 'https://pikto.app/pricing', host: 'pikto.app', visits: 5, lastSeenAt: '2026-11-09T13:00:00.000Z' }
+];
+
+test('a host rule folds a site\'s pages into its hostnames, one row each', () => {
+  const levels = [{ site: 'youtube.com', level: 'host' }];
+  const rows = fold(youtubeAndRest, { level: 'addresses', order: 'visits', levels });
+
+  assert.deepEqual(
+    rows.map((row) => [row.url, row.visits]),
+    [
+      ['https://www.youtube.com/', 7],
+      ['https://pikto.app/pricing', 5],
+      ['https://m.youtube.com/', 2]
+    ]
+  );
+});
+
+test('a site rule folds everything under the name the rule was written with', () => {
+  const levels = [{ site: 'youtube.com', level: 'site' }];
+  const rows = fold(youtubeAndRest, { level: 'addresses', order: 'visits', levels });
+  assert.deepEqual(rows.filter((row) => row.url.includes('youtube')).map((row) => [row.url, row.visits]), [
+    ['https://youtube.com/', 9]
+  ]);
+});
+
+test('a rule for one site leaves every other site at its pages', () => {
+  const levels = [{ site: 'youtube.com', level: 'host' }];
+  const rows = fold(youtubeAndRest, { level: 'addresses', order: 'domain', levels });
+  assert.equal(rows.some((row) => row.url === 'https://pikto.app/pricing'), true);
+  assert.equal(rows.some((row) => row.url === 'https://notyoutube.com/'), false, 'the match is on a dot boundary');
+});
+
 test('every level sums to the same visits', () => {
   for (const level of LEVELS) {
     const visits = fold(items, { level, order: 'visits' }).reduce((sum, row) => sum + row.visits, 0);
@@ -129,6 +166,16 @@ test('a site whose every address is held disappears, and one with a fresh addres
   assert.equal(rows.some((row) => row.key === 'kaviya.in'), true);
 });
 
+test('an address literal is its own site, and a row keeps the scheme and port it was seen on', () => {
+  assert.equal(siteOf('127.0.0.1'), '127.0.0.1');
+  assert.equal(siteOf('192.168.1.20'), '192.168.1.20');
+
+  const local = [{ url: 'http://127.0.0.1:8788/one.html', host: '127.0.0.1', visits: 2, lastSeenAt: '2026-11-09T10:00:00.000Z' }];
+  const hosts = fold(local, { level: 'hosts' });
+  assert.equal(hosts[0].url, 'http://127.0.0.1:8788/', 'the port is part of the address');
+  assert.equal(hosts[0].label, '127.0.0.1');
+});
+
 test('every row carries the address it would add', () => {
   for (const level of LEVELS) {
     for (const order of ORDERS) {
@@ -165,4 +212,17 @@ test('an empty or malformed list draws nothing rather than throwing', () => {
   assert.deepEqual(fold(null), []);
   assert.deepEqual(fold([{ url: 'https://x.example/', visits: 0 }, { host: 'y.example' }]), []);
   assert.deepEqual(ORDERS, ['visits', 'domain']);
+});
+
+
+test('a host whose only page is its own root is drawn once, not twice', async () => {
+  const { fold } = await import('../public/w/bookmarks/collected.js');
+  const rows = fold(
+    [{ url: 'http://127.0.0.1:8788/', host: '127.0.0.1', visits: 3, lastSeenAt: '2026-11-09T10:00:00.000Z' }],
+    { level: 'addresses', order: 'domain' }
+  );
+
+  assert.equal(rows.length, 2, 'a site row and its host row');
+  assert.deepEqual(rows.map((row) => row.depth), [0, 1]);
+  assert.equal(rows[1].isParent, false, 'the host has no page of its own to show');
 });

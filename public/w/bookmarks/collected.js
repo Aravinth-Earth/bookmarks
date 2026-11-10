@@ -31,6 +31,10 @@ const SECOND_LEVEL = new Set([
 /** The site a host belongs to: the last two labels, or three when the last two are a known suffix. */
 export function siteOf(host) {
   const labels = String(host ?? '').toLowerCase().split('.').filter(Boolean);
+
+  /* An address is its own site: `127.0.0.1` has two labels but no registrable name, and taking the last two would
+     turn it into `0.1`. */
+  if (labels.length === 4 && labels.every((label) => /^\d{1,3}$/.test(label))) return labels.join('.');
   if (labels.length <= 2) return labels.join('.');
   const lastTwo = labels.slice(-2).join('.');
   return SECOND_LEVEL.has(lastTwo) ? labels.slice(-3).join('.') : lastTwo;
@@ -61,6 +65,67 @@ export function addressLabel(url) {
 /* The level names the group; a row names what it is. `domains`.slice(0, -1) is `domain`, but `addresses` is not. */
 const KIND = Object.freeze({ domains: 'site', hosts: 'host', addresses: 'address' });
 
+/**
+ * The recording rule that covers a hostname, or null.
+ *
+ * The rules are the extension's, mirrored here so an existing list folds the same way a new visit is recorded — a
+ * rule added today changes what the section shows today, not only what it collects tomorrow.
+ */
+export function levelFor(host, levels = []) {
+  const name = String(host ?? '').toLowerCase();
+  for (const rule of Array.isArray(levels) ? levels : []) {
+    if (name === rule.site || name.endsWith(`.${rule.site}`)) return rule;
+  }
+  return null;
+}
+
+/** The address a visit is counted under, given the rules. `address` and no rule both keep the page itself. */
+export function recordedUrl(url, levels = []) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+
+  const rule = levelFor(parsed.hostname, levels);
+  if (rule === null || rule.level === 'address') return url;
+
+  /* `host` keeps the port, so a local or self-hosted address survives the fold; `site` uses the name the rule was
+     written with. */
+  const name = rule.level === 'host' ? parsed.host : rule.site;
+  return `${parsed.protocol}//${name}/`;
+}
+
+/**
+ * The rows as the rules say they should be counted: every address the extension holds, folded to the level its site
+ * asked for, with repeats summed.
+ */
+function recordedItems(items, levels) {
+  const folded = new Map();
+
+  for (const item of items) {
+    const url = recordedUrl(item.url, levels);
+    const seen = folded.get(url);
+    if (seen) {
+      seen.visits += item.visits;
+      if (item.lastSeenAt > seen.lastSeenAt) seen.lastSeenAt = item.lastSeenAt;
+      continue;
+    }
+    folded.set(url, { url, host: hostOf(url), visits: item.visits, lastSeenAt: item.lastSeenAt });
+  }
+
+  return [...folded.values()];
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
 function byVisits(left, right) {
   if (right.visits !== left.visits) return right.visits - left.visits;
   return String(left.label).localeCompare(String(right.label));
@@ -90,10 +155,19 @@ function unitsFor(items, level) {
       unit.lastSeenAt = item.lastSeenAt;
     }
 
-    /* An address row adds itself; a row that rolls children up adds its root, because promoting every page under
-       a site from one tap would spend the vault's cap in a single click. */
-    if (level === 'addresses') unit.url = item.url;
-    else if (unit.url === null) unit.url = `https://${key}/`;
+    /* An address row adds itself; a row that rolls children up adds its root, because promoting every page under a
+       site from one tap would spend the vault's cap in a single click. The root keeps the scheme and the port the
+       page actually used, so a self-hosted address does not come back as a bare host root. */
+    if (level === 'addresses') {
+      unit.url = item.url;
+    } else if (unit.url === null) {
+      try {
+        const parsed = new URL(item.url);
+        unit.url = `${parsed.protocol}//${level === 'hosts' ? parsed.host : key}/`;
+      } catch {
+        unit.url = `https://${key}/`;
+      }
+    }
     units.set(key, unit);
   }
 
@@ -129,11 +203,12 @@ function rowsOf(units, held, depth) {
  * `held` is the addresses the vault already holds — those are dropped here rather than skipped while drawing, so
  * an address can never appear in both sections even when an approval's reply was lost.
  */
-export function fold(items, { level = DEFAULT_LEVEL, order = DEFAULT_ORDER, held = [] } = {}) {
+export function fold(items, { level = DEFAULT_LEVEL, order = DEFAULT_ORDER, held = [], levels = [] } = {}) {
   const heldSet = new Set(held);
-  const usable = (Array.isArray(items) ? items : []).filter(
+  const stored = (Array.isArray(items) ? items : []).filter(
     (item) => item && typeof item.url === 'string' && Number.isInteger(item.visits) && item.visits > 0
   );
+  const usable = recordedItems(stored, levels);
   if (usable.length === 0) return [];
 
   const levelIsKnown = LEVELS.includes(level);
@@ -156,11 +231,15 @@ export function fold(items, { level = DEFAULT_LEVEL, order = DEFAULT_ORDER, held
 
     for (const host of rowsOf(new Map(siteHosts.map((h) => [h.key, h])), heldSet, 1)) {
       const pages = usable.filter((item) => item.host === host.key);
-      const hasPages = safeLevel === 'addresses';
-      rows.push({ ...host, isParent: hasPages });
 
-      if (!hasPages) continue;
-      for (const page of rowsOf(unitsFor(pages, 'addresses'), heldSet, 2)) rows.push(page);
+      /* A recording rule can leave a host holding nothing but its own root. Drawing that under itself would put two
+         identical rows in the list, so the single child is dropped and the host stands alone. A host with real pages
+         keeps every one of them, including a page at the root when there are others beside it. */
+      let children = safeLevel === 'addresses' ? rowsOf(unitsFor(pages, 'addresses'), heldSet, 2) : [];
+      if (children.length === 1 && children[0].url === host.url) children = [];
+
+      rows.push({ ...host, isParent: children.length > 0 });
+      for (const page of children) rows.push(page);
     }
   }
 
@@ -191,9 +270,10 @@ export function openCounts(items, bookmarks) {
 }
 
 /** What the heading counts, and what the rows add up to. */
-export function summarise(items, held = []) {
+export function summarise(items, held = [], levels = []) {
   const heldSet = new Set(held);
-  const fresh = (Array.isArray(items) ? items : []).filter((item) => item && !heldSet.has(item.url));
+  const everywhere = (Array.isArray(items) ? items : []).filter((item) => item && !heldSet.has(item.url));
+  const fresh = recordedItems(everywhere, levels);
 
   return {
     addresses: fresh.length,

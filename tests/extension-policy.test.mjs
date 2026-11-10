@@ -15,7 +15,8 @@ import {
   canonicalUrl,
   isExcluded,
   normalizeExclude,
-  normalizePolicy
+  normalizePolicy,
+  recordedUrl
 } from '../extension/policy.js';
 
 test('the default captures every visit and bounds retention at both ends', () => {
@@ -170,4 +171,32 @@ test('credentials and secret parameters are stripped before the address is store
     'https://shop.example/search?q=books&page=2',
     'a query that names no secret is left alone'
   );
+});
+
+
+test('a site can ask to be recorded as a hostname or as one row', () => {
+  const levels = normalizePolicy({
+    levels: [
+      { site: 'youtube.com', level: 'host' },
+      { site: 'https://News.Example/watch', level: 'site' },
+      { site: 'ignored.example', level: 'nonsense' },
+      { site: 'youtube.com', level: 'site' }
+    ]
+  }).levels;
+
+  assert.deepEqual(levels, [
+    { site: 'youtube.com', level: 'host' },
+    { site: 'news.example', level: 'site' }
+  ], 'normalised, de-duplicated by site, and an unknown level is dropped');
+
+  assert.equal(recordedUrl('https://www.youtube.com/watch?v=a', levels), 'https://www.youtube.com/');
+  assert.equal(recordedUrl('http://127.0.0.1:8787/one.html', [{ site: '127.0.0.1', level: 'host' }]), 'http://127.0.0.1:8787/');
+  assert.equal(recordedUrl('https://m.youtube.com/watch?v=c', levels), 'https://m.youtube.com/');
+  assert.equal(recordedUrl('https://news.example/a/b', levels), 'https://news.example/');
+  assert.equal(recordedUrl('https://other.example/a/b', levels), 'https://other.example/a/b');
+  assert.equal(recordedUrl('https://notyoutube.com/x', levels), 'https://notyoutube.com/x');
+});
+
+test('the policy has no field that measures time', () => {
+  assert.equal('minOpenMs' in normalizePolicy({}), false);
 });

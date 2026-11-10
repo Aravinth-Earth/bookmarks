@@ -14,7 +14,7 @@
  * makes "collected links are local only" true without a single conditional about sync.
  */
 
-import { canonicalUrl, DEFAULT_POLICY, isExcluded, normalizePolicy } from './policy.js';
+import { canonicalUrl, DEFAULT_POLICY, isExcluded, normalizePolicy, recordedUrl } from './policy.js';
 
 export const ITEMS_KEY = 'items';
 export const POLICY_KEY = 'policy';
@@ -129,10 +129,14 @@ export function createCollector({ persistent, now = Date.now }) {
     const policy = await readPolicy();
     if (!policy.enabled) return 'off';
 
-    const canonical = canonicalUrl(url);
-    if (canonical === null) return 'invalid';
+    const seen = canonicalUrl(url);
+    if (seen === null) return 'invalid';
     if (incognito && !policy.includeIncognito) return 'incognito';
-    if (isExcluded(canonical, policy.exclude)) return 'excluded';
+    if (isExcluded(seen, policy.exclude)) return 'excluded';
+
+    /* A rule can say that this site is recorded as a hostname or as one row, so a video page and the video page
+       opened twice are the same row as the site's front door. */
+    const canonical = recordedUrl(seen, policy.levels);
 
     const items = await readItems();
     const existing = items[canonical];

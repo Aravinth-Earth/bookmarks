@@ -55,7 +55,7 @@ import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
 import { formatStamp } from './stamps.js';
 import { createBridge, isSnapshot } from './collector.js';
-import { DEFAULT_LEVEL, DEFAULT_ORDER, fold, openCounts, summarise } from './collected.js';
+import { DEFAULT_LEVEL, DEFAULT_ORDER, LEVELS, ORDERS, fold, openCounts, summarise } from './collected.js';
 
 const store = createVault(indexedDbAdapter());
 
@@ -138,6 +138,8 @@ const viewHint = $('view-hint');
 const collected = $('collected');
 const collectedList = $('collected-list');
 const collectedCount = $('collected-count');
+const collectedLevel = $('collected-level');
+const collectedOrder = $('collected-order');
 const vaultStatus = $('vault-status');
 const status = $('status');
 const syncRefusal = $('sync-refusal');
@@ -1551,6 +1553,30 @@ collectorBridge.onChange(() => {
   }, 200);
 });
 
+/* The level and the order are a vault preference, sealed and synced, because they describe how the list is read
+   rather than how this device happens to be set up. */
+function collectedPrefs() {
+  const prefs = state.document?.prefs?.collector ?? {};
+  return {
+    level: LEVELS.includes(prefs.level) ? prefs.level : DEFAULT_LEVEL,
+    order: ORDERS.includes(prefs.order) ? prefs.order : DEFAULT_ORDER
+  };
+}
+
+function setCollectedPrefs(patch) {
+  if (!state.document) return;
+
+  state.document = {
+    ...state.document,
+    prefs: { ...state.document.prefs, collector: { ...collectedPrefs(), ...patch } }
+  };
+  saveNow();
+  renderCollected();
+}
+
+collectedLevel.addEventListener('change', () => setCollectedPrefs({ level: collectedLevel.value }));
+collectedOrder.addEventListener('change', () => setCollectedPrefs({ order: collectedOrder.value }));
+
 function collectedHeld() {
   return (state.document?.bookmarks ?? []).map((bookmark) => bookmark.url);
 }
@@ -1558,10 +1584,13 @@ function collectedHeld() {
 /** The extension's rows the vault does not already hold, folded into the level and order this build shows. */
 function collectedRows() {
   if (collectedSnapshot?.policy?.enabled !== true) return [];
+
+  const { level, order } = collectedPrefs();
   return fold(collectedSnapshot.items, {
-    level: DEFAULT_LEVEL,
-    order: DEFAULT_ORDER,
-    held: collectedHeld()
+    level,
+    order,
+    held: collectedHeld(),
+    levels: collectedSnapshot.policy?.levels ?? []
   });
 }
 
@@ -1628,8 +1657,11 @@ function collectedRowFor(item) {
 
 function renderCollected() {
   const rows = collectedRows();
-  const totals = summarise(collectedSnapshot?.items ?? [], collectedHeld());
+  const prefs = collectedPrefs();
+  const totals = summarise(collectedSnapshot?.items ?? [], collectedHeld(), collectedSnapshot?.policy?.levels ?? []);
 
+  collectedLevel.value = prefs.level;
+  collectedOrder.value = prefs.order;
   collectedList.dataset.view = currentView;
   collected.hidden = rows.length === 0;
 

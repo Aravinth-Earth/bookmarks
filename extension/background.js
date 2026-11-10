@@ -38,10 +38,17 @@ const persistent = {
 
 const collector = createCollector({ persistent });
 
-/* What the vault tabs were last told. A reply to the page is not news, so nothing is pushed unless this number
-   actually moved — pushing on every answer turned the page's re-read into a loop that repainted the section many
-   times a second. */
+/* What the vault tabs were last told. A reply to the page is not news, so nothing is pushed unless this actually
+   moved — pushing on every answer turned the page's re-read into a loop that repainted the section many times a
+   second. The signature carries the counts as well as the addresses: a fourth visit to a row already held is a
+   change the vault has to hear about, and the number of rows does not move for it. */
 let announced = null;
+
+function signature(items) {
+  return items
+    .map((item) => `${item.url}:${item.visits}`)
+    .join('|');
+}
 
 async function badge() {
   try {
@@ -51,8 +58,9 @@ async function badge() {
     await chrome.action.setBadgeText({ text });
     if (text !== '') await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOUR });
 
-    if (count === announced) return;
-    announced = count;
+    const stamp = signature(items);
+    if (stamp === announced) return;
+    announced = stamp;
 
     /* Every vault tab still open hears about it, in every window: the section counts a browser-wide list, so a
        count that only refreshed on reload would be wrong the moment two windows are open. */
