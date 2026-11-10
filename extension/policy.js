@@ -19,7 +19,6 @@ export const SCOPES = Object.freeze(['site', 'host', 'path']);
 export const DEFAULT_POLICY = Object.freeze({
   enabled: false,
   includeIncognito: false,
-  minOpenMs: 0,
   minVisits: 1,
   dailyCap: 0,
   maxEntries: 2000,
@@ -142,7 +141,6 @@ export function normalizePolicy(raw) {
   return {
     enabled: source.enabled === true,
     includeIncognito: source.includeIncognito === true,
-    minOpenMs: whole(source.minOpenMs, DEFAULT_POLICY.minOpenMs, 0),
     minVisits: whole(source.minVisits, DEFAULT_POLICY.minVisits, 1),
     dailyCap: whole(source.dailyCap, DEFAULT_POLICY.dailyCap, 0),
     maxEntries: whole(source.maxEntries, DEFAULT_POLICY.maxEntries, 0),

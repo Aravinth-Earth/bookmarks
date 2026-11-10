@@ -20,7 +20,6 @@ import {
 
 test('the default captures every visit and bounds retention at both ends', () => {
   assert.equal(DEFAULT_POLICY.enabled, false);
-  assert.equal(DEFAULT_POLICY.minOpenMs, 0);
   assert.equal(DEFAULT_POLICY.minVisits, 1);
   assert.equal(DEFAULT_POLICY.dailyCap, 0);
   assert.equal(DEFAULT_POLICY.maxEntries, 2000);
@@ -49,7 +48,6 @@ test('a policy is clamped, never trusted, and never silently enables collection'
   assert.equal(normalizePolicy({ maxEntries: 0 }).maxEntries, 0);
   assert.equal(normalizePolicy({ maxEntries: 'lots' }).maxEntries, 2000);
   assert.equal(normalizePolicy({ retentionDays: 0 }).retentionDays, 0);
-  assert.equal(normalizePolicy({ minOpenMs: 1500 }).minOpenMs, 1500);
   assert.equal(normalizePolicy(null).maxEntries, 2000);
 });
 
