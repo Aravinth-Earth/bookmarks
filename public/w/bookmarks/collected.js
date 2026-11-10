@@ -36,16 +36,30 @@ export function siteOf(host) {
   return SECOND_LEVEL.has(lastTwo) ? labels.slice(-3).join('.') : lastTwo;
 }
 
-/** The label of one address: its path and query, since the host is on its own line. */
+/**
+ * The label of one address: what the browser's own address bar shows, without the scheme.
+ *
+ * `ta.wikipedia.org/wiki/முதற்பக்கம்` is a page a person recognises; `%E0%AE%AE...` is the same page written for a
+ * machine, and a path on its own loses the site it belongs to — so the host stays and the escapes are decoded.
+ */
 export function addressLabel(url) {
+  let shown = url;
   try {
     const parsed = new URL(url);
-    const rest = `${parsed.pathname}${parsed.search}`;
-    return rest === '/' ? '/' : rest.replace(/\/$/, '');
+    shown = `${parsed.host}${parsed.pathname}${parsed.search}`;
   } catch {
     return url;
   }
+
+  try {
+    return decodeURI(shown).replace(/\/$/, '') || shown;
+  } catch {
+    return shown.replace(/\/$/, '');
+  }
 }
+
+/* The level names the group; a row names what it is. `domains`.slice(0, -1) is `domain`, but `addresses` is not. */
+const KIND = Object.freeze({ domains: 'site', hosts: 'host', addresses: 'address' });
 
 function byVisits(left, right) {
   if (right.visits !== left.visits) return right.visits - left.visits;
@@ -59,13 +73,11 @@ function unitsFor(items, level) {
   for (const item of items) {
     const key =
       level === 'addresses' ? item.url : level === 'hosts' ? item.host : siteOf(item.host);
-    /* A page at the root of a site is labelled by the site: "/" beside a host column says nothing at all. */
-    const path = level === 'addresses' ? addressLabel(item.url) : null;
-    const label = path !== null ? (path === '/' ? item.host : path) : level === 'hosts' ? item.host : key;
+    const label = level === 'addresses' ? addressLabel(item.url) : level === 'hosts' ? item.host : key;
 
     const unit = units.get(key) ?? {
       key,
-      kind: level.slice(0, -1),
+      kind: KIND[level],
       label,
       url: null,
       visits: 0,

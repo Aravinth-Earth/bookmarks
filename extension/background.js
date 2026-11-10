@@ -38,6 +38,11 @@ const persistent = {
 
 const collector = createCollector({ persistent });
 
+/* What the vault tabs were last told. A reply to the page is not news, so nothing is pushed unless this number
+   actually moved — pushing on every answer turned the page's re-read into a loop that repainted the section many
+   times a second. */
+let announced = null;
+
 async function badge() {
   try {
     const { policy, items } = await collector.list();
@@ -45,6 +50,9 @@ async function badge() {
     const text = count === 0 ? '' : count > 9 ? '9+' : String(count);
     await chrome.action.setBadgeText({ text });
     if (text !== '') await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOUR });
+
+    if (count === announced) return;
+    announced = count;
 
     /* Every vault tab still open hears about it, in every window: the section counts a browser-wide list, so a
        count that only refreshed on reload would be wrong the moment two windows are open. */
@@ -155,8 +163,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     /* A thrown error is answered with a word, never with its text: an exception message is written by whatever
        failed, and that is not something to hand back over a channel. */
     .then((reply) => sendResponse(reply))
-    .catch(() => sendResponse({ error: 'refused' }))
-    .then(badge);
+    /* Answering the page is not a change: re-announcing it here made the page re-read, which announced again. */
+    .catch(() => sendResponse({ error: 'refused' }));
 
   return true;
 });

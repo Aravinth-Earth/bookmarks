@@ -35,16 +35,27 @@ test('a site is the registrable name, with two-part suffixes kept whole', () => 
   assert.equal(siteOf('localhost'), 'localhost');
 });
 
-test('a root page is labelled by its host, not by a slash', () => {
-  const rows = fold(items, { level: 'addresses', order: 'visits' });
-  assert.equal(rows.find((row) => row.url === 'https://pikto.app/').label, 'pikto.app');
-  assert.equal(rows.find((row) => row.url === 'https://pikto.app/pricing').label, '/pricing');
+test('a row says what it is, in the same words the app uses elsewhere', () => {
+  assert.equal(fold(items, { level: 'addresses' })[0].kind, 'address');
+  assert.equal(fold(items, { level: 'hosts' })[0].kind, 'host');
+  assert.equal(fold(items, { level: 'domains' })[0].kind, 'site');
 });
 
-test('an address is labelled by its path, and the root by a slash', () => {
-  assert.equal(addressLabel('https://pikto.app/'), '/');
-  assert.equal(addressLabel('https://pikto.app/pricing/'), '/pricing');
-  assert.equal(addressLabel('https://pikto.app/search?q=books'), '/search?q=books');
+test('a row is labelled by the address the browser shows, without the scheme', () => {
+  const rows = fold(items, { level: 'addresses', order: 'visits' });
+  assert.equal(rows.find((row) => row.url === 'https://pikto.app/').label, 'pikto.app');
+  assert.equal(rows.find((row) => row.url === 'https://pikto.app/pricing').label, 'pikto.app/pricing');
+});
+
+test('an address label keeps the host, drops the scheme and decodes the escapes', () => {
+  assert.equal(addressLabel('https://pikto.app/'), 'pikto.app');
+  assert.equal(addressLabel('https://pikto.app/pricing/'), 'pikto.app/pricing');
+  assert.equal(addressLabel('https://pikto.app/search?q=books'), 'pikto.app/search?q=books');
+  assert.equal(
+    addressLabel('https://ta.wikipedia.org/wiki/%E0%AE%AE%E0%AF%81%E0%AE%A4'),
+    'ta.wikipedia.org/wiki/முத'
+  );
+  assert.equal(addressLabel('not a url'), 'not a url');
 });
 
 test('every level sums to the same visits', () => {

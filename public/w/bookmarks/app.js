@@ -1478,11 +1478,40 @@ const collectorBridge = createBridge();
 let collectedSnapshot = null;
 let collectedTimer = null;
 
+/** What the section would draw, in one string: the same answer must not repaint the list. */
+function collectedKey(snapshot) {
+  if (snapshot === null) return 'none';
+  return `${snapshot.items.length}|${snapshot.items
+    .map((item) => `${item.url}:${item.visits}`)
+    .join(',')}`;
+}
+
+let collectedFingerprint = null;
+
 async function loadCollected() {
   const reply = await collectorBridge.request();
-  collectedSnapshot = isSnapshot(reply) ? reply : null;
+  const next = isSnapshot(reply) ? reply : null;
+  const key = collectedKey(next);
+  if (key === collectedFingerprint) return;
+
+  collectedFingerprint = key;
+  collectedSnapshot = next;
   renderCollected();
 }
+
+/* A worker that was just switched on has announced nothing, so a page that was already open would never hear about
+   it. Reading on a slow tick while the tab is visible is what makes "turn it on and watch the section fill" work
+   without a reload; the fingerprint above means an unchanged answer costs nothing on screen. */
+const COLLECTED_POLL_MS = 5000;
+
+setInterval(() => {
+  if (!state.document || document.visibilityState !== 'visible') return;
+  void loadCollected();
+}, COLLECTED_POLL_MS);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.document) void loadCollected();
+});
 
 /* A tab opening in another window, an approval or an exclusion all arrive as one hint. The section re-reads
    rather than patching a copy it cannot trust. */
@@ -1534,21 +1563,25 @@ function collectedRowFor(item) {
   const tile = el('span', { class: 'tile', 'aria-hidden': 'true' });
   tile.textContent = initial;
 
-  const name = el('span', { class: 'row-name', text: item.label });
+  /* A single address is named by its site and addressed by its whole address, which is the pair the vault's own
+     table uses. A grouped row is named by what it groups. */
+  const isAddress = item.kind === 'address';
+  const name = el('span', { class: 'row-name', text: isAddress ? host : item.label });
   const link = el('a', { class: 'row-link', href: item.url, target: '_blank', rel: 'noopener noreferrer' }, [
     tile,
     name
   ]);
-  link.setAttribute('aria-label', `${item.label} — ${host}`);
+  link.setAttribute('aria-label', `${item.label} — ${item.visits} ${item.visits === 1 ? 'visit' : 'visits'}`);
 
   const row = el('li', { class: 'row collected-row' });
   row.dataset.url = item.url;
   row.dataset.kind = item.kind;
   row.dataset.depth = String(item.depth);
+  row.dataset.visits = String(item.visits);
   row.style.setProperty('--tile-seed', background);
   row.style.setProperty('--tile-fg', foreground);
 
-  const address = el('span', { class: 'row-host', text: host });
+  const address = el('span', { class: 'row-host', text: isAddress ? item.label : host });
   const visits = el('span', {
     class: 'clicks',
     text: String(item.visits),
@@ -1589,9 +1622,15 @@ function renderCollected() {
  * The order matters: the bookmark is written first, so a lost reply leaves a duplicate the person can dismiss
  * rather than a link that was never saved. A row that is already in the vault is promoted away and said so.
  */
-function approveCollected(url) {
+function approveCollected(url, visits) {
   try {
-    const { document: next, bookmark } = addBookmark(state.document, { url, name: '' }, Date.now);
+    /* The count crosses with the row: the visits were made to this address, and starting the bookmark at zero
+       would throw away the only thing the extension was counting. */
+    const { document: next, bookmark } = addBookmark(
+      state.document,
+      { url, name: '', clickCount: Number.isInteger(visits) ? visits : 0 },
+      Date.now
+    );
     state.document = next;
     render();
     saveNow();
@@ -1614,7 +1653,7 @@ collectedList.addEventListener('click', (event) => {
   const button = event.target.closest?.('[data-action="collect"]');
   if (!button) return;
   const row = button.closest('.row');
-  if (row?.dataset.url) approveCollected(row.dataset.url);
+  if (row?.dataset.url) approveCollected(row.dataset.url, Number(row.dataset.visits));
 });
 
 /* ------------------------------------------------------------------- actions */
