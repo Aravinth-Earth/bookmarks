@@ -23,6 +23,20 @@ const CHANGED = 'collected-changed';
 const VAULT_PATTERNS = (chrome.runtime.getManifest().content_scripts ?? []).flatMap((script) => script.matches ?? []);
 const VAULT_ORIGINS = new Set(VAULT_PATTERNS.map((pattern) => new URL(pattern.replace('*', 'x')).origin));
 
+/**
+ * The same origins without their port.
+ *
+ * A match pattern cannot name a port, and a loopback vault runs on whatever port the developer's server picked, so
+ * an exact origin comparison refuses every local vault except the one port the pattern happened to spell out.
+ */
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
+const VAULT_HOSTS = new Set(
+  [...VAULT_ORIGINS].filter((origin) => LOOPBACK.has(new URL(origin).hostname)).map((origin) => {
+    const url = new URL(origin);
+    return `${url.protocol}//${url.hostname}`;
+  })
+);
+
 const persistent = {
   async get(key) {
     const all = await chrome.storage.local.get(key);
@@ -124,7 +138,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 function trusted(sender) {
   if (!sender || sender.id !== chrome.runtime.id) return false;
   if (!sender.tab) return true;
-  return VAULT_ORIGINS.has(sender.origin);
+  if (VAULT_ORIGINS.has(sender.origin)) return true;
+
+  /* A local vault: the host must be one the manifest named, and the port is the developer's business. */
+  let url;
+  try {
+    url = new URL(sender.origin);
+  } catch {
+    return false;
+  }
+  return LOOPBACK.has(url.hostname) && VAULT_HOSTS.has(`${url.protocol}//${url.hostname}`);
 }
 
 async function handle(message) {

@@ -1978,7 +1978,7 @@ function approveCollected(url, visits, label = '') {
        would throw away the only thing the extension was counting. */
     const { document: next, bookmark } = addBookmark(
       state.document,
-      { url, name: nameForCollected({ label }), openCount: Number.isInteger(visits) ? visits : 0 },
+      { url, name: nameForCollected({ url }), openCount: Number.isInteger(visits) ? visits : 0 },
       Date.now
     );
     state.document = next;
