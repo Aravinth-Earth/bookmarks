@@ -12,7 +12,9 @@
  */
 
 export const LEVELS = Object.freeze(['domains', 'hosts', 'addresses']);
-export const ORDERS = Object.freeze(['visits', 'domain']);
+/* `visits`, `recent` and `name` rank one level's own rows; `domain` is the only grouped order. The first three are
+   the toolbar's own sort modes, so the section can follow the control that is already on the page. */
+export const ORDERS = Object.freeze(['visits', 'recent', 'name', 'domain']);
 export const DEFAULT_LEVEL = 'addresses';
 export const DEFAULT_ORDER = 'visits';
 
@@ -174,7 +176,16 @@ function unitsFor(items, level) {
   return units;
 }
 
-function rowsOf(units, held, depth) {
+function byOrder(order) {
+  if (order === 'recent') {
+    return (left, right) =>
+      String(right.lastSeenAt ?? '').localeCompare(String(left.lastSeenAt ?? '')) || byVisits(left, right);
+  }
+  if (order === 'name') return (left, right) => String(left.label).localeCompare(String(right.label));
+  return byVisits;
+}
+
+function rowsOf(units, held, depth, order = 'visits') {
   return [...units.values()]
     .filter((unit) => {
       const kept = unit.addresses.filter((url) => !held.has(url));
@@ -194,7 +205,7 @@ function rowsOf(units, held, depth) {
         addable: kept.length > 0
       };
     })
-    .sort(byVisits);
+    .sort(byOrder(order));
 }
 
 /**
@@ -215,27 +226,27 @@ export function fold(items, { level = DEFAULT_LEVEL, order = DEFAULT_ORDER, held
   const safeLevel = levelIsKnown ? level : DEFAULT_LEVEL;
 
   if (order !== 'domain') {
-    return rowsOf(unitsFor(usable, safeLevel), heldSet, 0).map((row) => ({ ...row, isParent: false }));
+    return rowsOf(unitsFor(usable, safeLevel), heldSet, 0, order).map((row) => ({ ...row, isParent: false }));
   }
 
   const sites = unitsFor(usable, 'domains');
   const hosts = unitsFor(usable, 'hosts');
   const rows = [];
 
-  for (const site of rowsOf(sites, heldSet, 0)) {
+  for (const site of rowsOf(sites, heldSet, 0, 'visits')) {
     const siteHosts = [...hosts.values()].filter((host) => siteOf(host.key) === site.key);
     const hasChildren = safeLevel !== 'domains';
     rows.push({ ...site, isParent: hasChildren });
 
     if (!hasChildren) continue;
 
-    for (const host of rowsOf(new Map(siteHosts.map((h) => [h.key, h])), heldSet, 1)) {
+    for (const host of rowsOf(new Map(siteHosts.map((h) => [h.key, h])), heldSet, 1, 'visits')) {
       const pages = usable.filter((item) => item.host === host.key);
 
       /* A recording rule can leave a host holding nothing but its own root. Drawing that under itself would put two
          identical rows in the list, so the single child is dropped and the host stands alone. A host with real pages
          keeps every one of them, including a page at the root when there are others beside it. */
-      let children = safeLevel === 'addresses' ? rowsOf(unitsFor(pages, 'addresses'), heldSet, 2) : [];
+      let children = safeLevel === 'addresses' ? rowsOf(unitsFor(pages, 'addresses'), heldSet, 2, 'visits') : [];
       if (children.length === 1 && children[0].url === host.url) children = [];
 
       rows.push({ ...host, isParent: children.length > 0 });

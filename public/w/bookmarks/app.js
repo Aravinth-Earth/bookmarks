@@ -138,8 +138,6 @@ const viewHint = $('view-hint');
 const collected = $('collected');
 const collectedList = $('collected-list');
 const collectedCount = $('collected-count');
-const collectedLevel = $('collected-level');
-const collectedOrder = $('collected-order');
 const vaultStatus = $('vault-status');
 const status = $('status');
 const syncRefusal = $('sync-refusal');
@@ -1553,29 +1551,75 @@ collectorBridge.onChange(() => {
   }, 200);
 });
 
-/* The level and the order are a vault preference, sealed and synced, because they describe how the list is read
-   rather than how this device happens to be set up. */
-function collectedPrefs() {
+/* Everything about collection is a vault preference: whether it runs, what a site is recorded as, whether the list
+   is grouped, and what is excluded. It is sealed with the vault, travels with the phrase, and is pushed to the
+   extension whenever it changes — the page is the only writer of that policy. */
+function collectorPrefs() {
   const prefs = state.document?.prefs?.collector ?? {};
   return {
+    enabled: prefs.enabled === true,
     level: LEVELS.includes(prefs.level) ? prefs.level : DEFAULT_LEVEL,
-    order: ORDERS.includes(prefs.order) ? prefs.order : DEFAULT_ORDER
+    grouped: prefs.grouped === true,
+    sites: Array.isArray(prefs.sites) ? prefs.sites : [],
+    exclude: Array.isArray(prefs.exclude) ? prefs.exclude : []
   };
 }
 
-function setCollectedPrefs(patch) {
+/** The site rules in the extension's words. Settings reads the vault's three levels; the policy names them. */
+function policyLevels() {
+  return collectorPrefs().sites.map((rule) => ({
+    site: rule.site,
+    level: LEVEL_TO_POLICY[rule.level] ?? 'address'
+  }));
+}
+
+function setCollectorPrefs(patch) {
   if (!state.document) return;
 
   state.document = {
     ...state.document,
-    prefs: { ...state.document.prefs, collector: { ...collectedPrefs(), ...patch } }
+    prefs: { ...state.document.prefs, collector: { ...collectorPrefs(), ...patch } }
   };
   saveNow();
-  renderCollected();
+  pushCollectorPolicy();
+  render();
 }
 
-collectedLevel.addEventListener('change', () => setCollectedPrefs({ level: collectedLevel.value }));
-collectedOrder.addEventListener('change', () => setCollectedPrefs({ order: collectedOrder.value }));
+/** Tell the extension what to count, how, and what to leave out. */
+function pushCollectorPolicy() {
+  const prefs = collectorPrefs();
+  void collectorBridge.setPolicy({
+    enabled: prefs.enabled,
+    levels: policyLevels(),
+    exclude: prefs.exclude
+  });
+}
+
+/* The section follows the toolbar it shares: the same search box narrows both lists, and the same sort control orders
+   both. "Group by domain" is the one choice the toolbar has no room for, so it lives in Settings. */
+const SORT_TO_ORDER = { clicks: 'visits', lastClicked: 'recent', recent: 'recent', name: 'name' };
+
+/* The vault's words for the three levels and the three exclusion scopes, used by Settings. */
+const RECORD_LABELS = {
+  hosts: 'one row per hostname',
+  domains: 'one row for the whole site',
+  addresses: 'every page'
+};
+const EXCLUDE_LABELS = { site: 'the site and its subdomains', host: 'this hostname', path: 'this path and below' };
+
+/* The policy's field names are the fold's level names; Settings reads and writes those same three words. */
+const LEVEL_TO_POLICY = { domains: 'site', hosts: 'host', addresses: 'address' };
+const POLICY_TO_LEVEL = { site: 'domains', host: 'hosts', address: 'addresses' };
+
+function collectedOrder() {
+  return collectorPrefs().grouped ? 'domain' : SORT_TO_ORDER[sortInput.value] ?? 'visits';
+}
+
+function collectedMatches(item, query) {
+  const needle = query.trim().toLowerCase();
+  if (needle === '') return true;
+  return `${item.url} ${item.host ?? ''}`.toLowerCase().includes(needle);
+}
 
 function collectedHeld() {
   return (state.document?.bookmarks ?? []).map((bookmark) => bookmark.url);
@@ -1585,12 +1629,14 @@ function collectedHeld() {
 function collectedRows() {
   if (collectedSnapshot?.policy?.enabled !== true) return [];
 
-  const { level, order } = collectedPrefs();
-  return fold(collectedSnapshot.items, {
-    level,
-    order,
+  const prefs = collectorPrefs();
+  const items = collectedSnapshot.items.filter((item) => collectedMatches(item, searchInput.value));
+
+  return fold(items, {
+    level: prefs.level,
+    order: collectedOrder(),
     held: collectedHeld(),
-    levels: collectedSnapshot.policy?.levels ?? []
+    levels: policyLevels()
   });
 }
 
@@ -1599,6 +1645,46 @@ function hostOf(url) {
     return new URL(url).hostname;
   } catch {
     return '';
+  }
+}
+
+/* Icons for the collected rows come from the same server endpoint the vault's own icons use, and are kept in this
+   device's `localStorage` rather than inside the sealed vault: they describe a page the vault does not hold, so
+   sealing them would mean the vault grows every time an address is merely looked at. */
+const COLLECTED_ICON_KEY = 'collected-icons';
+const collectedIconTries = new Set();
+
+function collectedIconCache() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(COLLECTED_ICON_KEY) ?? '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function collectedIcon(host) {
+  return collectedIconCache()[host] ?? null;
+}
+
+async function loadCollectedIcon(host) {
+  if (host === '' || collectedIconTries.has(host)) return;
+  collectedIconTries.add(host);
+
+  const icon = await fetchIcon(host).catch(() => null);
+  if (!icon) return;
+
+  try {
+    const cache = collectedIconCache();
+    cache[host] = icon;
+    localStorage.setItem(COLLECTED_ICON_KEY, JSON.stringify(cache));
+  } catch {
+    /* A cache that cannot be written still leaves the lettered tile. */
+    return;
+  }
+
+  for (const row of collectedList.querySelectorAll(`[data-host="${CSS.escape(host)}"] .tile`)) {
+    row.replaceChildren(el('img', { src: icon, alt: '' }));
   }
 }
 
@@ -1619,7 +1705,13 @@ function collectedRowFor(item) {
   const { initial, background, foreground } = tileFor({ hostname: host, color: null });
 
   const tile = el('span', { class: 'tile', 'aria-hidden': 'true' });
-  tile.textContent = initial;
+  const icon = collectedIcon(host);
+  if (icon) {
+    tile.append(el('img', { src: icon, alt: '' }));
+  } else {
+    tile.textContent = initial;
+    void loadCollectedIcon(host);
+  }
 
   /* A single address is named by its site and addressed by its whole address, which is the pair the vault's own
      table uses. A grouped row is named by what it groups. */
@@ -1633,6 +1725,7 @@ function collectedRowFor(item) {
 
   const row = el('li', { class: 'row collected-row' });
   row.dataset.url = item.url;
+  row.dataset.host = host;
   row.dataset.kind = item.kind;
   row.dataset.depth = String(item.depth);
   row.dataset.visits = String(item.visits);
@@ -1657,11 +1750,13 @@ function collectedRowFor(item) {
 
 function renderCollected() {
   const rows = collectedRows();
-  const prefs = collectedPrefs();
-  const totals = summarise(collectedSnapshot?.items ?? [], collectedHeld(), collectedSnapshot?.policy?.levels ?? []);
+  const prefs = collectorPrefs();
+  const totals = summarise(
+    (collectedSnapshot?.items ?? []).filter((item) => collectedMatches(item, searchInput.value)),
+    collectedHeld(),
+    policyLevels()
+  );
 
-  collectedLevel.value = prefs.level;
-  collectedOrder.value = prefs.order;
   collectedList.dataset.view = currentView;
   collected.hidden = rows.length === 0;
 
@@ -2496,6 +2591,100 @@ function openSettings() {
     return button;
   };
 
+  /* ---- the collected-links controls ---- */
+
+  const collector = collectorPrefs();
+
+  const collectorChoice = (label, options, value, onPick) => {
+    const select = el('select', {}, options.map(([option, text]) => el('option', { value: option, text })));
+    select.value = value;
+    select.addEventListener('change', () => {
+      onPick(select.value);
+      modal.close();
+      openSettings();
+    });
+    return el('label', { class: 'settings-item settings-control' }, [el('strong', { text: label }), select]);
+  };
+
+  const collectorToggle = (label, detail, checked, onToggle) => {
+    const box = el('input', { type: 'checkbox' });
+    box.checked = checked;
+    box.addEventListener('change', () => {
+      onToggle(box.checked);
+      modal.close();
+      openSettings();
+    });
+    return el('label', { class: 'settings-item settings-control' }, [
+      el('strong', { text: label }),
+      el('span', { text: detail }),
+      box
+    ]);
+  };
+
+  const collectorRemove = (label, onRemove) => {
+    const button = el('button', { class: 'icon-button', type: 'button', 'aria-label': label, title: label });
+    button.append(icon('remove'));
+    button.addEventListener('click', () => {
+      onRemove();
+      modal.close();
+      openSettings();
+    });
+    return button;
+  };
+
+  const askForRule = async ({ title, fieldLabel, placeholder, options, confirmLabel }) => {
+    const field = el('input', { type: 'text', placeholder, 'aria-label': fieldLabel });
+    const select = el('select', {}, options.map(([value, text]) => el('option', { value, text })));
+    const sure = await askModal({ title, body: [field, select], confirmLabel });
+    if (!sure) return null;
+
+    const value = field.value.trim().toLowerCase();
+    if (value === '') return null;
+    return { value, choice: select.value };
+  };
+
+  async function addSiteRule() {
+    modal.close();
+    const answer = await askForRule({
+      title: 'Record a site differently',
+      fieldLabel: 'Site',
+      placeholder: 'youtube.com',
+      options: [
+        ['hosts', 'One row per hostname'],
+        ['domains', 'One row for the whole site'],
+        ['addresses', 'Every page']
+      ],
+      confirmLabel: 'Save'
+    });
+    if (answer === null) return;
+
+    setCollectorPrefs({
+      sites: [...collector.sites.filter((rule) => rule.site !== answer.value), { site: answer.value, level: answer.choice }]
+    });
+    openSettings();
+  }
+
+  async function addExclusion() {
+    modal.close();
+    const answer = await askForRule({
+      title: 'Never collect this',
+      fieldLabel: 'Site, hostname or path',
+      placeholder: 'bank.example/statements',
+      options: [
+        ['site', 'The site and every subdomain'],
+        ['host', 'Exactly this hostname'],
+        ['path', 'This hostname and this path']
+      ],
+      confirmLabel: 'Exclude'
+    });
+    if (answer === null) return;
+
+    setCollectorPrefs({
+      exclude: [...collector.exclude, { scope: answer.choice, value: answer.value }]
+    });
+    openSettings();
+  }
+
   /* A fact about the account, not an action: no press, and a dash where the vault has no such
      moment. Both are read on this device's clock, so the hour is the hour the owner sees. The
      value element is kept so it can be filled when the account answers later. */
@@ -2568,6 +2757,52 @@ function openSettings() {
           modal.close();
           handleImport();
         })
+      ]),
+      el('h3', { class: 'settings-heading', text: 'Collected links' }),
+      el('div', { class: 'settings-list' }, [
+        item(
+          collector.enabled ? 'Collection: on' : 'Collect links on this device',
+          collector.enabled
+            ? 'The extension counts the addresses this browser opens. They stay on this device and reach the vault only when you add one.'
+            : 'Off by default. It needs the extension installed, and the addresses it counts never leave this browser.',
+          () => {
+            setCollectorPrefs({ enabled: !collector.enabled });
+            modal.close();
+          }
+        ),
+        collectorChoice(
+          'Record each site as',
+          [
+            ['addresses', 'Every page'],
+            ['hosts', 'One row per hostname'],
+            ['domains', 'One row for the whole site']
+          ],
+          collector.level,
+          (value) => setCollectorPrefs({ level: value })
+        ),
+        collectorToggle('Group by domain', 'Show a site and its hostnames as a nested list instead of one ranking.', collector.grouped, (checked) =>
+          setCollectorPrefs({ grouped: checked })
+        ),
+        ...collector.sites.map((rule) =>
+          el('div', { class: 'settings-item settings-rule' }, [
+            el('strong', { text: rule.site }),
+            el('span', { text: RECORD_LABELS[rule.level] ?? rule.level }),
+            collectorRemove(`Stop recording ${rule.site} differently`, () =>
+              setCollectorPrefs({ sites: collector.sites.filter((entry) => entry.site !== rule.site) })
+            )
+          ])
+        ),
+        ...collector.exclude.map((rule) =>
+          el('div', { class: 'settings-item settings-rule' }, [
+            el('strong', { text: rule.value }),
+            el('span', { text: `never collect — ${EXCLUDE_LABELS[rule.scope] ?? rule.scope}` }),
+            collectorRemove(`Stop excluding ${rule.value}`, () =>
+              setCollectorPrefs({ exclude: collector.exclude.filter((entry) => entry !== rule) })
+            )
+          ])
+        ),
+        item('Add a site rule', 'Record one site at a level of its own — a video site as hostnames, everything else page by page.', addSiteRule),
+        item('Exclude a site or a page', 'Never collect a site, a hostname, or one path.', addExclusion)
       ]),
       el('h3', { class: 'settings-heading', text: 'Icons' }),
       el('div', { class: 'settings-list' }, [
