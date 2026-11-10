@@ -19,5 +19,17 @@
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'none'"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://b.332321.xyz/w/bookmarks/*",
+        "http://127.0.0.1:8799/w/bookmarks/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
 }

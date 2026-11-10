@@ -333,7 +333,11 @@ try {
       } catch {
         parsed = null;
       }
-      if (parsed === null || parsed.origin !== vault.origin || !parsed.pathname.startsWith(vault.pathname)) {
+      /* The vault itself, plus the local dev server it is worked on against — the bridge has to be provable
+         before it is deployed, and a loopback origin is not another site. */
+      const isLoopback = parsed !== null && parsed.hostname === '127.0.0.1';
+      const onVault = parsed !== null && parsed.origin === vault.origin;
+      if (parsed === null || !(isLoopback || onVault) || !parsed.pathname.startsWith(vault.pathname)) {
         problems.push(`extension: content script matches ${match}, which is not the vault`);
       }
     }
@@ -366,7 +370,11 @@ try {
         problems.push(`extension/${name}: unparseable URL ${match[0]}`);
         continue;
       }
-      if (extensionHosts.has(host)) continue;
+      /* The one loopback address allowed anywhere in the extension is the local dev server's vault path, in the
+         manifest's content-script matches. No module may reach it, which is why this stays a manifest-only rule. */
+      const devVault =
+        name === 'manifest.json' && host === '127.0.0.1' && new URL(match[0]).pathname.startsWith(vault.pathname);
+      if (extensionHosts.has(host) || devVault) continue;
       problems.push(`extension/${name}: external URL ${match[0]}`);
       break;
     }
@@ -396,6 +404,7 @@ try {
 
   for (const [file, label] of [
     ['extension/protocol.js', 'extension'],
+    ['extension/bridge.js', 'content script'],
     ['public/w/bookmarks/collector.js', 'page']
   ]) {
     if (constant(file, 'BRIDGE_VERSION') === null) {
@@ -405,21 +414,14 @@ try {
 
   /* The version is not the whole contract: the two source tags are how each side recognises the other, and a typo
      in one of them makes every message unmatched with nothing to catch it. */
-  for (const name of ['BRIDGE_SOURCE', 'PAGE_SOURCE']) {
-    const left = constant('extension/protocol.js', name);
-    const right = constant('public/w/bookmarks/collector.js', name);
-    if (left === null || right === null) {
-      problems.push(`bridge: ${name} is missing on one side`);
-    } else if (left !== right) {
-      problems.push(`bridge: ${name} is "${left}" in the extension and "${right}" in the page`);
+  const sides = ['extension/protocol.js', 'extension/bridge.js', 'public/w/bookmarks/collector.js'];
+  for (const name of ['BRIDGE_SOURCE', 'PAGE_SOURCE', 'BRIDGE_VERSION']) {
+    const values = sides.map((file) => constant(file, name));
+    if (values.some((value) => value === null)) {
+      problems.push(`bridge: ${name} is missing in ${sides[values.indexOf(null)]}`);
+    } else if (new Set(values).size !== 1) {
+      problems.push(`bridge: ${name} differs across the three ends (${values.join(' / ')})`);
     }
-  }
-
-  if (constant('extension/protocol.js', 'BRIDGE_VERSION') !== constant('public/w/bookmarks/collector.js', 'BRIDGE_VERSION')) {
-    problems.push(
-      `bridge: extension is version ${constant('extension/protocol.js', 'BRIDGE_VERSION')}, ` +
-        `the page is ${constant('public/w/bookmarks/collector.js', 'BRIDGE_VERSION')}`
-    );
   }
 } catch (error) {
   problems.push(`extension: ${error.message}`);

@@ -17,6 +17,12 @@ const TIDY_ALARM = 'collector-tidy';
 const TIDY_MINUTES = 360;
 const ACTIVE_KEY = 'activeTab';
 const BADGE_COLOUR = '#c98a1b';
+/* Who may talk to this worker, and which tabs hear about a change, are one answer: the vault page the manifest
+   injects the bridge into. Reading it from the manifest means the extension cannot name an origin the guard has
+   not reviewed, and the local dev server is covered without a second copy of the address here. */
+const VAULT_PATTERNS = (chrome.runtime.getManifest().content_scripts ?? []).flatMap((script) => script.matches ?? []);
+const VAULT_ORIGINS = new Set(VAULT_PATTERNS.map((pattern) => new URL(pattern.replace('*', 'x')).origin));
+const CHANGED = 'collected-changed';
 
 /* The two storage areas differ only in which `chrome.storage` they are, so the wrapper is written once. */
 function area(name) {
@@ -46,6 +52,14 @@ async function badge() {
     const text = count === 0 ? '' : count > 9 ? '9+' : String(count);
     await chrome.action.setBadgeText({ text });
     if (text !== '') await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOUR });
+
+    /* Every vault tab still open hears about it, in every window: the section counts a browser-wide list, so a
+       count that only refreshes on reload would be wrong the moment two windows are open. */
+    for (const tab of await chrome.tabs.query({ url: VAULT_PATTERNS })) {
+      if (typeof tab.id === 'number') {
+        chrome.tabs.sendMessage(tab.id, { type: CHANGED, payload: { count } }).catch(() => {});
+      }
+    }
   } catch {
     /* A badge that cannot be drawn is not worth a broken worker. */
   }
@@ -124,7 +138,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 function trusted(sender) {
   if (!sender || sender.id !== chrome.runtime.id) return false;
   if (!sender.tab) return true;
-  return sender.origin === 'https://b.332321.xyz';
+  return VAULT_ORIGINS.has(sender.origin);
 }
 
 async function handle(message) {
