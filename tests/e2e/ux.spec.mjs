@@ -139,35 +139,38 @@ test('a repeated address is named as already bookmarked, and a bad one is refuse
   /* The same address again, under a different name. */
   await addBookmark(page, { url: 'https://e2e.local/once', name: 'Again' });
 
-  await expect(page.locator('#status')).toHaveText('That address is already bookmarked.');
+  /* The message names what is already saved, and the field is emptied so the next Add is not the same refusal. */
+  await expect(page.locator('#status')).toContainText(/“Once” is already saved/);
   await expect(rows(page)).toHaveCount(1);
   expect((await vaultRows(page)).map((row) => row.name)).toEqual(['Once']);
-  /* The form stays open with the address still in it, so the mistake can be read and corrected. */
   await expect(page.locator('#add-form')).toBeVisible();
-  await expect(page.locator('#add-url')).toHaveValue('https://e2e.local/once');
+  await expect(page.locator('#add-url')).toHaveValue('');
 
-  /* A scheme the app will not save: the message names the scheme, and focus is back in the field. */
-  await addBookmark(page, { url: 'javascript:alert(1)', name: 'Nope' });
-  await expect(page.locator('#status')).toContainText(/"javascript:" is not a bookmark scheme/);
+  /* A scheme the app will not save: the message names it, and the field is marked and focused. */
+  await page.locator('#add-url').fill('javascript:alert(1)');
+  await page.locator('#add-form').getByRole('button', { name: /^add$/i }).click();
+  await expect(page.locator('#status')).toContainText(/not a page address/);
   await expect(page.locator('#add-url')).toBeFocused();
+  await expect(page.locator('#add-url')).toHaveAttribute('aria-invalid', 'true');
   await expect(rows(page)).toHaveCount(1);
 
   /* Text that is not an address at all. */
-  await addBookmark(page, { url: 'not a url' });
-  await expect(page.locator('#status')).toContainText(/that URL has no host/);
+  await page.locator('#add-url').fill('not a url');
+  await page.locator('#add-form').getByRole('button', { name: /^add$/i }).click();
+  await expect(page.locator('#status')).toContainText(/“not a url” is not a page address/);
   await expect(page.locator('#add-url')).toBeFocused();
   await expect(rows(page)).toHaveCount(1);
 });
 
-test('pressing Add with nothing typed gives no answer at all', async ({ page }) => {
+test('pressing Add with nothing typed says what is missing', async ({ page }) => {
   await createVault(page);
-  await expect(page.locator('#status')).not.toHaveClass(/visible/, { timeout: 10_000 });
 
   await page.locator('#add-form').getByRole('button', { name: /^add$/i }).click();
 
+  /* It used to say nothing at all, which reads as a broken button. */
+  await expect(page.locator('#status')).toContainText(/type the address/i);
   await expect(page.locator('#add-url')).toBeFocused();
-  await page.waitForTimeout(400);
-  await expect(page.locator('#status')).not.toHaveClass(/visible/);
+  await expect(page.locator('#add-url')).toHaveAttribute('aria-invalid', 'true');
   await expect(rows(page)).toHaveCount(0);
 });
 
@@ -246,7 +249,7 @@ test('locking says this device holds a vault, and the phrase opens it again', as
 /* -------------------------------------------------------------- 6. settings */
 
 /* Known defect: one Escape closes the dialog and the add form behind it, and focus lands on Add. */
-test.fail('settings opens with the keyboard inside it, closes with Escape, and names the collection switch', async ({
+test('settings opens with the keyboard inside it, closes with Escape, and names the collection switch', async ({
   page
 }) => {
   await createVault(page);

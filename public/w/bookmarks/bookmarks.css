@@ -1026,10 +1026,30 @@ body.modal-open {
         width: 100%;
     }
 
+    /* Two lines of controls and a heading fitted into 120px of a phone screen: every pixel here is one the first
+       bookmark does not get. */
+    .masthead {
+        margin-bottom: 0.15rem;
+    }
+
+    .masthead h1 {
+        font-size: 1rem;
+        line-height: 1.2;
+        margin: 0;
+    }
+
     .toolbar {
         flex-wrap: wrap;
-        gap: var(--space-1, 0.25rem);
-        padding: var(--space-1, 0.25rem) 0;
+        gap: 0.25rem;
+        padding: 0.1rem 0 0.25rem;
+    }
+
+    .search input {
+        padding: 0.35rem 0.55rem;
+    }
+
+    .toolbar .button {
+        padding: 0.3rem 0.5rem;
     }
 
     .search {
@@ -1065,6 +1085,94 @@ body.modal-open {
     .row-actions {
         opacity: 1;
     }
+
+    /* A phone has no room for six columns. Six fixed tracks and two flexible ones inside 390px left the name at 0px
+       and the address at 5px: a row became a tile, a number, a date and three buttons with nothing naming it. Two
+       lines instead — the name with its count and its actions, then the address and the day — and the drawn header
+       goes, because nothing lines up under it any more. */
+    .row,
+    #collected-list .row {
+        grid-template-columns: 2.125rem minmax(0, 1fr) auto auto;
+        grid-template-areas:
+            'pick link uses actions'
+            'pick addr when actions';
+        row-gap: 0.1rem;
+        align-items: center;
+        padding: 0.25rem var(--space-1, 0.25rem);
+    }
+
+    .row > .row-pick {
+        grid-area: pick;
+        align-self: center;
+    }
+
+    .row > .row-link {
+        grid-area: link;
+    }
+
+    .row > .row-host {
+        grid-area: addr;
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .row > .clicks {
+        grid-area: uses;
+    }
+
+    .row > .row-when {
+        grid-area: when;
+        text-align: right;
+    }
+
+    .row > .row-actions {
+        grid-area: actions;
+    }
+
+    .row-head {
+        display: none;
+    }
+
+    /* The count and the buttons are the narrowest they can be, so the name gets what is left of the line. */
+    .row > .clicks {
+        width: 2rem;
+        font-size: var(--font-size-xs, 0.75rem);
+    }
+
+    .row > .row-actions .icon-button {
+        padding: 0.22rem 0.3rem;
+    }
+
+    /* The lettered tile is the first thing to go when the line is short: it repeats the first letter of the name
+       that is right beside it, and it costs the name a third of its space. */
+    .row > .row-link .tile {
+        display: none;
+    }
+
+    .row > .row-link {
+        padding-left: 0;
+    }
+
+    /* The collected row indents a grouped child through its link; with the link no longer spanning columns, the
+       indent moves to the row. */
+    .collected-list .row[data-depth='1'] {
+        padding-left: 1rem;
+    }
+
+    .collected-list .row[data-depth='2'] {
+        padding-left: 2rem;
+    }
+
+    .collected-list .row[data-depth='1'] .row-link,
+    .collected-list .row[data-depth='2'] .row-link {
+        padding-left: 0;
+    }
+}
+
+/* A refused address marks the field, not only the corner of the screen. */
+.field input.invalid,
+.field textarea.invalid {
+    border-color: var(--danger, #f85149);
 }
 
 @media (prefers-reduced-motion: reduce) {

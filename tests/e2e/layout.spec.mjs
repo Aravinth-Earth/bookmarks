@@ -259,7 +259,9 @@ async function tableBoxes(page, selector) {
         });
       };
       const rows = [...list.querySelectorAll(':scope > .row')];
-      const head = rows.find((row) => row.classList.contains('row-head'));
+      /* A phone does not draw the header row, so there is nothing to line up under it there. */
+      const drawn = rows.find((row) => row.classList.contains('row-head'));
+      const head = drawn && getComputedStyle(drawn).display !== 'none' ? drawn : null;
       const body = rows.filter((row) => !row.classList.contains('row-head'));
       return {
         list: box(list),
@@ -337,7 +339,7 @@ test('no horizontal overflow at phone, tablet and desktop, in either view', asyn
 });
 
 /* Known defect: at 390px the masthead and a two-line toolbar take 140px of the screen. */
-test.fail('the toolbar keeps its controls inside itself and stays under a phone-sized height budget', async ({ page, context }) => {
+test('the toolbar keeps its controls inside itself and stays under a phone-sized height budget', async ({ page, context }) => {
   await seed(page);
 
   for (const viewport of VIEWPORTS) {
@@ -364,7 +366,7 @@ test.fail('the toolbar keeps its controls inside itself and stays under a phone-
 });
 
 /* Known defect: at 390px the name and address tracks collapse to 0px and 5px, so rows are unidentified. */
-test.fail('the table keeps its five columns apart and readable, in the vault and the collected section', async ({ page, context }) => {
+test('the table keeps its five columns apart and readable, in the vault and the collected section', async ({ page, context }) => {
   await seed(page);
 
   /* Every break is collected rather than thrown at the first one, so a single run reports the whole picture. */
@@ -391,9 +393,11 @@ test.fail('the table keeps its five columns apart and readable, in the vault and
           `${where} ${section} row ${index}: columns are ${cells.map((cell) => cell.key).join(',')}`
         );
 
+        /* Two cells can only overlap if they are on the same line: a phone puts the address under the name. */
         for (let i = 1; i < cells.length; i += 1) {
           const previous = cells[i - 1];
           const cell = cells[i];
+          if (Math.abs(previous.top - cell.top) > 2) continue;
           const overlap = +(previous.right - cell.left).toFixed(2);
           note(
             overlap <= 0.5,
@@ -610,7 +614,7 @@ test('the collected bulk bar and header row sit above the rows, never on top of 
           section: box(section),
           bar: box(bar),
           list: box(list),
-          head: head ? box(head) : null,
+          head: head && getComputedStyle(head).display !== 'none' ? box(head) : null,
           first: first ? box(first) : null,
           title: box(document.querySelector('#collected-title')),
           count: rows.length
@@ -744,7 +748,7 @@ test('200% zoom, as the layout sees it: no sideways scroll and no crushed column
 /* TEMPORARY DIAGNOSTIC — removed before the file is finished. */
 /* 320 CSS pixels is a 640px window at 200% zoom, and WCAG 1.4.10 asks that content reflow rather than scroll
    sideways at that size. Known defect: the same fixed tracks that collapse at 390px push the row past 320px. */
-test.fail('320 CSS pixels reflows without scrolling sideways', async ({ page }) => {
+test('320 CSS pixels reflows without scrolling sideways', async ({ page }) => {
   await createVault(page);
   await addBookmark(page, { url: 'https://e2e.local/a-page-with-a-rather-long-address', name: 'A name long enough to matter' });
   await page.locator('#view-toggle').click();

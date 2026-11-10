@@ -49,7 +49,7 @@ test('the same address is refused twice', async ({ page }) => {
   await addBookmark(page, { url: 'https://e2e.local/once', name: 'Once' });
   await addBookmark(page, { url: 'https://e2e.local/once', name: 'Again' });
 
-  await expect(page.locator('#status')).toContainText(/already bookmarked/i);
+  await expect(page.locator('#status')).toContainText(/already saved/i);
   await expect(page.locator('#list .row:not(.row-head)')).toHaveCount(1);
 });
 

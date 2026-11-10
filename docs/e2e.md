@@ -44,12 +44,12 @@ vault.
 
 Seventy tests; a full run takes about twelve minutes on a laptop.
 
-## Defects are pinned, not weakened
+## When a requirement is not met
 
-A test whose requirement the app does not meet yet is written at the real requirement and marked `test.fail`. The run
-stays green, the defect stays visible in the file and in its comment, and fixing the app turns that test red with
-"passed unexpectedly" — which is the reminder to remove the mark. Tests that were softened to pass would be worse than
-no test at all.
+Write the test at the real requirement and mark it `test.fail`. The run stays green, the defect stays visible in the
+file and in its comment, and fixing the app turns that test red with "passed unexpectedly" — the reminder to remove
+the mark. A test softened to pass is worse than no test. Every pin the suite once carried has since been removed
+because the defect behind it was fixed.
 
 ## What cannot be covered here
 

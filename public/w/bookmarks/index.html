@@ -22,8 +22,8 @@
 
         <section id="lock-view" class="lock" hidden>
             <form id="lock-form" class="lock-form" novalidate>
-                <label class="field">
-                    <span class="field-label">Your 13-word phrase</span>
+                <div class="field">
+                    <label class="field-label" for="phrase">Your 13-word phrase</label>
                     <textarea
                         id="phrase"
                         class="phrase-input"
@@ -34,8 +34,8 @@
                         spellcheck="false"
                         aria-describedby="phrase-hint"
                         required></textarea>
-                    <span id="phrase-hint" class="field-hint">Thirteen words, separated by spaces. The phrase is never sent anywhere.</span>
-                </label>
+                </div>
+                <p id="phrase-hint" class="field-hint">Thirteen words, separated by spaces. The phrase is never sent anywhere.</p>
 
                 <label class="remember">
                     <input id="remember" type="checkbox" aria-describedby="remember-hint">

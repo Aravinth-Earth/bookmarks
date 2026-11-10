@@ -182,6 +182,7 @@ function applyAppearance() {
   /* The collected section is the same rows in the same two views, so it moves with the toggle instead of waiting
      for the next render. */
   collectedList.dataset.view = currentView;
+  applyListRoles();
   document.documentElement.dataset.size = currentSize;
   renderViewToggle();
   /* Pills are for opening pages; editing and deleting live in the list, so say where they are. */
@@ -331,6 +332,8 @@ function openModal({ title, body = [], actions = [], onClose = null }) {
 
   function onKeydown(event) {
     if (event.key === 'Escape') {
+      /* The page has its own Escape handlers; one keypress must not close the dialog and the form behind it. */
+      event.stopPropagation();
       event.preventDefault();
       close();
       return;
@@ -429,6 +432,7 @@ let statusTimer = 0;
 
 function announce(text, { action, onAction, duration = 3200 } = {}) {
   clearTimeout(statusTimer);
+  status.hidden = false;
   status.replaceChildren(document.createTextNode(text));
 
   if (action) {
@@ -446,7 +450,21 @@ function announce(text, { action, onAction, duration = 3200 } = {}) {
   }
 
   status.classList.add('visible');
-  statusTimer = setTimeout(() => status.classList.remove('visible'), duration);
+  statusTimer = setTimeout(() => clearStatus(), duration);
+}
+
+/**
+ * Take the last message off the screen, button and all.
+ *
+ * The pill fades after its time; the Undo button inside it used to stay in the tab order and stay in the tree, so
+ * focus could vanish into something invisible. A locked vault also used to keep the last "Added …" sentence, which
+ * is a bookmark's name on a screen that is supposed to show nothing.
+ */
+function clearStatus() {
+  clearTimeout(statusTimer);
+  status.classList.remove('visible');
+  status.replaceChildren();
+  status.hidden = true;
 }
 
 function setVaultStatus(text) {
@@ -1373,7 +1391,7 @@ function findBookmark(id) {
   return state.document.bookmarks.find((bookmark) => bookmark.id === id) ?? null;
 }
 
-function actionButton(action, label, iconName, { pressed = false } = {}) {
+function actionButton(action, label, iconName, { pressed = null } = {}) {
   const button = el('button', {
     class: `icon-button${pressed ? ' pinned' : ''}`,
     type: 'button',
@@ -1381,9 +1399,59 @@ function actionButton(action, label, iconName, { pressed = false } = {}) {
     title: label
   });
   button.dataset.action = action;
-  if (pressed) button.setAttribute('aria-pressed', 'true');
+  /* A toggle owes a state in both positions; the name alone would describe the action and not the state. */
+  if (pressed !== null) button.setAttribute('aria-pressed', pressed ? 'true' : 'false');
   button.append(icon(iconName));
   return button;
+}
+
+/**
+ * The list view is a table and the pills view is a list of links, and the same nodes are drawn for both — so the
+ * roles are stamped on what is already there instead of being written into two row builders.
+ *
+ * The name cell is left alone on purpose: it is the anchor, and a `cell` role on it would take the link away. A
+ * screen reader then hears the row, the link, and the cells beside it, with the drawn header as the column names.
+ */
+function applyListRoles() {
+  const asTable = currentView === 'list';
+
+  for (const [container, label] of [
+    [list, 'Bookmarks'],
+    [collectedList, 'Collected links']
+  ]) {
+    if (!container) continue;
+
+    if (asTable) {
+      container.setAttribute('role', 'table');
+      container.setAttribute('aria-label', label);
+    } else {
+      container.removeAttribute('role');
+      container.removeAttribute('aria-label');
+    }
+
+    for (const row of container.children) {
+      if (!row.classList.contains('row')) continue;
+      const head = row.classList.contains('row-head');
+
+      if (!asTable) row.removeAttribute('role');
+      else row.setAttribute('role', 'row');
+
+      for (const cell of row.children) {
+        if (!asTable) {
+          cell.removeAttribute('role');
+          continue;
+        }
+        if (cell.tagName === 'A') continue;
+        if (cell.getAttribute('aria-hidden') === 'true') {
+          cell.setAttribute('role', 'presentation');
+          continue;
+        }
+        cell.setAttribute('role', head ? 'columnheader' : 'cell');
+        /* A selection column still needs a name of its own. */
+        if (cell.classList.contains('row-pick')) cell.setAttribute('aria-label', 'Select');
+      }
+    }
+  }
 }
 
 /**
@@ -1472,7 +1540,8 @@ function render() {
     /* The number counts uses, not clicks: a bookmark opened from the browser's own list rises too. */
     el('span', { class: 'clicks', text: 'Uses' }),
     el('span', { class: 'row-when', text: 'Last used' }),
-    el('span')
+    /* The last cell holds the row's buttons; it is not a column with a name. */
+    el('span', { 'aria-hidden': 'true' })
   ]);
 
   list.replaceChildren(head, ...sorted.map(rowFor));
@@ -1484,6 +1553,7 @@ function render() {
       : `No bookmark matches “${query.trim()}”.`;
 
   renderCollected();
+  applyListRoles();
   updateStatusLine();
   viewHint.hidden = currentView !== 'pills' || sorted.length === 0;
 }
@@ -1613,7 +1683,7 @@ function setCollectorPrefs(patch) {
 }
 
 /** Tell the extension what to count, how, and what to leave out. */
-function pushCollectorPolicy() {
+function pushCollectorPolicy(attempt = 0) {
   const prefs = collectorPrefs();
   void collectorBridge.setPolicy({
     enabled: prefs.enabled,
@@ -1624,6 +1694,10 @@ function pushCollectorPolicy() {
     maxEntries: prefs.maxEntries,
     dailyCap: prefs.dailyCap,
     minVisits: prefs.minVisits
+  }).then((reply) => {
+    /* No reply is what an absent extension looks like, and also what a missed message looks like. One retry costs
+       nothing and turns the second case into a second chance rather than a silently switched-off collection. */
+    if (reply === null && attempt < 2) setTimeout(() => pushCollectorPolicy(attempt + 1), 900);
   });
 }
 
@@ -1945,7 +2019,7 @@ function renderCollected() {
     el('span', { text: 'Address' }),
     el('span', { class: 'clicks', text: 'Visits' }),
     el('span', { class: 'row-when', text: 'Last seen' }),
-    el('span')
+    el('span', { 'aria-hidden': 'true' })
   ]);
 
   collectedList.replaceChildren(head, ...rows.map(collectedRowFor));
@@ -1953,6 +2027,7 @@ function renderCollected() {
     totals.visits
   } ${totals.visits === 1 ? 'visit' : 'visits'}`;
   updateCollectedBar(rows);
+  applyListRoles();
 }
 
 /**
@@ -2072,7 +2147,8 @@ async function handleAdd(event) {
   const url = addUrl.value.trim();
   const name = addName.value.trim();
   if (url === '') {
-    addUrl.focus();
+    /* Silence reads as a broken button. */
+    refuseAdd('Type the address you want to keep, then Add.');
     return;
   }
 
@@ -2109,15 +2185,43 @@ async function handleAdd(event) {
       searchInput.value = '';
       render();
       const row = list.querySelector(`[data-id="${CSS.escape(error.existingId)}"]`);
+      const label = row ? labelOf(findBookmark(error.existingId)) : 'That address';
       row?.scrollIntoView({ block: 'center' });
       row?.classList.add('flash');
       setTimeout(() => row?.classList.remove('flash'), 1400);
-      announce('That address is already bookmarked.');
+      /* Clear the field so the next Add is not the same refusal again, and put the person on the row that has it. */
+      addUrl.value = '';
+      addUrl.removeAttribute('aria-invalid');
+      announce(`“${label}” is already saved.`);
+      row?.querySelector('.row-link')?.focus();
       return;
     }
-    announce(clean(error.message));
-    addUrl.focus();
+    refuseAdd(refusalFor(url, error));
   }
+}
+
+/**
+ * Say what is wrong with the address, mark the field, and put the cursor back in it — the message used to be a
+ * lowercase fragment in a corner while the field looked untouched.
+ */
+function refuseAdd(message) {
+  addUrl.setAttribute('aria-invalid', 'true');
+  addUrl.classList.add('invalid');
+  announce(message);
+  addUrl.focus();
+  addUrl.select();
+}
+
+/** A refusal in a sentence, naming what was typed instead of restating the parser's own words. */
+function refusalFor(url, error) {
+  const typed = url.length > 60 ? `${url.slice(0, 60)}…` : url;
+  const said = clean(error?.message ?? '');
+  if (/not a bookmark scheme/.test(said)) {
+    return `“${typed}” is not a page address. Only http and https links can be kept.`;
+  }
+  if (/has no host|not a URL/.test(said)) return `“${typed}” is not a page address — it has no site in it.`;
+  if (/at most/.test(said)) return 'That address is too long to keep.';
+  return said || 'That address could not be added.';
 }
 
 function removeBookmark(bookmark) {
@@ -3226,6 +3330,7 @@ async function lockVault({ broadcast = true } = {}) {
   vaultCreatedAt = null;
   lastActivityAt = null;
   list.replaceChildren();
+  clearStatus();
   showLock('Locked. Enter your phrase to reopen the vault.', { hasVault: true });
 
   if (broadcast) lockSignal.broadcast();
@@ -3250,18 +3355,29 @@ function bindEvents() {
   lockForm.addEventListener('submit', handleUnlock);
   newVaultButton.addEventListener('click', openCreateModal);
   restoreButton.addEventListener('click', handleRestore);
+
+  /* The toolbar has carried a lock button with no handler bound to it: drawn, named, and inert. */
+  lockButton.addEventListener('click', () => void lockVault());
   syncRefusalDismiss.addEventListener('click', () => {
     syncRefusalDismissed = true;
     syncRefusal.hidden = true;
   });
 
   addForm.addEventListener('submit', handleAdd);
-  addToggle.addEventListener('click', () => setAddForm(addForm.hidden));
+  /* Open, it means "type here" — pressing it used to close the form being typed in and lose the words. */
+  addToggle.addEventListener('click', () => {
+    if (addForm.hidden) setAddForm(true);
+    else addUrl.focus();
+  });
   addCancel.addEventListener('click', () => setAddForm(false));
 
   /* Suggest the site's own name once the address is settled, and stand out of the way the moment
      a name is typed. */
   addUrl.addEventListener('blur', suggestName);
+  addUrl.addEventListener('input', () => {
+    addUrl.removeAttribute('aria-invalid');
+    addUrl.classList.remove('invalid');
+  });
   addName.addEventListener('input', () => {
     nameTouched = true;
     delete addName.dataset.suggesting;
