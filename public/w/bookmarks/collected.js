@@ -59,8 +59,9 @@ function unitsFor(items, level) {
   for (const item of items) {
     const key =
       level === 'addresses' ? item.url : level === 'hosts' ? item.host : siteOf(item.host);
-    const label =
-      level === 'addresses' ? addressLabel(item.url) : level === 'hosts' ? item.host : key;
+    /* A page at the root of a site is labelled by the site: "/" beside a host column says nothing at all. */
+    const path = level === 'addresses' ? addressLabel(item.url) : null;
+    const label = path !== null ? (path === '/' ? item.host : path) : level === 'hosts' ? item.host : key;
 
     const unit = units.get(key) ?? {
       key,

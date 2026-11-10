@@ -35,6 +35,12 @@ test('a site is the registrable name, with two-part suffixes kept whole', () => 
   assert.equal(siteOf('localhost'), 'localhost');
 });
 
+test('a root page is labelled by its host, not by a slash', () => {
+  const rows = fold(items, { level: 'addresses', order: 'visits' });
+  assert.equal(rows.find((row) => row.url === 'https://pikto.app/').label, 'pikto.app');
+  assert.equal(rows.find((row) => row.url === 'https://pikto.app/pricing').label, '/pricing');
+});
+
 test('an address is labelled by its path, and the root by a slash', () => {
   assert.equal(addressLabel('https://pikto.app/'), '/');
   assert.equal(addressLabel('https://pikto.app/pricing/'), '/pricing');
