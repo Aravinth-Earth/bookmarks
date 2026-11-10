@@ -48,14 +48,20 @@ test('a repeat visit raises the count instead of adding a row', async () => {
   assert.equal(items[0].visits, 2);
 });
 
-test('the same navigation reported twice within half a minute is one visit', async () => {
+test('an open is an open: two loads a second apart are two visits', async () => {
   const { collector, enable, advance } = build();
   await enable();
   assert.equal(await collector.capture('https://a.example/x'), 'captured');
-  advance(29_999);
-  assert.equal(await collector.capture('https://a.example/x'), 'debounced');
-  advance(1);
+  advance(1_000);
   assert.equal(await collector.capture('https://a.example/x'), 'captured');
+  assert.equal((await collector.list()).items[0].visits, 2, 'nothing here compares times');
+});
+
+test('a hundred reloads are a hundred visits', async () => {
+  const { collector, enable } = build();
+  await enable();
+  for (let open = 0; open < 100; open += 1) await collector.capture('https://a.example/');
+  assert.equal((await collector.list()).items[0].visits, 100);
 });
 
 test('two fragments of one page are one address', async () => {

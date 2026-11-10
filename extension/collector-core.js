@@ -20,11 +20,6 @@ export const ITEMS_KEY = 'items';
 export const POLICY_KEY = 'policy';
 export const DAY_KEY = 'day';
 
-/* The same navigation can arrive twice — a page that resolves, then reports a new URL for the same document. Under
-   half a minute that is one visit, not two; it is a guard against double events, not a measure of how long anyone
-   stayed. */
-export const VISIT_DEBOUNCE_MS = 30_000;
-
 const DAY_MS = 86_400_000;
 
 /**
@@ -103,11 +98,15 @@ export function createCollector({ persistent, now = Date.now }) {
     return next;
   }
 
-  /** One visit, folded into the row for that address. Returns the word the caller reports. */
+  /**
+   * One visit, folded into the row for that address.
+   *
+   * An open is an open: a reload, a duplicated tab and a new window are three opens of the same address and the
+   * count says three. Nothing here compares times — the event that calls this fires once per finished page load,
+   * so a count can only be raised by a page actually being opened again.
+   */
   function countIn(items, canonical, incognito, at) {
     const existing = items[canonical];
-    if (existing && at - Date.parse(existing.lastSeenAt) < VISIT_DEBOUNCE_MS) return 'debounced';
-
     items[canonical] = existing
       ? { ...existing, visits: existing.visits + 1, lastSeenAt: stamp(at), private: incognito }
       : {
@@ -146,8 +145,6 @@ export function createCollector({ persistent, now = Date.now }) {
     if (policy.dailyCap > 0 && used >= policy.dailyCap && !existing) return 'capped';
 
     const outcome = countIn(items, canonical, incognito, at);
-    if (outcome === 'debounced') return outcome;
-
     await writeItems(survived(items, policy, at));
     if (!existing) await persistent.put(DAY_KEY, { date: today, count: used + 1 });
     return outcome;

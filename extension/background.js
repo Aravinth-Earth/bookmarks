@@ -66,14 +66,20 @@ function ensureAlarm() {
 }
 
 /**
- * A committed navigation is a visit. `info.url` is the field that changed; the tab snapshot can still be the
- * previous page, and counting that would be a visit that never happened.
+ * One finished page load is one visit.
+ *
+ * `status: 'complete'` fires once for each document a tab finishes loading, which makes a reload, a duplicated tab
+ * and a new window each count on their own — there is no timer and nothing to compare against a previous visit.
+ * The address is read from the tab rather than from `info.url`, because on a plain reload nothing about the URL
+ * changed and `info.url` is absent.
  */
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (typeof info.url !== 'string') return;
-  if (!/^https?:/i.test(info.url)) return;
+  if (info.status !== 'complete') return;
 
-  collector.capture(info.url, { incognito: tab?.incognito === true }).then(badge);
+  const url = tab?.url ?? '';
+  if (!/^https?:/i.test(url)) return;
+
+  collector.capture(url, { incognito: tab?.incognito === true }).then(badge);
 });
 
 chrome.runtime.onInstalled.addListener(() => {
