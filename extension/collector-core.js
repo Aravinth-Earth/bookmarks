@@ -223,6 +223,16 @@ export function createCollector({ persistent, now = Date.now }) {
     return next;
   }
 
+  /**
+   * Delete everything collected: the rows, the day's counter and the policy's exclusion list. The policy itself
+   * stays, so collection keeps the shape the vault gave it — clearing is "forget what you have", not "stop".
+   */
+  async function clearInner() {
+    await persistent.remove(ITEMS_KEY);
+    await persistent.remove(DAY_KEY);
+    return 0;
+  }
+
   async function tidyInner(at = now()) {
     const policy = await readPolicy();
     const items = survived(await readItems(), policy, at);
@@ -238,6 +248,7 @@ export function createCollector({ persistent, now = Date.now }) {
     dismiss: (urls) => exclusive(() => forgetInner(urls)),
     setPolicy: (patch) => exclusive(() => setPolicyInner(patch)),
     exclude: (entries) => exclusive(() => excludeInner(entries)),
+    clear: () => exclusive(() => clearInner()),
     tidy: (at) => exclusive(() => tidyInner(at))
   };
 }

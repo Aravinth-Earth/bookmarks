@@ -147,6 +147,10 @@ async function handle(message) {
     case TYPES.exclude:
       return { ok: true, policy: await collector.exclude(message.payload ?? []) };
 
+    case TYPES.clear:
+      await collector.clear();
+      return { ok: true, removed: 0 };
+
     case TYPES.revoke: {
       const { policy } = await collector.list();
       return { ok: true, policy: await collector.setPolicy({ ...policy, enabled: false }) };

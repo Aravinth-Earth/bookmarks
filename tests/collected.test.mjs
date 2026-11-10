@@ -211,7 +211,7 @@ test('an empty or malformed list draws nothing rather than throwing', () => {
   assert.deepEqual(fold([]), []);
   assert.deepEqual(fold(null), []);
   assert.deepEqual(fold([{ url: 'https://x.example/', visits: 0 }, { host: 'y.example' }]), []);
-  assert.deepEqual(ORDERS, ['visits', 'domain']);
+  assert.deepEqual(ORDERS, ['visits', 'recent', 'name', 'domain']);
 });
 
 

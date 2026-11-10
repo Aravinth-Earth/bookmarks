@@ -80,6 +80,7 @@ export function createBridge({ window: host = window, timeout = REPLY_TIMEOUT_MS
     promote: (urls) => send('promote', urls),
     dismiss: (urls) => send('dismiss', urls),
     exclude: (entries) => send('exclude', entries),
+    clear: () => send('clear'),
     setPolicy: (policy) => send('policy', policy),
 
     /** Called whenever the extension says the collected list moved — a new tab, an approval, an exclusion. */

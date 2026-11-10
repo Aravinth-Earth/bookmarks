@@ -18,5 +18,6 @@ export const TYPES = Object.freeze({
   promote: 'promote',
   dismiss: 'dismiss',
   exclude: 'exclude',
+  clear: 'clear',
   revoke: 'revoke'
 });

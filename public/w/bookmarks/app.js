@@ -966,6 +966,9 @@ function enter({ accountId, authSecret, authKey = null, key, version, sealed, do
     searchInput.focus();
   }
 
+  /* The vault is the only writer of the capture policy, so it states it on every unlock: an extension that was
+     reinstalled, reloaded or updated starts from the defaults and has to be told what this vault decided. */
+  pushCollectorPolicy();
   void loadCollected();
 
   if (syncEnabled()) syncNow();
@@ -1564,14 +1567,25 @@ collectorBridge.onChange(() => {
 /* Everything about collection is a vault preference: whether it runs, what a site is recorded as, whether the list
    is grouped, and what is excluded. It is sealed with the vault, travels with the phrase, and is pushed to the
    extension whenever it changes — the page is the only writer of that policy. */
+/* The bounds are the same defaults the extension ships with: a list that keeps itself in check unless the person
+   says otherwise, and a zero that means "no limit" for anyone who wants that. */
+const COLLECTOR_DEFAULTS = { retentionDays: 60, maxEntries: 2000, dailyCap: 0, minVisits: 1 };
+
 function collectorPrefs() {
   const prefs = state.document?.prefs?.collector ?? {};
+  const bounded = (value, fallback) => (Number.isInteger(value) && value >= 0 ? value : fallback);
+
   return {
     enabled: prefs.enabled === true,
+    includeIncognito: prefs.includeIncognito === true,
     level: LEVELS.includes(prefs.level) ? prefs.level : DEFAULT_LEVEL,
     grouped: prefs.grouped === true,
     sites: Array.isArray(prefs.sites) ? prefs.sites : [],
-    exclude: Array.isArray(prefs.exclude) ? prefs.exclude : []
+    exclude: Array.isArray(prefs.exclude) ? prefs.exclude : [],
+    retentionDays: bounded(prefs.retentionDays, COLLECTOR_DEFAULTS.retentionDays),
+    maxEntries: bounded(prefs.maxEntries, COLLECTOR_DEFAULTS.maxEntries),
+    dailyCap: bounded(prefs.dailyCap, COLLECTOR_DEFAULTS.dailyCap),
+    minVisits: Number.isInteger(prefs.minVisits) && prefs.minVisits >= 1 ? prefs.minVisits : COLLECTOR_DEFAULTS.minVisits
   };
 }
 
@@ -1600,8 +1614,13 @@ function pushCollectorPolicy() {
   const prefs = collectorPrefs();
   void collectorBridge.setPolicy({
     enabled: prefs.enabled,
+    includeIncognito: prefs.includeIncognito,
     levels: policyLevels(),
-    exclude: prefs.exclude
+    exclude: prefs.exclude,
+    retentionDays: prefs.retentionDays,
+    maxEntries: prefs.maxEntries,
+    dailyCap: prefs.dailyCap,
+    minVisits: prefs.minVisits
   });
 }
 
@@ -2957,8 +2976,77 @@ function openSettings() {
             )
           ])
         ),
+        collectorToggle(
+          'Include private windows',
+          'Off by default. The browser also has to allow this extension in private windows, at the extensions page.',
+          collector.includeIncognito,
+          (checked) => setCollectorPrefs({ includeIncognito: checked })
+        ),
+        collectorChoice(
+          'Keep collected links for',
+          [
+            ['7', 'A week'],
+            ['30', 'A month'],
+            ['60', 'Two months'],
+            ['365', 'A year'],
+            ['0', 'Until I clear them']
+          ],
+          String(collector.retentionDays),
+          (value) => setCollectorPrefs({ retentionDays: Number(value) })
+        ),
+        collectorChoice(
+          'Keep at most',
+          [
+            ['500', '500 addresses'],
+            ['2000', '2,000 addresses'],
+            ['5000', '5,000 addresses'],
+            ['0', 'No limit']
+          ],
+          String(collector.maxEntries),
+          (value) => setCollectorPrefs({ maxEntries: Number(value) })
+        ),
+        collectorChoice(
+          'New addresses a day',
+          [
+            ['0', 'No limit'],
+            ['50', '50 a day'],
+            ['100', '100 a day'],
+            ['250', '250 a day']
+          ],
+          String(collector.dailyCap),
+          (value) => setCollectorPrefs({ dailyCap: Number(value) })
+        ),
+        collectorChoice(
+          'Show rows seen at least',
+          [
+            ['1', 'Once'],
+            ['2', 'Twice'],
+            ['3', 'Three times']
+          ],
+          String(collector.minVisits),
+          (value) => setCollectorPrefs({ minVisits: Number(value) })
+        ),
         item('Add a site rule', 'Record one site at a level of its own — a video site as hostnames, everything else page by page.', addSiteRule),
-        item('Exclude a site or a page', 'Never collect a site, a hostname, or one path.', addExclusion)
+        item('Exclude a site or a page', 'Never collect a site, a hostname, or one path.', addExclusion),
+        item('Clear collected links', 'Delete every address the extension counted on this device. Bookmarks are untouched.', async () => {
+          const sure = await askModal({
+            title: 'Clear what was collected?',
+            body: [
+              el('p', {
+                class: 'modal-note',
+                text: 'Every address the extension counted on this device is deleted, along with the day’s counter. Your bookmarks are untouched, and collection keeps running with the settings above.'
+              })
+            ],
+            confirmLabel: 'Clear',
+            danger: true
+          });
+          if (!sure) return;
+
+          await collectorBridge.clear();
+          modal.close();
+          await loadCollected();
+          announce('Collected links cleared.');
+        })
       ]),
       el('h3', { class: 'settings-heading', text: 'Icons' }),
       el('div', { class: 'settings-list' }, [

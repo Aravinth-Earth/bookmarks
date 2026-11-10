@@ -28,17 +28,19 @@ the file stays on the device.
 2. **Load unpacked** → choose this `extension/` folder.
 3. After editing a file, press the reload arrow on the card. There is no build step.
 
-**The vault side is not wired in this build.** Settings → Collected links does not exist yet, so collection cannot
-be turned on from the page; until it can, it is enabled from the extension's service-worker console:
+Then open <https://b.332321.xyz/w/bookmarks/>, unlock the vault, and turn collection on at **Settings → Collected
+links → Collect links on this device**. That screen is the only place collection is switched on: it also holds what
+each site is recorded as, one rule per site that records it differently, the exclusions, how long rows are kept and
+how many, the daily limit for new addresses, the visit floor, and whether private windows are included. Every change
+is written into the sealed vault and pushed to this extension.
 
-```js
-chrome.storage.local.set({ policy: { enabled: true } })
-```
+The vault states that policy again on every unlock, so an extension that was reinstalled or updated picks up what
+the vault already decided instead of starting from the defaults.
 
 ## Private windows
 
 Off by default, and it takes two steps: allow this extension in Incognito at `brave://extensions` → Details, **and**
-set `includeIncognito` in the policy the vault pushes.
+turn on **Include private windows** in the vault's Settings → Collected links.
 
 ## Checking what it kept
 

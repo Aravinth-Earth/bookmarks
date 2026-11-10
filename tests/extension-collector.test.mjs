@@ -241,3 +241,21 @@ test('a tidy applies the retention without needing a visit', async () => {
   advance(2 * 86_400_000);
   assert.equal(await collector.tidy(), 0);
 });
+
+
+test('clearing forgets the rows and the day counter, and keeps collecting', async () => {
+  const { collector, enable, advance, persistent } = build();
+  await enable({ dailyCap: 1 });
+  await collector.capture('https://a.example/');
+  await collector.capture('https://b.example/');
+
+  await collector.clear();
+
+  assert.deepEqual((await collector.list()).items, []);
+  assert.equal(await persistent.get('items'), undefined);
+  assert.equal(await persistent.get('day'), undefined, 'the day counter goes with the rows');
+
+  advance(1_000);
+  assert.equal(await collector.capture('https://c.example/'), 'captured', 'clearing is not stopping');
+  assert.equal(await persistent.get('policy').then((policy) => policy.enabled), true, 'the policy survives');
+});
