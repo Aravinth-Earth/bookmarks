@@ -52,6 +52,8 @@ import { fetchIcon, fetchPageTitle } from './icons.js';
 import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
 import { formatStamp } from './stamps.js';
+import { createBridge, isSnapshot } from './collector.js';
+import { DEFAULT_LEVEL, DEFAULT_ORDER, fold, summarise } from './collected.js';
 
 const store = createVault(indexedDbAdapter());
 
@@ -131,6 +133,9 @@ const addName = $('add-name');
 const list = $('list');
 const empty = $('empty');
 const viewHint = $('view-hint');
+const collected = $('collected');
+const collectedList = $('collected-list');
+const collectedCount = $('collected-count');
 const vaultStatus = $('vault-status');
 const status = $('status');
 const syncRefusal = $('sync-refusal');
@@ -166,6 +171,9 @@ let currentSize = readPref(SIZE_KEY, SIZES, 'medium');
 
 function applyAppearance() {
   list.dataset.view = currentView;
+  /* The collected section is the same rows in the same two views, so it moves with the toggle instead of waiting
+     for the next render. */
+  collectedList.dataset.view = currentView;
   document.documentElement.dataset.size = currentSize;
   renderViewToggle();
   /* Pills are for opening pages; editing and deleting live in the list, so say where they are. */
@@ -946,6 +954,8 @@ function enter({ accountId, authSecret, authKey = null, key, version, sealed, do
     searchInput.focus();
   }
 
+  void loadCollected();
+
   if (syncEnabled()) syncNow();
   /* A top-up that cannot read its own index is not an error worth showing: the next launch
      simply asks again. */
@@ -1455,9 +1465,157 @@ function render() {
       ? 'No bookmarks yet. Add one above, or import a file from Settings.'
       : `No bookmark matches “${query.trim()}”.`;
 
+  renderCollected();
   updateStatusLine();
   viewHint.hidden = currentView !== 'pills' || sorted.length === 0;
 }
+
+/* --------------------------------------------------------- collected (the extension) */
+
+/* The extension is optional, so every answer can be nothing at all: a request that resolves to null means no
+   extension, or one that is disabled, and the section stays hidden rather than announcing an absence. */
+const collectorBridge = createBridge();
+let collectedSnapshot = null;
+let collectedTimer = null;
+
+async function loadCollected() {
+  const reply = await collectorBridge.request();
+  collectedSnapshot = isSnapshot(reply) ? reply : null;
+  renderCollected();
+}
+
+/* A tab opening in another window, an approval or an exclusion all arrive as one hint. The section re-reads
+   rather than patching a copy it cannot trust. */
+collectorBridge.onChange(() => {
+  clearTimeout(collectedTimer);
+  collectedTimer = setTimeout(() => {
+    if (state.document) void loadCollected();
+  }, 200);
+});
+
+function collectedHeld() {
+  return (state.document?.bookmarks ?? []).map((bookmark) => bookmark.url);
+}
+
+/** The extension's rows the vault does not already hold, folded into the level and order this build shows. */
+function collectedRows() {
+  if (collectedSnapshot?.policy?.enabled !== true) return [];
+  return fold(collectedSnapshot.items, {
+    level: DEFAULT_LEVEL,
+    order: DEFAULT_ORDER,
+    held: collectedHeld()
+  });
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+/** The day a visit was last seen, short enough for a column. */
+function seenLabel(stamp) {
+  if (typeof stamp !== 'string' || stamp === '') return '—';
+  const when = new Date(stamp);
+  if (Number.isNaN(when.getTime())) return '—';
+  return when.toLocaleDateString([], { day: 'numeric', month: 'short' });
+}
+
+/**
+ * One collected row. It reuses the vault's own row markup so both views come for free: pills show the tile, the
+ * label and the count, and everything that acts lives in the list, where a table already has a column for it.
+ */
+function collectedRowFor(item) {
+  const host = hostOf(item.url);
+  const { initial, background, foreground } = tileFor({ hostname: host, color: null });
+
+  const tile = el('span', { class: 'tile', 'aria-hidden': 'true' });
+  tile.textContent = initial;
+
+  const name = el('span', { class: 'row-name', text: item.label });
+  const link = el('a', { class: 'row-link', href: item.url, target: '_blank', rel: 'noopener noreferrer' }, [
+    tile,
+    name
+  ]);
+  link.setAttribute('aria-label', `${item.label} — ${host}`);
+
+  const row = el('li', { class: 'row collected-row' });
+  row.dataset.url = item.url;
+  row.dataset.kind = item.kind;
+  row.dataset.depth = String(item.depth);
+  row.style.setProperty('--tile-seed', background);
+  row.style.setProperty('--tile-fg', foreground);
+
+  const address = el('span', { class: 'row-host', text: host });
+  const visits = el('span', {
+    class: 'clicks',
+    text: String(item.visits),
+    'aria-label': `${item.visits} ${item.visits === 1 ? 'visit' : 'visits'}`
+  });
+  const when = el('span', { class: 'row-when', text: seenLabel(item.lastSeenAt) });
+
+  const add = el('button', { class: 'button button-quiet collected-add', type: 'button', text: 'Add' });
+  add.dataset.action = 'collect';
+  const actions = el('span', { class: 'row-actions' }, [add]);
+
+  row.append(link, address, visits, when, actions);
+  return row;
+}
+
+function renderCollected() {
+  const rows = collectedRows();
+  const totals = summarise(collectedSnapshot?.items ?? [], collectedHeld());
+
+  collectedList.dataset.view = currentView;
+  collected.hidden = rows.length === 0;
+
+  if (rows.length === 0) {
+    collectedList.replaceChildren();
+    collectedCount.textContent = '';
+    return;
+  }
+
+  collectedList.replaceChildren(...rows.map(collectedRowFor));
+  collectedCount.textContent = `${totals.addresses} ${totals.addresses === 1 ? 'address' : 'addresses'} · ${
+    totals.visits
+  } ${totals.visits === 1 ? 'visit' : 'visits'}`;
+}
+
+/**
+ * Add a collected row to the vault, then let the extension forget it.
+ *
+ * The order matters: the bookmark is written first, so a lost reply leaves a duplicate the person can dismiss
+ * rather than a link that was never saved. A row that is already in the vault is promoted away and said so.
+ */
+function approveCollected(url) {
+  try {
+    const { document: next, bookmark } = addBookmark(state.document, { url, name: '' }, Date.now);
+    state.document = next;
+    render();
+    saveNow();
+    announce(`Added ${labelOf(bookmark)}`);
+    fetchAndStoreIcon(bookmark.id, bookmark.hostname);
+    void collectorBridge.promote([url]);
+    void loadCollected();
+  } catch (error) {
+    if (error.code === 'DUPLICATE') {
+      void collectorBridge.promote([url]);
+      void loadCollected();
+      announce('That address is already in your vault.');
+      return;
+    }
+    announce(clean(error.message));
+  }
+}
+
+collectedList.addEventListener('click', (event) => {
+  const button = event.target.closest?.('[data-action="collect"]');
+  if (!button) return;
+  const row = button.closest('.row');
+  if (row?.dataset.url) approveCollected(row.dataset.url);
+});
 
 /* ------------------------------------------------------------------- actions */
 

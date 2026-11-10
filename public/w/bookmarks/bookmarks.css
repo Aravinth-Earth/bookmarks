@@ -1075,3 +1075,53 @@ body.modal-open {
         animation-duration: 0.01ms !important;
     }
 }
+
+
+/* ---------------------------------------------------------------- collected links */
+
+/* The extension's rows, below the vault's own. The markup is the vault's row, so pills and list both come for
+   free; only the heading, the rule above it and the indentation of a grouped row are this section's own. */
+.collected {
+    margin-top: 1.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border, #2a2f36);
+}
+
+.collected-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin: 0 0 0.35rem;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.collected-count {
+    color: var(--text-muted, #6e7681);
+    font-size: 0.875rem;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+}
+
+.collected .view-hint {
+    margin: 0 0 0.5rem;
+}
+
+/* A grouped row holds the rows under it, and the indent is the only thing that says so. Pills never indent: a
+   chip is a chip, and its count already states what it rolls up. */
+.collected-list .row[data-depth='1'] .row-link {
+    padding-left: 1rem;
+}
+
+.collected-list .row[data-depth='2'] .row-link {
+    padding-left: 2rem;
+}
+
+.collected-list[data-view='pills'] .row .row-link {
+    padding-left: 0;
+}
+
+.collected-add {
+    white-space: nowrap;
+}
