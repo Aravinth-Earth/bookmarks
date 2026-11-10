@@ -20,6 +20,20 @@ sync only ever moves the sealed blob.
 - **No third-party code.** No CDN, no web font, no analytics, no tracker, no vendor icon
   service. The page loads only files this Worker serves.
 
+## Collected links (an optional extension)
+
+Beside the vault there is an optional companion extension, in `extension/`. Installed, it counts the addresses this
+browser opens and lists them under the vault's own list as a second section, where the ones worth keeping can be
+added. It is a separate, opt-in install: the vault works exactly as it does without it.
+
+Nothing collected is in the vault until it is added. The list lives in the extension's own local storage, is never
+synced, and cannot reach the sealed blob on its own — so it is local only whether or not sync is on. Turning it on,
+how long and how many rows are kept, what each site is recorded as, and what is never collected are all decided in
+Settings → Collected links inside the vault, sealed with the vault and pushed to the extension.
+
+The extension asks for `tabs` (the permission a browser describes as reading your browsing history), `storage` and
+`alarms`, and makes no network request at all; `npm run check` fails if that stops being true.
+
 ## Layout
 
 ```
@@ -34,6 +48,7 @@ public/w/bookmarks/sync.js    the client half: sign in, pull, push
 public/w/bookmarks/wordlist.js   the 1,296 words a phrase is drawn from
 tests/                        node --test, no dependencies
 scripts/check.mjs             the guards that run before a deploy
+extension/                    the optional companion extension (MV3, unpacked during development)
 ```
 
 ## Hosting

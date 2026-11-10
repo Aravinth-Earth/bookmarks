@@ -1467,7 +1467,8 @@ function render() {
     el('span', { 'aria-hidden': 'true' }),
     el('span', { text: 'Name' }),
     el('span', { text: 'Address' }),
-    el('span', { class: 'clicks', text: 'Clicks' }),
+    /* The number counts uses, not clicks: a bookmark opened from the browser's own list rises too. */
+    el('span', { class: 'clicks', text: 'Uses' }),
     el('span', { class: 'row-when', text: 'Last used' }),
     el('span')
   ]);
@@ -2338,7 +2339,9 @@ function openEditModal(bookmark) {
         name
       ]),
       el('label', { class: 'field' }, [
-        el('span', { class: 'field-label', text: 'Clicks' }),
+        /* Only the clicks made from this list are editable; the browser's own opens are counted and mirrored, so
+           they cannot be typed over. */
+        el('span', { class: 'field-label', text: 'Clicks from this list' }),
         clicks
       ]),
       el('label', { class: 'confirm-saved' }, [pinned, el('span', { text: 'Pin to the top' })]),
