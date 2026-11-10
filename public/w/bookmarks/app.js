@@ -138,6 +138,12 @@ const viewHint = $('view-hint');
 const collected = $('collected');
 const collectedList = $('collected-list');
 const collectedCount = $('collected-count');
+const collectedBar = $('collected-bar');
+const collectedBarCount = $('collected-bar-count');
+const collectedScope = $('collected-scope');
+const collectedAddButton = $('collected-add');
+const collectedDismissButton = $('collected-dismiss');
+const collectedExcludeButton = $('collected-exclude');
 const vaultStatus = $('vault-status');
 const status = $('status');
 const syncRefusal = $('sync-refusal');
@@ -181,6 +187,10 @@ function applyAppearance() {
   /* Pills are for opening pages; editing and deleting live in the list, so say where they are. */
   viewHint.hidden =
     currentView !== 'pills' || (state.document?.bookmarks.length ?? 0) === 0;
+
+  /* The collected section is the same rows in the same two views, and the bar belongs to the list: toggling has to
+     repaint it now rather than waiting for the next render. */
+  if (state.document) renderCollected();
 }
 
 /**
@@ -1744,9 +1754,136 @@ function collectedRowFor(item) {
   add.dataset.action = 'collect';
   const actions = el('span', { class: 'row-actions' }, [add]);
 
-  row.append(link, address, visits, when, actions);
+  const pick = el('input', { type: 'checkbox' });
+  pick.dataset.pick = item.url;
+  pick.checked = collectedPicked.has(item.url);
+  pick.setAttribute('aria-label', `Select ${item.label}`);
+  const pickCell = el('span', { class: 'row-pick' }, [pick]);
+
+  row.append(pickCell, link, address, visits, when, actions);
   return row;
 }
+
+/* Selection belongs to the list view only: in pills there is nothing to tick and nothing to press. */
+const collectedPicked = new Set();
+
+function updateCollectedBar(rows = collectedRows()) {
+  const showing = currentView === 'list' && rows.length > 0;
+  collectedBar.hidden = !showing;
+  if (!showing) return;
+
+  const picked = [...collectedPicked].filter((url) => rows.some((row) => row.url === url));
+  collectedBarCount.textContent =
+    picked.length === 0 ? `${rows.length} collected` : `${picked.length} of ${rows.length} selected`;
+
+  for (const button of [collectedAddButton, collectedDismissButton, collectedExcludeButton]) {
+    button.disabled = picked.length === 0;
+  }
+}
+
+/** Add every selected row, in one save rather than one per row. */
+function approveMany(rows) {
+  let next = state.document;
+  let added = 0;
+  let skipped = 0;
+
+  for (const row of rows) {
+    try {
+      const result = addBookmark(next, { url: row.url, name: '', openCount: row.visits }, Date.now);
+      next = result.document;
+      added += 1;
+    } catch (error) {
+      if (error.code === 'DUPLICATE') {
+        skipped += 1;
+        continue;
+      }
+      announce(clean(error.message));
+      return;
+    }
+  }
+
+  if (added > 0) {
+    state.document = next;
+    render();
+    saveNow();
+  }
+
+  collectedPicked.clear();
+  announce(
+    added === 0
+      ? 'Nothing new to add — those are already in the vault.'
+      : `Added ${added} ${added === 1 ? 'link' : 'links'}${skipped > 0 ? `, ${skipped} already saved` : ''}.`
+  );
+  void loadCollected();
+}
+
+function pickedRows() {
+  const rows = collectedRows();
+  return rows.filter((row) => collectedPicked.has(row.url));
+}
+
+/* One exclusion per selected row, at the scope the bar names. A path exclusion keeps the host and the path; the
+   other two keep the host alone, because that is what those scopes match. */
+function excludeMany(rows, scope) {
+  const entries = new Map();
+  for (const row of rows) {
+    const host = hostOf(row.url);
+    let value = host;
+    if (scope === 'path') {
+      try {
+        value = `${host}${new URL(row.url).pathname}`;
+      } catch {
+        value = host;
+      }
+    }
+    entries.set(`${scope}|${value}`, { scope, value });
+  }
+
+  collectedPicked.clear();
+  void collectorBridge.exclude([...entries.values()]).then(() => loadCollected());
+  announce(`Excluding ${entries.size} ${entries.size === 1 ? 'site' : 'sites'}.`);
+}
+
+collectedBar.addEventListener('click', (event) => {
+  const picked = pickedRows();
+  if (picked.length === 0) return;
+
+  if (event.target === collectedAddButton) {
+    approveMany(picked);
+    return;
+  }
+
+  if (event.target === collectedDismissButton) {
+    const urls = picked.map((row) => row.url);
+    collectedPicked.clear();
+    void collectorBridge.dismiss(urls).then(() => loadCollected());
+    announce(`Dismissed ${urls.length}.`);
+    return;
+  }
+
+  if (event.target === collectedExcludeButton) {
+    excludeMany(picked, collectedScope.value);
+  }
+});
+
+collectedList.addEventListener('change', (event) => {
+  const all = event.target.closest?.('#collected-all');
+  if (all) {
+    const rows = collectedRows();
+    collectedPicked.clear();
+    if (all.checked) for (const row of rows) collectedPicked.add(row.url);
+    for (const box of collectedList.querySelectorAll('[data-pick]')) box.checked = all.checked;
+    updateCollectedBar();
+    return;
+  }
+
+  const box = event.target.closest?.('[data-pick]');
+  if (!box) return;
+
+  if (box.checked) collectedPicked.add(box.dataset.pick);
+  else collectedPicked.delete(box.dataset.pick);
+  updateCollectedBar();
+});
 
 function renderCollected() {
   const rows = collectedRows();
@@ -1763,13 +1900,32 @@ function renderCollected() {
   if (rows.length === 0) {
     collectedList.replaceChildren();
     collectedCount.textContent = '';
+    collectedPicked.clear();
+    updateCollectedBar(rows);
     return;
   }
 
-  collectedList.replaceChildren(...rows.map(collectedRowFor));
+  const all = el('input', { type: 'checkbox' });
+  all.id = 'collected-all';
+  all.checked = rows.length > 0 && rows.every((row) => collectedPicked.has(row.url));
+  all.setAttribute('aria-label', 'Select every collected row');
+
+  /* The list is a table, so it gets a header; the pills view hides it with the rest of the furniture. */
+  const head = el('li', { class: 'row row-head' }, [
+    el('span', { class: 'row-pick' }, [all]),
+    el('span', { 'aria-hidden': 'true' }),
+    el('span', { text: 'Name' }),
+    el('span', { text: 'Address' }),
+    el('span', { class: 'clicks', text: 'Visits' }),
+    el('span', { class: 'row-when', text: 'Last seen' }),
+    el('span')
+  ]);
+
+  collectedList.replaceChildren(head, ...rows.map(collectedRowFor));
   collectedCount.textContent = `${totals.addresses} ${totals.addresses === 1 ? 'address' : 'addresses'} · ${
     totals.visits
   } ${totals.visits === 1 ? 'visit' : 'visits'}`;
+  updateCollectedBar(rows);
 }
 
 /**

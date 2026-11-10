@@ -1126,3 +1126,60 @@ body.modal-open {
     white-space: nowrap;
 }
 
+
+
+/* ------------------------------------------------------------------ collected: bulk selection */
+
+/* A collected row gains one cell for its checkbox, so this list carries seven tracks where the vault's own carries
+   six. The link still covers the tile and the name, which is the target a person aims at. */
+.collected-list .row {
+    grid-template-columns: 1.75rem 2.125rem minmax(0, 1.2fr) minmax(0, 1fr) 4rem 5.5rem 6rem;
+}
+
+.collected-list .row-link {
+    grid-column: 2 / 4;
+}
+
+.collected-list .row-head .row-pick,
+.collected-list .row .row-pick {
+    display: flex;
+    justify-content: center;
+}
+
+/* Pills are a reading view: no checkbox, no bar, nothing to press. */
+.list[data-view='pills'] .row .row-pick {
+    display: none;
+}
+
+.list[data-view='pills'] .row-head {
+    display: none;
+}
+
+.collected-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 0.6rem;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border, #2a2f36);
+    border-radius: var(--radius-md, 6px);
+    background: var(--bg-elevated, #161b22);
+}
+
+.collected-bar-count {
+    margin-right: auto;
+    color: var(--text-muted, #6e7681);
+    font-size: var(--font-size-xs, 0.75rem);
+    font-variant-numeric: tabular-nums;
+}
+
+.collected-scope select {
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--border, #2a2f36);
+    border-radius: var(--radius-md, 6px);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: var(--font-size-xs, 0.75rem);
+}

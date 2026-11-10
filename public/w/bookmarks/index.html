@@ -166,6 +166,21 @@
                 </h2>
                 <p class="view-hint">Kept by the browser extension. Nothing here is in your vault until you add it.</p>
 
+                <div id="collected-bar" class="collected-bar" role="group" aria-label="Selected collected links" hidden>
+                    <span id="collected-bar-count" class="collected-bar-count"></span>
+                    <button id="collected-add" class="button button-primary" type="button">Add to vault</button>
+                    <button id="collected-dismiss" class="button button-quiet" type="button">Dismiss</button>
+                    <label class="collected-scope">
+                        <span class="visually-hidden">Exclude how</span>
+                        <select id="collected-scope">
+                            <option value="site">Site and subdomains</option>
+                            <option value="host">This hostname</option>
+                            <option value="path">This path</option>
+                        </select>
+                    </label>
+                    <button id="collected-exclude" class="button button-quiet" type="button">Exclude</button>
+                </div>
+
                 <ul id="collected-list" class="list collected-list" data-view="pills" aria-label="Collected links"></ul>
             </section>
         </section>
