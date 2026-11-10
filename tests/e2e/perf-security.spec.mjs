@@ -360,7 +360,7 @@ test('every row link opens in a new tab with noopener', async ({ page }) => {
   await expect(page.locator('#list .row-link')).toHaveCount(1);
 
   /* The collected list reuses this anchor, so both selectors are read. At this port the extension's content script is
-     not injected (its match list names 127.0.0.1:8799), so the collected section cannot be filled here and only the
+     not injected into this origin, so the collected section cannot be filled here and only the
      vault's own links are actually exercised. */
   const links = page.locator('#list a[href], #collected-list a[href]');
   const count = await links.count();

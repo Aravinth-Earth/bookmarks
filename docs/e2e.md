@@ -36,6 +36,20 @@ vault.
 | `vault.spec.mjs` | create a vault, add, search, lock/unlock, duplicate refusal, wrong phrase, pills vs list, settings |
 | `collected.spec.mjs` | off by default, capture, repeat visits, approval, the vault's own count, batch add, dismiss, exclusion, per-site rule, clear, visit floor |
 | `edge.spec.mjs` | non-web pages, search narrowing the section, a `javascript:` address, and a browser with no extension |
+| `roundtrip.spec.mjs` | a vault, a collected page, a sealed backup downloaded, the device wiped, the same vault restored |
+| `a11y.spec.mjs` | names and labels, keyboard reach, focus rings and focus movement, live regions, table and heading structure |
+| `layout.spec.mjs` | overflow and column tracks at phone, tablet and desktop, pills, settings modal, bulk bar, 200% zoom, 320px reflow |
+| `ux.spec.mjs` | first run, refusals, search and sort, lock and unlock, settings, selection, undo, import and export |
+| `perf-security.spec.mjs` | same-origin-only cold load, timings, security headers, sealed bytes, XSS through a name, lock hygiene |
+
+Seventy tests; a full run takes about twelve minutes on a laptop.
+
+## Defects are pinned, not weakened
+
+A test whose requirement the app does not meet yet is written at the real requirement and marked `test.fail`. The run
+stays green, the defect stays visible in the file and in its comment, and fixing the app turns that test red with
+"passed unexpectedly" — which is the reminder to remove the mark. Tests that were softened to pass would be worse than
+no test at all.
 
 ## What cannot be covered here
 

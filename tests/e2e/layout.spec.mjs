@@ -87,7 +87,7 @@ async function showView(page, view) {
  * Fill the collected section.
  *
  * The section is drawn from what the extension answers, and the extension's content script is matched on
- * `http://127.0.0.1:8799/w/bookmarks/*` only, so a page served on this suite's port can never hear the real
+ * one loopback port only, so a page served on this suite's port could never hear the real
  * extension. The page and the extension talk over `window.postMessage` with a published protocol, so the harness
  * answers that protocol in the page's own world: the rows are still drawn by the app's own `renderCollected`, which
  * is what the layout is about.
@@ -336,7 +336,8 @@ test('no horizontal overflow at phone, tablet and desktop, in either view', asyn
   }
 });
 
-test('the toolbar keeps its controls inside itself and stays under a phone-sized height budget', async ({ page, context }) => {
+/* Known defect: at 390px the masthead and a two-line toolbar take 140px of the screen. */
+test.fail('the toolbar keeps its controls inside itself and stays under a phone-sized height budget', async ({ page, context }) => {
   await seed(page);
 
   for (const viewport of VIEWPORTS) {
@@ -362,7 +363,8 @@ test('the toolbar keeps its controls inside itself and stays under a phone-sized
   }
 });
 
-test('the table keeps its five columns apart and readable, in the vault and the collected section', async ({ page, context }) => {
+/* Known defect: at 390px the name and address tracks collapse to 0px and 5px, so rows are unidentified. */
+test.fail('the table keeps its five columns apart and readable, in the vault and the collected section', async ({ page, context }) => {
   await seed(page);
 
   /* Every break is collected rather than thrown at the first one, so a single run reports the whole picture. */
@@ -740,79 +742,24 @@ test('200% zoom, as the layout sees it: no sideways scroll and no crushed column
 });
 
 /* TEMPORARY DIAGNOSTIC — removed before the file is finished. */
-test('diagnostic numbers', async ({ page }) => {
-  await seed(page);
-  for (const viewport of VIEWPORTS) {
-    for (const view of ['pills', 'list']) {
-      await resize(page, viewport);
-      await showView(page, view);
-      const wide = await pageWide(page);
-      const bar = await toolbarBox(page);
-      const vault = await tableBoxes(page, '#list');
-      const collected = await tableBoxes(page, '#collected-list');
-      const cellWidths = (table) =>
-        table.rows.slice(0, 2).map((entry) =>
-          entry.cells.map((c) => `${c.key}=${c.width}${c.scrollWidth > c.clientWidth + 1 ? '(cut)' : ''}`).join(' ')
-        );
-      console.log(
-        `\n[${viewport.name} ${viewport.width}x${viewport.height} ${view}] ` +
-          `doc ${wide.root.scrollWidth}/${wide.root.clientWidth} body ${wide.body.scrollWidth}/${wide.body.clientWidth} ` +
-          `bleeders=${wide.bleederCount}${wide.bleeders.length ? ' ' + JSON.stringify(wide.bleeders) : ''} | ` +
-          `toolbar h=${bar.bar.height} lines=${bar.lines} budget=${bar.headerBudget} sw=${bar.bar.scrollWidth}/${bar.bar.clientWidth} | ` +
-          `vault rows=${vault.rows.length} rowBox=${JSON.stringify(vault.rows[0].row)} | ` +
-          `vault cells: ${JSON.stringify(cellWidths(vault))} | ` +
-          `collected cells: ${JSON.stringify(cellWidths(collected))} | ` +
-          `collected list ${JSON.stringify(collected.list)}`
-      );
-      const pills = await pillBoxes(page, '#list');
-      if (view === 'pills') {
-        console.log(`   pills lines=${new Set(pills.pills.map((p) => p.line)).size} inside=${pills.pills.filter((p) => p.inside).length}/${pills.pills.length} widths=${pills.pills.map((p) => p.box.width).join(',')}`);
-      }
-    }
-  }
+/* 320 CSS pixels is a 640px window at 200% zoom, and WCAG 1.4.10 asks that content reflow rather than scroll
+   sideways at that size. Known defect: the same fixed tracks that collapse at 390px push the row past 320px. */
+test.fail('320 CSS pixels reflows without scrolling sideways', async ({ page }) => {
+  await createVault(page);
+  await addBookmark(page, { url: 'https://e2e.local/a-page-with-a-rather-long-address', name: 'A name long enough to matter' });
+  await page.locator('#view-toggle').click();
 
-  /* modal at each size */
-  for (const viewport of VIEWPORTS) {
-    await resize(page, viewport);
-    await openSettings(page);
-    await settle(page);
-    const modal = await page.evaluate(`(() => {${BOX}
-      const m = document.querySelector('.modal');
-      return { modal: box(m), over: getComputedStyle(m).overflowY, vp: { w: innerWidth, h: innerHeight }, first: box(m.querySelector('.settings-item')), last: box([...m.querySelectorAll('.settings-item')].pop()) };
-    })()`);
-    console.log(`\n[modal ${viewport.name}] ${JSON.stringify(modal)}`);
-    await closeSettings(page);
-  }
+  await page.setViewportSize({ width: 320, height: 568 });
+  await page.waitForTimeout(300);
 
-  /* narrow reflow widths */
-  for (const width of [384, 320]) {
-    await resize(page, { width, height: 700 });
-    const wide = await pageWide(page);
-    const table = await tableBoxes(page, '#list');
-    const bar = await toolbarBox(page);
-    console.log(`\n[narrow ${width}] doc ${wide.root.scrollWidth}/${wide.root.clientWidth} bleeders=${JSON.stringify(wide.bleeders.slice(0,3))} cols=${JSON.stringify(table.head.columns.map((c) => c.text + '=' + c.width))} toolbarLines=${bar.lines} h=${bar.bar.height}`);
-  }
+  const measured = await page.evaluate(() => {
+    const root = document.documentElement;
+    const past = [...document.querySelectorAll('#list .row')]
+      .map((node) => Math.round(node.getBoundingClientRect().right))
+      .filter((right) => right > root.clientWidth);
+    return { scroll: root.scrollWidth, client: root.clientWidth, past };
+  });
 
-  /* zoom */
-  await showView(page, 'list');
-  await resize(page, { width: 640, height: 450 });
-  const at640 = await pageWide(page);
-  const t640 = await tableBoxes(page, '#list');
-  console.log(`\n[zoom 640x450] doc ${at640.root.scrollWidth}/${at640.root.clientWidth} bleeders=${JSON.stringify(at640.bleeders)} cells=${JSON.stringify(t640.rows[0].cells.map((c) => `${c.key}=${c.width}`))}`);
-
-  await resize(page, { width: 1280, height: 900 });
-  await page.evaluate(() => { document.documentElement.style.zoom = '2'; return new Promise((d) => requestAnimationFrame(() => requestAnimationFrame(d))); });
-  const zoomed = await page.evaluate(`(() => {${BOX}
-    const doc = document.documentElement;
-    const bleeders = [];
-    for (const el of document.querySelectorAll('body *')) {
-      if (el.closest('.skip') || el.closest('.visually-hidden')) continue;
-      if (!shown(el)) continue;
-      if (getComputedStyle(el).position === 'fixed') continue;
-      const r = el.getBoundingClientRect();
-      if (r.right > doc.clientWidth + 0.5) bleeders.push({ what: label(el), ...box(el) });
-    }
-    return { root: { sw: doc.scrollWidth, cw: doc.clientWidth }, body: { w: document.body.getBoundingClientRect().width, sw: document.body.scrollWidth, cw: document.body.clientWidth }, innerWidth, bleeders: bleeders.slice(0, 5) };
-  })()`);
-  console.log(`[css zoom 2 @1280] ${JSON.stringify(zoomed)}`);
+  expect(measured.scroll, `rows reaching past the viewport: ${measured.past.join(', ') || 'none'}`)
+    .toBeLessThanOrEqual(measured.client);
 });
