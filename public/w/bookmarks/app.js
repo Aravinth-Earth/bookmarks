@@ -55,7 +55,7 @@ import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
 import { formatStamp } from './stamps.js';
 import { createBridge, isSnapshot } from './collector.js';
-import { DEFAULT_LEVEL, DEFAULT_ORDER, LEVELS, ORDERS, fold, openCounts, summarise } from './collected.js';
+import { DEFAULT_LEVEL, DEFAULT_ORDER, LEVELS, ORDERS, addressLabel, fold, openCounts, summarise } from './collected.js';
 
 const store = createVault(indexedDbAdapter());
 
@@ -1423,7 +1423,9 @@ function rowFor(bookmark) {
   row.style.setProperty('--tile-seed', background);
   row.style.setProperty('--tile-fg', foreground);
 
-  const host = el('span', { class: 'row-host', text: bookmark.hostname });
+  /* The address column carries the address the browser shows. It used to carry the hostname, so three bookmarks on
+     one host read as three identical rows. */
+  const host = el('span', { class: 'row-host', text: addressLabel(bookmark.url) });
 
   const clicks = el('span', {
     class: 'clicks',
@@ -1759,6 +1761,7 @@ function collectedRowFor(item) {
   row.dataset.kind = item.kind;
   row.dataset.depth = String(item.depth);
   row.dataset.visits = String(item.visits);
+  row.dataset.label = item.label;
   row.style.setProperty('--tile-seed', background);
   row.style.setProperty('--tile-fg', foreground);
 
@@ -1809,7 +1812,11 @@ function approveMany(rows) {
 
   for (const row of rows) {
     try {
-      const result = addBookmark(next, { url: row.url, name: '', openCount: row.visits }, Date.now);
+      const result = addBookmark(
+        next,
+        { url: row.url, name: nameForCollected(row), openCount: row.visits },
+        Date.now
+      );
       next = result.document;
       added += 1;
     } catch (error) {
@@ -1954,13 +1961,24 @@ function renderCollected() {
  * The order matters: the bookmark is written first, so a lost reply leaves a duplicate the person can dismiss
  * rather than a link that was never saved. A row that is already in the vault is promoted away and said so.
  */
-function approveCollected(url, visits) {
+/* A collected row is named by its path when it has one: three pages of one host would otherwise all be called the
+   host, and the name is the only column that tells them apart at a glance. */
+function nameForCollected(row) {
+  try {
+    const path = new URL(row.url).pathname.replace(/^\/+|\/+$/g, '');
+    return path;
+  } catch {
+    return '';
+  }
+}
+
+function approveCollected(url, visits, label = '') {
   try {
     /* The count crosses with the row: the visits were made to this address, and starting the bookmark at zero
        would throw away the only thing the extension was counting. */
     const { document: next, bookmark } = addBookmark(
       state.document,
-      { url, name: '', openCount: Number.isInteger(visits) ? visits : 0 },
+      { url, name: nameForCollected({ label }), openCount: Number.isInteger(visits) ? visits : 0 },
       Date.now
     );
     state.document = next;
@@ -1987,7 +2005,7 @@ collectedList.addEventListener('click', (event) => {
   const button = event.target.closest?.('[data-action="collect"]');
   if (!button) return;
   const row = button.closest('.row');
-  if (row?.dataset.url) approveCollected(row.dataset.url, Number(row.dataset.visits));
+  if (row?.dataset.url) approveCollected(row.dataset.url, Number(row.dataset.visits), row.dataset.label);
 });
 
 /* ------------------------------------------------------------------- actions */
