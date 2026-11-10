@@ -164,6 +164,13 @@ export function addBookmark(document, input, now = Date.now) {
     throw fail('INVALID_CLICKS', 'a click count is a whole number, zero or more');
   }
 
+  /* Opens made in the browser are counted by the extension and mirrored here, so a bookmark's count means the same
+     thing whether it was opened from this list or from the browser's own bookmarks and history. */
+  const openCount = input?.openCount ?? 0;
+  if (!Number.isInteger(openCount) || openCount < 0) {
+    throw fail('INVALID_CLICKS', 'an open count is a whole number, zero or more');
+  }
+
   const at = iso(now);
   const bookmark = {
     id: nextId(),
@@ -176,6 +183,7 @@ export function addBookmark(document, input, now = Date.now) {
        site's real title still finds it. */
     search: typeof input?.search === 'string' ? input.search.trim() : '',
     clickCount,
+    openCount,
     pinned: Boolean(input?.pinned),
     hideLabel: Boolean(input?.hideLabel),
     icon: input?.icon ?? null,
@@ -189,6 +197,32 @@ export function addBookmark(document, input, now = Date.now) {
     document: { ...document, bookmarks: [...document.bookmarks, bookmark] },
     bookmark
   };
+}
+
+/**
+ * Record how many times the browser has opened this bookmark.
+ *
+ * The extension's count is a running total, so this is a mirror and never an addition: the same total arriving twice
+ * leaves the bookmark where it was, and a lower total is ignored.
+ */
+export function setOpenCount(document, id, count, now = Date.now) {
+  assertDocument(document, 'the document');
+  if (!Number.isInteger(count) || count < 0) {
+    throw fail('INVALID_CLICKS', 'an open count is a whole number, zero or more');
+  }
+
+  const at = findIndex(document, id);
+  const current = document.bookmarks[at];
+  if ((current.openCount ?? 0) >= count) return document;
+
+  const bookmarks = [...document.bookmarks];
+  bookmarks[at] = { ...current, openCount: count, updatedAt: iso(now) };
+  return { ...document, bookmarks };
+}
+
+/** How many times a bookmark has been used: opened from this list, or opened in the browser. */
+export function useCount(bookmark) {
+  return (bookmark.clickCount ?? 0) + (bookmark.openCount ?? 0);
 }
 
 /** Change one bookmark. A URL change is re-normalised and re-checked for duplicates. */
@@ -341,7 +375,7 @@ export function sortBookmarks(document, mode = 'clicks') {
 
   const order = {
     clicks: (left, right) =>
-      right.clickCount - left.clickCount || compareNames(left, right),
+      useCount(right) - useCount(left) || compareNames(left, right),
     recent: (left, right) => right.createdAt.localeCompare(left.createdAt),
     name: (left, right) => compareNames(left, right),
     lastClicked: (left, right) =>
@@ -471,6 +505,9 @@ export function mergeBookmark(left, right) {
     createdAt: earlier(left.createdAt, right.createdAt),
     updatedAt: later(left.updatedAt, right.updatedAt),
     clickCount: Math.max(left.clickCount, right.clickCount),
+    /* Each device counts its own browser's opens, so a merge keeps the larger number rather than adding two
+       devices' totals together — adding would grow the count every time the same merge ran. */
+    openCount: Math.max(left.openCount ?? 0, right.openCount ?? 0),
     lastClickedAt: later(left.lastClickedAt, right.lastClickedAt)
   };
 }

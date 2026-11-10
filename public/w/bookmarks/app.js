@@ -17,8 +17,10 @@ import {
   recordClick,
   searchNarrowsList,
   sortBookmarks,
+  setOpenCount,
   togglePin,
-  updateBookmark
+  updateBookmark,
+  useCount
 } from './bookmarks.js';
 import {
   deriveAccount,
@@ -53,7 +55,7 @@ import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
 import { formatStamp } from './stamps.js';
 import { createBridge, isSnapshot } from './collector.js';
-import { DEFAULT_LEVEL, DEFAULT_ORDER, fold, summarise } from './collected.js';
+import { DEFAULT_LEVEL, DEFAULT_ORDER, fold, openCounts, summarise } from './collected.js';
 
 const store = createVault(indexedDbAdapter());
 
@@ -1412,8 +1414,8 @@ function rowFor(bookmark) {
 
   const clicks = el('span', {
     class: 'clicks',
-    text: String(bookmark.clickCount),
-    'aria-label': `${bookmark.clickCount} clicks`
+    text: String(useCount(bookmark)),
+    'aria-label': `${useCount(bookmark)} uses`
   });
 
   const when = el('span', { class: 'row-when', text: lastUsedLabel(bookmark) });
@@ -1488,14 +1490,41 @@ function collectedKey(snapshot) {
 
 let collectedFingerprint = null;
 
+/**
+ * Move the extension's totals onto the bookmarks the vault already holds.
+ *
+ * A saved bookmark keeps counting when it is opened from the browser's own bookmarks or history, because the
+ * extension counts the address and not the route. Returns whether anything moved, which is what tells the page to
+ * repaint the vault as well as the section.
+ */
+function applyOpenCounts(snapshot) {
+  if (!snapshot || !state.document) return false;
+
+  const changes = openCounts(snapshot.items, state.document.bookmarks);
+  if (changes.length === 0) return false;
+
+  let next = state.document;
+  for (const change of changes) next = setOpenCount(next, change.id, change.openCount, Date.now);
+  state.document = next;
+  return true;
+}
+
 async function loadCollected() {
   const reply = await collectorBridge.request();
   const next = isSnapshot(reply) ? reply : null;
   const key = collectedKey(next);
-  if (key === collectedFingerprint) return;
+  const countsMoved = applyOpenCounts(next);
+
+  if (key === collectedFingerprint && !countsMoved) return;
 
   collectedFingerprint = key;
   collectedSnapshot = next;
+
+  if (countsMoved) {
+    render();
+    saveNow();
+    return;
+  }
   renderCollected();
 }
 
@@ -1628,7 +1657,7 @@ function approveCollected(url, visits) {
        would throw away the only thing the extension was counting. */
     const { document: next, bookmark } = addBookmark(
       state.document,
-      { url, name: '', clickCount: Number.isInteger(visits) ? visits : 0 },
+      { url, name: '', openCount: Number.isInteger(visits) ? visits : 0 },
       Date.now
     );
     state.document = next;
@@ -1636,7 +1665,9 @@ function approveCollected(url, visits) {
     saveNow();
     announce(`Added ${labelOf(bookmark)}`);
     fetchAndStoreIcon(bookmark.id, bookmark.hostname);
-    void collectorBridge.promote([url]);
+    /* The row is not deleted: the extension keeps counting this address, and the count keeps arriving here, which
+       is what makes a bookmark opened from the browser's own list count too. The section hides it because the vault
+       holds it, so it can never appear in both places. */
     void loadCollected();
   } catch (error) {
     if (error.code === 'DUPLICATE') {

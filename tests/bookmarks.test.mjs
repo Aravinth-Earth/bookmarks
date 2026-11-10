@@ -388,3 +388,29 @@ test('no operation mutates the document it was given', () => {
 
   assert.equal(JSON.stringify(document), before);
 });
+
+
+test('a bookmark counts every use: the ones opened here and the ones opened in the browser', async () => {
+  const { addBookmark, setOpenCount, useCount } = await import('../public/w/bookmarks/bookmarks.js');
+
+  const document = { schema: 1, bookmarks: [], tombstones: [], prefs: { iconOnly: false } };
+  const { document: added, bookmark } = addBookmark(document, { url: 'https://a.example/x', name: 'A' });
+
+  assert.equal(bookmark.openCount, 0);
+  assert.equal(useCount(bookmark), 0);
+
+  const counted = setOpenCount(added, bookmark.id, 4);
+  assert.equal(useCount(counted.bookmarks[0]), 4);
+  assert.equal(setOpenCount(counted, bookmark.id, 4), counted, 'the same total is not a change');
+  assert.equal(setOpenCount(counted, bookmark.id, 2), counted, 'a smaller total is ignored');
+});
+
+test('a merge keeps the larger open count rather than adding two devices together', async () => {
+  const { mergeBookmark } = await import('../public/w/bookmarks/bookmarks.js');
+
+  const base = { id: 'a', url: 'https://a.example/', clickCount: 1, openCount: 7, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
+  const other = { ...base, openCount: 3, updatedAt: '2026-01-02T00:00:00.000Z' };
+
+  assert.equal(mergeBookmark(base, other).openCount, 7);
+  assert.equal(mergeBookmark({ ...base, openCount: 10 }, other).openCount, 10);
+});

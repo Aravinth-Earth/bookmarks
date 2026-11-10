@@ -167,6 +167,29 @@ export function fold(items, { level = DEFAULT_LEVEL, order = DEFAULT_ORDER, held
   return rows;
 }
 
+/**
+ * The counts the vault's own bookmarks should take from the extension.
+ *
+ * Every address the extension counted keeps counting whether or not it is in the vault, so opening a saved bookmark
+ * from the browser's own list raises its count here too. The extension's number is a total, so a bookmark only ever
+ * moves up to it — returning it twice changes nothing.
+ */
+export function openCounts(items, bookmarks) {
+  const visits = new Map(
+    (Array.isArray(items) ? items : []).map((item) => [item.url, Number.isInteger(item.visits) ? item.visits : 0])
+  );
+
+  const changes = [];
+  for (const bookmark of Array.isArray(bookmarks) ? bookmarks : []) {
+    const total = visits.get(bookmark.url);
+    if (total === undefined) continue;
+    if (total > (Number.isInteger(bookmark.openCount) ? bookmark.openCount : 0)) {
+      changes.push({ id: bookmark.id, openCount: total });
+    }
+  }
+  return changes;
+}
+
 /** What the heading counts, and what the rows add up to. */
 export function summarise(items, held = []) {
   const heldSet = new Set(held);
