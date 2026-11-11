@@ -888,11 +888,87 @@ body.modal-open {
     gap: var(--space-2, 0.5rem);
 }
 
+/* ---- the settings sheet ---------------------------------------------------------------- */
+
+/* Two rows per line where there is room for them, three where there is a lot: the sheet used to be one long column
+   that the reader had to scroll through one switch at a time. */
+.settings-modal {
+    max-width: 46rem;
+}
+
+.settings-modal .modal-body {
+    max-height: 78vh;
+}
+
+.settings-chips {
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    margin: 0 0 0.7rem;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 0.15rem 0 0.45rem;
+    background: linear-gradient(var(--bg-secondary, #121620) 70%, transparent);
+}
+
+.settings-chip {
+    border: 1px solid var(--border, #21262d);
+    background: var(--bg-inset, #0d1117);
+    color: var(--text-muted, #6e7681);
+    border-radius: 999px;
+    padding: 0.28rem 0.7rem;
+    font: inherit;
+    font-size: var(--font-size-xs, 0.72rem);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.settings-chip:hover {
+    border-color: var(--border-strong, #30363d);
+    color: var(--text-primary, #c9d1d9);
+}
+
+.settings-chip.is-current {
+    background: color-mix(in srgb, var(--accent, #58a6ff) 18%, transparent);
+    border-color: color-mix(in srgb, var(--accent, #58a6ff) 45%, transparent);
+    color: var(--text-primary, #c9d1d9);
+}
+
+.settings-list {
+    display: grid;
+    gap: 0.4rem;
+    align-content: start;
+}
+
+@media (min-width: 46rem) {
+    .settings-modal .settings-list {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+/* The sheet is one width at every window size, so its rows are two per line at every window size: three columns of
+   cards inside a 46rem sheet were cramped on a monitor and doubled on a laptop, which read as two different designs. */
+/* A change says so where it was made, and the row holds still while it says it. */
+.settings-saved {
+    color: var(--success, #3fb950);
+    font-size: var(--font-size-xs, 0.7rem);
+    white-space: nowrap;
+}
+
+.settings-saved::before {
+    content: '✓ ';
+}
+
+.settings-item.just-saved {
+    border-color: color-mix(in srgb, var(--success, #3fb950) 55%, var(--border, #21262d));
+}
+
 .settings-item {
     display: grid;
     gap: 0.15rem;
     width: 100%;
-    padding: 0.65rem 0.75rem;
+    padding: 0.5rem 0.6rem;
     background: var(--bg-inset, #0d1117);
     border: 1px solid var(--border, #21262d);
     border-radius: var(--radius-lg, 8px);

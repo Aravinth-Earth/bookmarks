@@ -136,7 +136,7 @@ test('an exclusion stops collection and takes the rows it covered with it', asyn
   await expectCollectedCount(page, 1);
 
   const modal = await openSettings(page);
-  await settingsItem(modal, /exclude a site or a page/i).click();
+  await (await settingsItem(modal, /exclude a site or a page/i)).click();
   await page.locator('#modal-root input[type=text]').fill('e2e.local');
   await page.locator('#modal-root select').selectOption('site');
   await page.locator('#modal-root').getByRole('button', { name: /^exclude$/i }).click();
@@ -154,7 +154,7 @@ test('a site rule records one row per hostname instead of one per page', async (
   await enableCollection(page);
 
   const modal = await openSettings(page);
-  await settingsItem(modal, /add a site rule/i).click();
+  await (await settingsItem(modal, /add a site rule/i)).click();
   await page.locator('#modal-root input[type=text]').fill('e2e.local');
   await page.locator('#modal-root select').selectOption('hosts');
   await page.locator('#modal-root').getByRole('button', { name: /^save$/i }).click();
@@ -182,13 +182,13 @@ test('turning collection back on fills the section without a reload', async ({ p
 
   /* Off: the addresses stay in the browser but the section goes, which is what makes them look lost. */
   const off = await openSettings(page);
-  await settingsItem(off, /collection: on|collect links on this device/i).click();
+  await (await settingsItem(off, /collection: on|collect links on this device/i)).click();
   await closeSettings(page);
   await expect(page.locator('#collected')).toBeHidden({ timeout: 20_000 });
 
   /* On again, with no reload: the list comes back on its own. */
   const on = await openSettings(page);
-  await settingsItem(on, /collect links on this device/i).click();
+  await (await settingsItem(on, /collect links on this device/i)).click();
   await closeSettings(page);
   await expectCollectedCount(page, 1);
 });
@@ -202,7 +202,7 @@ test('clearing removes what was collected and keeps the vault', async ({ page, c
   await expectCollectedCount(page, 1);
 
   const modal = await openSettings(page);
-  await settingsItem(modal, /clear collected links/i).click();
+  await (await settingsItem(modal, /clear collected links/i)).click();
   await page.locator('#modal-root').getByRole('button', { name: /^clear$/i }).click();
 
   await expect(page.locator('#collected')).toBeHidden({ timeout: 20_000 });

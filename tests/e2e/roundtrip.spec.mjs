@@ -37,7 +37,7 @@ test('a vault, a collected page, a backup, a wiped device, and the same vault ba
   /* Export: the sealed backup is a download, so it is captured rather than found in a folder. */
   const modal = await openSettings(page);
   const download = page.waitForEvent('download');
-  await settingsItem(modal, /sealed backup/i).click();
+  await (await settingsItem(modal, /sealed backup/i)).click();
   const backup = testInfo.outputPath('vault-backup.json');
   await (await download).saveAs(backup);
   await closeSettings(page);
@@ -47,7 +47,7 @@ test('a vault, a collected page, a backup, a wiped device, and the same vault ba
 
   /* Wipe the device, which is what someone would do before handing a laptop on. */
   const clearModal = await openSettings(page);
-  await settingsItem(clearModal, /clear this device/i).click();
+  await (await settingsItem(clearModal, /clear this device/i)).click();
   await page.locator('#modal-root').getByRole('button', { name: /^clear/i }).click();
   await expect(page.locator('#lock-view')).toBeVisible({ timeout: 30_000 });
 

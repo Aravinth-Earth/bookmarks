@@ -688,12 +688,32 @@ test('row text is clipped with an ellipsis, never mid-glyph, and the name column
   }
 });
 
+/**
+ * Two readings that agree, or a give-up: a measurement taken while a stylesheet is still applying is a measurement of
+ * the wrong page, and under a busy machine that is exactly when it happens.
+ */
+async function settleLayout(page) {
+  let previous = null;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const now = await page.evaluate(() => {
+      const root = document.documentElement;
+      const name = document.querySelector('#list .row:not(.row-head) .row-name');
+      return `${root.scrollWidth}:${root.clientWidth}:${Math.round(name?.getBoundingClientRect().width ?? 0)}`;
+    });
+    if (now === previous) return now;
+    previous = now;
+    await page.waitForTimeout(150);
+  }
+  return previous;
+}
+
 test('200% zoom, as the layout sees it: no sideways scroll and no crushed columns', async ({ page, context }) => {
   await seed(page);
   await showView(page, 'list');
 
   /* Browser zoom halves the CSS viewport: a 1280px window at 200% lays out as 640px. */
   await resize(page, { width: 640, height: 450 });
+  await settleLayout(page);
   const zoomed = await pageWide(page);
   expect(
     zoomed.root.scrollWidth,
@@ -715,6 +735,7 @@ test('200% zoom, as the layout sees it: no sideways scroll and no crushed column
     document.documentElement.style.zoom = '2';
     return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
   });
+  await settleLayout(page);
 
   const cssZoom = await page.evaluate(
     `(() => {${BOX}

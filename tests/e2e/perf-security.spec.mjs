@@ -127,16 +127,20 @@ test('a cold load asks only this origin, answers every request, and is usable in
     []
   );
 
-  /* A 429 is the Worker's own per-source budget answering, not a missing file: it is counted and printed below
-     rather than treated as a failed request. Seen once, on the two proxied stylesheets, in a full run of the whole
-     suite; it has not reproduced in isolation, in three repeats, or in two further full runs. */
-  const rejected = responses.filter((response) => response.status >= 400 && response.status !== 429);
-  const refused = responses.filter((response) => response.status === 429);
-  expect(rejected, `failed responses: ${JSON.stringify(rejected, null, 2)}`).toEqual([]);
-  if (refused.length > 0) console.log(`cold load was rate limited: ${refused.map((r) => r.url).join(', ')}`);
-  /* The two site stylesheets are proxied from the site's own host, which a local server reaches over the network
-     with no cache in front of it; a local run can abort them, and that says nothing about the app's own assets. */
+  /* The two site stylesheets are proxied from the site's own host: a local server reaches over the network with no
+     cache in front of it, so a run can see them refused, rate limited or aborted, and none of that is about the
+     app's own assets. They are counted and printed here; what has to be there is the app's own stylesheet. */
   const proxiedStylesheet = (url) => /\/css\/(tokens|themes)\.css$/.test(url);
+  const rejected = responses.filter((response) => response.status >= 400 && !proxiedStylesheet(response.url));
+  const refused = responses.filter((response) => response.status >= 400 && proxiedStylesheet(response.url));
+  expect(rejected, `failed responses: ${JSON.stringify(rejected, null, 2)}`).toEqual([]);
+  if (refused.length > 0) {
+    console.log(`the site's stylesheets were refused here: ${refused.map((r) => `${r.status} ${r.url}`).join(', ')}`);
+  }
+
+  const ownStylesheet = responses.find((response) => response.url.endsWith('/w/bookmarks/bookmarks.css'));
+  expect(ownStylesheet?.status, "the app's own stylesheet").toBe(200);
+
   const failedOwn = failedRequests.filter((entry) => !proxiedStylesheet(entry));
   expect(failedOwn, `requests that never completed: ${failedOwn.join(', ')}`).toEqual([]);
 

@@ -256,10 +256,11 @@ test('settings opens with the keyboard inside it, closes with Escape, and names 
 
   const modal = await openSettings(page);
   await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
-  await expect(modal.locator('select').first()).toBeFocused();
+  /* The keyboard starts on a control in the sheet, not on the chip row above it. */
+  await expect(page.locator('#modal-root select:focus')).toHaveCount(1);
 
   /* The switch says what it does while it is off, and says its state once it is on. */
-  await expect(settingsItem(modal, /collect links on this device/i)).toContainText(/off by default/i);
+  await expect(await settingsItem(modal, /collect links on this device/i)).toContainText(/off by default/i);
   await expect(modal.getByRole('heading', { name: 'Collected links' })).toBeVisible();
 
   await page.keyboard.press('Escape');
@@ -269,12 +270,16 @@ test('settings opens with the keyboard inside it, closes with Escape, and names 
   await expect(page.locator('#settings-button')).toBeFocused();
 
   await page.locator('#settings-button').click();
-  await settingsItem(modal, /collect links on this device/i).click();
-  /* Turning it on closes the dialog: the switch is the whole action. */
-  await expect(modal.locator('.settings-list')).toHaveCount(0);
+  /* The row is behind the Collected door; the helper opens it. After the press it is found by what it is, not by the
+     words it is about to change. */
+  await (await settingsItem(modal, /collect links on this device/i)).click();
+  const collectionRow = modal.locator('[data-setting="collector-enabled"]');
 
-  await page.locator('#settings-button').click();
-  await expect(settingsItem(modal, /collection: on/i)).toContainText(/counts the addresses this browser opens/i);
+  /* The sheet stays where it is and the row says the change landed, which is the whole point of the redesign. */
+  await expect(collectionRow.locator('strong')).toHaveText('Collection: on');
+  await expect(collectionRow).toContainText(/saved/i);
+  await expect(collectionRow).toBeVisible();
+
   await closeSettings(page);
 });
 

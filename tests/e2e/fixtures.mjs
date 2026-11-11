@@ -121,7 +121,7 @@ export async function unlockVault(page, phrase) {
  */
 export async function lockVault(page) {
   const modal = await openSettings(page);
-  await settingsItem(modal, /lock the vault/i).click();
+  await (await settingsItem(modal, /lock the vault/i)).click();
   await expect(page.locator('#lock-view')).toBeVisible({ timeout: 30_000 });
 }
 
@@ -148,7 +148,24 @@ export async function openSettings(page) {
   return modal;
 }
 
-export function settingsItem(modal, label) {
+/**
+ * One row of the settings sheet, in whichever section holds it.
+ *
+ * The sheet shows one section at a time — a wall of thirty rows in one column was the thing it replaced — so a row is
+ * looked for in the open section first and then behind each door. Nothing at all is left to a test to remember.
+ */
+export async function settingsItem(modal, label) {
+  const inSection = () =>
+    modal.locator('.settings-section:not([hidden]) .settings-item').filter({ hasText: label }).first();
+
+  if (await inSection().count()) return inSection();
+
+  for (const chip of await modal.locator('.settings-chip').all()) {
+    await chip.click();
+    if (await inSection().count()) return inSection();
+  }
+
+  /* Nothing matched anywhere: hand back a locator so the assertion can say what is missing. */
   return modal.locator('.settings-item').filter({ hasText: label }).first();
 }
 
@@ -161,19 +178,19 @@ export async function closeSettings(page) {
 /** Collection is off until the vault says otherwise, and the vault says it here. */
 export async function enableCollection(page) {
   const modal = await openSettings(page);
-  await settingsItem(modal, /collect links on this device/i).click();
+  await (await settingsItem(modal, /collect links on this device/i)).click();
   await closeSettings(page);
 }
 
 export async function chooseSetting(page, label, value) {
   const modal = await openSettings(page);
-  await settingsItem(modal, label).locator('select').selectOption(value);
+  await (await settingsItem(modal, label)).locator('select').selectOption(value);
   await closeSettings(page);
 }
 
 export async function toggleSetting(page, label) {
   const modal = await openSettings(page);
-  await settingsItem(modal, label).locator('input[type=checkbox]').click();
+  await (await settingsItem(modal, label)).locator('input[type=checkbox]').click();
   await closeSettings(page);
 }
 

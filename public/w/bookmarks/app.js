@@ -378,7 +378,8 @@ function openModal({ title, body = [], actions = [], onClose = null }) {
     const body = dialog.querySelector('.modal-body');
     const actions = dialog.querySelector('.modal-actions');
     const target =
-      body?.querySelector('input, textarea, select, .button-primary, button') ??
+      /* The chip row is a map of the sheet, not the first control: it is skipped when the keyboard is placed. */
+      body?.querySelector('input, textarea, select, .button-primary, button:not(.settings-chip)') ??
       actions?.querySelector('.button-primary, button') ??
       closeButton;
     target?.focus();
@@ -3033,6 +3034,37 @@ function openSettings() {
     return button;
   };
 
+  /* A change says so in its own row instead of closing the sheet and opening it again: the sheet used to jump back to
+     the top on every switch, which is what made it feel like a form. */
+  const savedTick = (row) => {
+    if (!row) return;
+    row.classList.add('just-saved');
+    const tick = el('span', { class: 'settings-saved', text: 'Saved' });
+    row.append(tick);
+    setTimeout(() => {
+      tick.remove();
+      row.classList.remove('just-saved');
+    }, 1600);
+  };
+
+  /* A place to jump to. The chips are drawn after the sheet is built, from the headings it made. */
+  const chipsHost = el('div', { class: 'settings-chips', 'aria-label': 'Settings sections' });
+  const sections = [];
+  const heading = (text) => {
+    const node = el('h3', { class: 'settings-heading', text });
+    sections.push({ text, node });
+    return node;
+  };
+
+  /* A list that changed shape (a rule removed, a rule added) has to be drawn again, so it is — at the same place. */
+  const rebuild = () => {
+    const scroll = modal.dialog.querySelector('.modal-body')?.scrollTop ?? 0;
+    modal.close();
+    const next = openSettings();
+    const body = next.dialog.querySelector('.modal-body');
+    if (body) body.scrollTop = scroll;
+  };
+
   /* ---- the collected-links controls ---- */
 
   const collector = collectorPrefs();
@@ -3040,27 +3072,27 @@ function openSettings() {
   const collectorChoice = (label, options, value, onPick) => {
     const select = el('select', {}, options.map(([option, text]) => el('option', { value: option, text })));
     select.value = value;
+    const row = el('label', { class: 'settings-item settings-control' }, [el('strong', { text: label }), select]);
     select.addEventListener('change', () => {
       onPick(select.value);
-      modal.close();
-      openSettings();
+      savedTick(row);
     });
-    return el('label', { class: 'settings-item settings-control' }, [el('strong', { text: label }), select]);
+    return row;
   };
 
   const collectorToggle = (label, detail, checked, onToggle) => {
     const box = el('input', { type: 'checkbox' });
     box.checked = checked;
-    box.addEventListener('change', () => {
-      onToggle(box.checked);
-      modal.close();
-      openSettings();
-    });
-    return el('label', { class: 'settings-item settings-control' }, [
+    const row = el('label', { class: 'settings-item settings-control' }, [
       el('strong', { text: label }),
       el('span', { text: detail }),
       box
     ]);
+    box.addEventListener('change', () => {
+      onToggle(box.checked);
+      savedTick(row);
+    });
+    return row;
   };
 
   const collectorRemove = (label, onRemove) => {
@@ -3068,8 +3100,7 @@ function openSettings() {
     button.append(icon('remove'));
     button.addEventListener('click', () => {
       onRemove();
-      modal.close();
-      openSettings();
+      rebuild();
     });
     return button;
   };
@@ -3103,7 +3134,7 @@ function openSettings() {
     setCollectorPrefs({
       sites: [...collector.sites.filter((rule) => rule.site !== answer.value), { site: answer.value, level: answer.choice }]
     });
-    openSettings();
+    rebuild();
   }
 
   async function addExclusion() {
@@ -3124,7 +3155,7 @@ function openSettings() {
     setCollectorPrefs({
       exclude: [...collector.exclude, { scope: answer.choice, value: answer.value }]
     });
-    openSettings();
+    rebuild();
   }
 
   /* A fact about the account, not an action: no press, and a dash where the vault has no such
@@ -3153,23 +3184,22 @@ function openSettings() {
     }
   };
 
-  const modal = openModal({
-    title: 'Settings',
-    body: [
+  const bodyNodes = [
+      chipsHost,
       el('p', {
         class: 'modal-note',
-        text: `${count} bookmarks in this vault · version ${state.version} · ${planLabel()}.`
+        text: `${count} ${count === 1 ? 'bookmark' : 'bookmarks'} in this vault · version ${state.version} · ${planLabel()}.`
       }),
       el('p', {
         class: 'modal-note',
         text: 'Sync keeps a sealed copy on the server. Your local vault never expires.'
       }),
-      el('h3', { class: 'settings-heading', text: 'Account' }),
+      heading('Account'),
       el('div', { class: 'settings-list' }, [
         stampRow('Vault created', () => vaultCreatedAt),
         stampRow('Last activity', () => lastActivityAt)
       ]),
-      el('h3', { class: 'settings-heading', text: 'Appearance' }),
+      heading('Appearance'),
       el('label', { class: 'field' }, [
         el('span', { class: 'field-label', text: 'Text size' }),
         sizeSelect
@@ -3178,7 +3208,7 @@ function openSettings() {
         el('span', { class: 'field-label', text: 'Theme' }),
         themeSelect
       ]),
-      el('h3', { class: 'settings-heading', text: 'Export' }),
+      heading('Export'),
       el('div', { class: 'settings-list' }, [
         item('Sealed backup', 'Encrypted. Restores with the same 13 words.', async () => {
           await exportSealedBackup();
@@ -3193,25 +3223,42 @@ function openSettings() {
           modal.close();
         })
       ]),
-      el('h3', { class: 'settings-heading', text: 'Import' }),
+      heading('Import'),
       el('div', { class: 'settings-list' }, [
         item('A JSON or HTML file', 'Your old sites.json, a plain export, or a browser file.', () => {
           modal.close();
           handleImport();
         })
       ]),
-      el('h3', { class: 'settings-heading', text: 'Collected links' }),
+      heading('Collected links'),
       el('div', { class: 'settings-list' }, [
-        item(
-          collector.enabled ? 'Collection: on' : 'Collect links on this device',
-          collector.enabled
-            ? 'The extension counts the addresses this browser opens. They stay on this device and reach the vault only when you add one.'
-            : 'Off by default. It needs the extension installed, and the addresses it counts never leave this browser.',
-          () => {
-            setCollectorPrefs({ enabled: !collector.enabled });
-            modal.close();
-          }
-        ),
+        (() => {
+          const strong = el('strong', {
+            text: collector.enabled ? 'Collection: on' : 'Collect links on this device'
+          });
+          const detail = el('span', {
+            text: collector.enabled
+              ? 'Counting addresses on this device. Add one to keep it in the vault.'
+              : 'Off by default. Nothing leaves this browser.'
+          });
+          const box = el('input', { type: 'checkbox' });
+          box.checked = collector.enabled;
+          const row = el('label', { class: 'settings-item settings-control', 'data-setting': 'collector-enabled' }, [
+            strong,
+            detail,
+            box
+          ]);
+
+          box.addEventListener('change', () => {
+            setCollectorPrefs({ enabled: box.checked });
+            strong.textContent = box.checked ? 'Collection: on' : 'Collect links on this device';
+            detail.textContent = box.checked
+              ? 'Counting addresses on this device. Add one to keep it in the vault.'
+              : 'Off by default. Nothing leaves this browser.';
+            savedTick(row);
+          });
+          return row;
+        })(),
         collectorChoice(
           'Record each site as',
           [
@@ -3315,7 +3362,7 @@ function openSettings() {
           announce('Collected links cleared.');
         })
       ]),
-      el('h3', { class: 'settings-heading', text: 'Icons' }),
+      heading('Icons'),
       el('div', { class: 'settings-list' }, [
         item(
           'Fetch missing icons',
@@ -3341,7 +3388,7 @@ function openSettings() {
           if (sure) await removeAllIcons();
         })
       ]),
-      el('h3', { class: 'settings-heading', text: 'Server' }),
+      heading('Server'),
       el('div', { class: 'settings-list' }, [
         item(
           `Sync: ${syncEnabled() ? 'on' : 'off'}`,
@@ -3405,7 +3452,7 @@ function openSettings() {
           }
         )
       ]),
-      el('h3', { class: 'settings-heading', text: 'This device' }),
+      heading('This device'),
       el('div', { class: 'settings-list' }, [
         item('Lock the vault', 'Forget the key on this device until the phrase is entered again.', async () => {
           modal.close();
@@ -3436,11 +3483,63 @@ function openSettings() {
         class: 'modal-note',
         text: 'The vault is sealed in this browser with AES-256-GCM. The server holds the sealed copy, an account record with dates, plan and size, and the list of signed-in devices.'
       }),
-      ...(runningVersion === ''
-        ? []
-        : [el('p', { class: 'modal-note settings-version', text: `Version ${runningVersion}` })])
-    ]
+  ];
+
+  /* One section at a time. The sheet had grown into thirty rows in one column, and a map that shows every street at
+     once is a wall: the chips became doors, and each door opens onto the handful of controls that belong together. */
+  const BY_HEADING = {
+    Account: 'vault',
+    Appearance: 'vault',
+    Export: 'vault',
+    Import: 'vault',
+    Icons: 'vault',
+    'Collected links': 'collected',
+    Server: 'sync',
+    'This device': 'device'
+  };
+  const PLAN = [
+    ['vault', 'Vault'],
+    ['collected', 'Collected links'],
+    ['sync', 'Sync'],
+    ['device', 'This device']
+  ];
+
+  const groups = new Map(PLAN.map(([key, label]) => [key, { label, nodes: [] }]));
+  const headerNodes = [];
+  let bucket = null;
+
+  for (const node of bodyNodes) {
+    if (node.classList?.contains('settings-heading')) bucket = BY_HEADING[node.textContent] ?? bucket;
+    if (bucket === null) headerNodes.push(node);
+    else groups.get(bucket).nodes.push(node);
+  }
+
+  const showSection = (key) => {
+    for (const [name, group] of groups) group.node.hidden = name !== key;
+    for (const chip of chipsHost.querySelectorAll('.settings-chip')) {
+      chip.classList.toggle('is-current', chip.dataset.section === key);
+    }
+  };
+
+  for (const [key, { label, nodes }] of groups) {
+    const node = el('section', { class: 'settings-section', 'data-section': key }, nodes);
+    groups.get(key).node = node;
+    const chip = el('button', { class: 'settings-chip', type: 'button', text: label });
+    chip.dataset.section = key;
+    chip.addEventListener('click', () => showSection(key));
+    chipsHost.append(chip);
+  }
+
+  const modal = openModal({
+    title: 'Settings',
+    body: [chipsHost, ...headerNodes, ...[...groups.values()].map((group) => group.node)]
   });
+
+  showSection('vault');
+
+  /* Two columns where the sheet has the room, and the keyboard lands on the first control of the open section. */
+  modal.dialog.classList.add('settings-modal');
+  modal.dialog.querySelector('.settings-section:not([hidden]) select, .settings-section:not([hidden]) input, .settings-section:not([hidden]) button')?.focus();
 
   fillStamps();
 }

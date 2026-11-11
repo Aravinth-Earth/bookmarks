@@ -82,7 +82,7 @@ test('the settings screen opens, and closes with Escape', async ({ page }) => {
   await createVault(page);
 
   const modal = await openSettings(page);
-  await expect(settingsItem(modal, /collected links|collect links/i)).toBeVisible();
+  await expect(await settingsItem(modal, /collected links|collect links/i)).toBeVisible();
   await closeSettings(page);
 });
 
