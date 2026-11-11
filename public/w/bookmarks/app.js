@@ -3514,8 +3514,10 @@ function openSettings() {
     else groups.get(bucket).nodes.push(node);
   }
 
-  const showSection = (key) => {
-    for (const [name, group] of groups) group.node.hidden = name !== key;
+  /* The chips are a map, not a door: every section stays on the page, open, always. Nothing in this sheet hides
+     another part of it — a jump moves the reader to a place, it never closes the rest. */
+  const goToSection = (key) => {
+    groups.get(key)?.node.scrollIntoView({ block: 'start', behavior: 'smooth' });
     for (const chip of chipsHost.querySelectorAll('.settings-chip')) {
       chip.classList.toggle('is-current', chip.dataset.section === key);
     }
@@ -3526,7 +3528,7 @@ function openSettings() {
     groups.get(key).node = node;
     const chip = el('button', { class: 'settings-chip', type: 'button', text: label });
     chip.dataset.section = key;
-    chip.addEventListener('click', () => showSection(key));
+    chip.addEventListener('click', () => goToSection(key));
     chipsHost.append(chip);
   }
 
@@ -3535,11 +3537,12 @@ function openSettings() {
     body: [chipsHost, ...headerNodes, ...[...groups.values()].map((group) => group.node)]
   });
 
-  showSection('vault');
+  /* The first chip is marked as a starting point; it hides nothing. */
+  chipsHost.firstChild?.classList.add('is-current');
 
   /* Two columns where the sheet has the room, and the keyboard lands on the first control of the open section. */
   modal.dialog.classList.add('settings-modal');
-  modal.dialog.querySelector('.settings-section:not([hidden]) select, .settings-section:not([hidden]) input, .settings-section:not([hidden]) button')?.focus();
+  modal.dialog.querySelector('.settings-section select, .settings-section input, .settings-section button')?.focus();
 
   fillStamps();
 }

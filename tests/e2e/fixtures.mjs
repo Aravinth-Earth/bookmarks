@@ -149,23 +149,9 @@ export async function openSettings(page) {
 }
 
 /**
- * One row of the settings sheet, in whichever section holds it.
- *
- * The sheet shows one section at a time — a wall of thirty rows in one column was the thing it replaced — so a row is
- * looked for in the open section first and then behind each door. Nothing at all is left to a test to remember.
+ * One row of the settings sheet. Every section of the sheet is open at once, so the row is simply found.
  */
 export async function settingsItem(modal, label) {
-  const inSection = () =>
-    modal.locator('.settings-section:not([hidden]) .settings-item').filter({ hasText: label }).first();
-
-  if (await inSection().count()) return inSection();
-
-  for (const chip of await modal.locator('.settings-chip').all()) {
-    await chip.click();
-    if (await inSection().count()) return inSection();
-  }
-
-  /* Nothing matched anywhere: hand back a locator so the assertion can say what is missing. */
   return modal.locator('.settings-item').filter({ hasText: label }).first();
 }
 
