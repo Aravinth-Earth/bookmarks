@@ -16,7 +16,9 @@
 }
 
 html {
-    color-scheme: dark light;
+    /* Only dark: with "dark light" the browser draws its own controls — checkboxes, selects, scrollbars — in the
+       system's light style, which is a row of white squares inside a dark page. */
+    color-scheme: dark;
 }
 
 body {
@@ -987,6 +989,13 @@ body.modal-open {
 
 .settings-saved::before {
     content: '✓ ';
+}
+
+/* The one line under a control's name, and the label above a group: dimmer than the name they sit under, and no
+   dimmer than 4.5:1 against the card, which the muted grey in the page's tokens is not. */
+.settings-modal .settings-item > span,
+.settings-modal .settings-heading {
+    color: var(--text-secondary, #8b949e);
 }
 
 .settings-item.just-saved {

@@ -41,9 +41,10 @@ vault.
 | `layout.spec.mjs` | overflow and column tracks at phone, tablet and desktop, pills, settings modal, bulk bar, 200% zoom, 320px reflow |
 | `ux.spec.mjs` | first run, refusals, search and sort, lock and unlock, settings, selection, undo, import and export |
 | `perf-security.spec.mjs` | same-origin-only cold load, timings, security headers, sealed bytes, XSS through a name, lock hygiene |
+| `theme.spec.mjs` | dark regardless of the system setting, a light theme saved by an older build, and the picker |
 | `setup.spec.mjs` | the install link, the consent question, the defaults, "keep it off", and that the question is asked once |
 
-Seventy-five tests; a full run takes about five minutes on four workers, sixteen on one (`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance budgets are the one thing to re-read on an idle machine.
+Seventy-eight tests; a full run takes about five minutes on four workers, sixteen on one (`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance budgets are the one thing to re-read on an idle machine.
 
 ## When a requirement is not met
 

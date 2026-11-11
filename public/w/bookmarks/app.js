@@ -3009,12 +3009,15 @@ function openSettings() {
 
   /* On its own origin the app can no longer inherit the site's saved theme, so it carries the
      same ten names and the same key. */
+  /* No "light": a bookmark list is read in the dark, and the picker does not offer what this page will not go back to. */
   const THEMES = [
-    'current', 'light', 'amber', 'teal', 'charcoal',
+    'current', 'amber', 'teal', 'charcoal',
     'greenish', 'colorful', 'sunset', 'nord', 'cyberpunk'
   ];
   const themeSelect = el('select', {}, THEMES.map((name) => el('option', { value: name, text: name })));
-  themeSelect.value = document.documentElement.dataset.theme || 'current';
+  themeSelect.value = THEMES.includes(document.documentElement.dataset.theme)
+    ? document.documentElement.dataset.theme
+    : 'current';
   themeSelect.addEventListener('change', () => {
     const value = THEMES.includes(themeSelect.value) ? themeSelect.value : 'current';
     try {
