@@ -164,10 +164,13 @@ test('a site rule records one row per hostname instead of one per page', async (
   await visit(context, '/ruled-b');
   await visit(context, '/ruled-c');
 
+  /* One row is not the same as three visits: the row appears on the first capture and the other two arrive as their
+     own messages, so wait for the count rather than for the row. */
   await expectCollectedCount(page, 1);
+  await expect.poll(async () => (await collectedRows(page))[0]?.visits ?? 0, { timeout: 30_000 }).toBe(3);
+
   const [row] = await collectedRows(page);
   expect(row.url).toBe('https://e2e.local/');
-  expect(row.visits).toBe(3);
 });
 
 test('turning collection back on fills the section without a reload', async ({ page, context }) => {

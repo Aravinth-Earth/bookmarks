@@ -39,8 +39,14 @@ export async function launch({ withExtension = true, slowMo = 0 } = {}) {
     slowMo,
     viewport: { width: 1280, height: 1000 },
     args: withExtension
-      ? [`--disable-extensions-except=${EXTENSION_DIR}`, `--load-extension=${EXTENSION_DIR}`]
-      : []
+      ? [
+          `--disable-extensions-except=${EXTENSION_DIR}`,
+          `--load-extension=${EXTENSION_DIR}`,
+          /* A first install opens the hosted vault before any route is registered, so the name is pointed at the
+             machine itself: it fails at once instead of reaching for the deployed build on every test. */
+          '--host-resolver-rules=MAP b.332321.xyz 127.0.0.1'
+        ]
+      : ['--host-resolver-rules=MAP b.332321.xyz 127.0.0.1']
   });
 
   /* A first install opens the hosted vault to ask its question. The suite answers that origin itself, so a test run
