@@ -43,6 +43,12 @@ export async function launch({ withExtension = true, slowMo = 0 } = {}) {
       : []
   });
 
+  /* A first install opens the hosted vault to ask its question. The suite answers that origin itself, so a test run
+     never reaches the network and never depends on the deployed build. */
+  await context.route('https://b.332321.xyz/**', (route) =>
+    route.fulfill({ status: 204, contentType: 'text/html', body: '' })
+  );
+
   await context.route(`${SITE}/**`, (route) =>
     route.fulfill({
       status: 200,

@@ -37,6 +37,23 @@ const VAULT_HOSTS = new Set(
   })
 );
 
+/**
+ * Where the vault lives, taken from the one place that names it — the content script's own matches — so no origin is
+ * written down twice and a review of the manifest covers this too.
+ */
+const VAULT_SETUP_URL = (() => {
+  const pattern = VAULT_PATTERNS.find((entry) => entry.startsWith('https://')) ?? VAULT_PATTERNS[0] ?? '';
+  if (pattern === '') return null;
+  const url = new URL(pattern.split('*')[0]);
+  return `${url.origin}/w/bookmarks/?collector=installed`;
+})();
+
+/** Before the vault has answered, the toolbar says so; afterwards it says nothing. */
+async function clearSetupHint() {
+  await chrome.action.setBadgeText({ text: '' });
+  await chrome.action.setTitle({ title: 'Bookmarks — collected links' });
+}
+
 const persistent = {
   async get(key) {
     const all = await chrome.storage.local.get(key);
@@ -112,9 +129,23 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   collector.capture(url, { incognito: tab?.incognito === true }).then(badge);
 });
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   ensureAlarm();
   void badge();
+
+  /* A first install, and only a first install, opens the vault to ask the one question worth asking: which vault
+     these addresses belong to, and that nothing leaves this device. An update interrupts nobody — the vault states
+     its policy on the next unlock, and a fresh tab in the middle of someone's work is a rude way to be updated. */
+  if (details?.reason !== 'install' || !VAULT_SETUP_URL) return;
+
+  try {
+    await chrome.tabs.create({ url: VAULT_SETUP_URL });
+    await chrome.action.setBadgeText({ text: '!' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#1f6feb' });
+    await chrome.action.setTitle({ title: 'Finish setting up collected links' });
+  } catch {
+    /* A tab that cannot be opened is not worth a broken worker; the toolbar title still says what to do. */
+  }
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -158,8 +189,12 @@ async function handle(message) {
       return { ok: true, version: BRIDGE_VERSION, policy, items };
     }
 
-    case TYPES.policy:
-      return { ok: true, policy: await collector.setPolicy(message.payload ?? {}) };
+    case TYPES.policy: {
+      const policy = await collector.setPolicy(message.payload ?? {});
+      /* A vault has stated what it wants, so the "finish setting up" hint has done its job. */
+      if (policy.enabled) await clearSetupHint();
+      return { ok: true, policy };
+    }
 
     case TYPES.promote:
       return { ok: true, removed: await collector.promote(message.payload ?? []) };

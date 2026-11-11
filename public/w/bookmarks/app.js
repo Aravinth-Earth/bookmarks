@@ -988,12 +988,145 @@ function enter({ accountId, authSecret, authKey = null, key, version, sealed, do
      reinstalled, reloaded or updated starts from the defaults and has to be told what this vault decided. */
   pushCollectorPolicy();
   void loadCollected();
+  maybeCollectorSetup();
 
   if (syncEnabled()) syncNow();
   /* A top-up that cannot read its own index is not an error worth showing: the next launch
      simply asks again. */
   scheduleIconTopUp().catch(() => {});
   if (runningVersion === '') loadVersion();
+}
+
+
+/* ------------------------------------------------------- setting up collection */
+
+/**
+ * The extension opens this page the first time it is installed, and the page asks here, once.
+ *
+ * That question is worth asking because the extension holds addresses for a vault it cannot see: "which vault, and
+ * does anything leave this device" is the whole of the consent, and the answer is the one thing a person should be
+ * told before a counter starts. Nothing is collected until the first button is pressed — the extension's own default
+ * is off, and the vault is the only thing that ever turns it on.
+ */
+let collectorSetupPending = false;
+
+/** Take `?collector=installed` off the address bar at once: a reload is a page load, and must not ask twice. */
+function takeCollectorSetupLink() {
+  const url = new URL(location.href);
+  if (!url.searchParams.has('collector')) return;
+
+  collectorSetupPending = true;
+  url.searchParams.delete('collector');
+  history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
+/** Called once a vault is open, because there is no point asking about a vault that is not there yet. */
+function maybeCollectorSetup() {
+  if (!collectorSetupPending || !state.document) return;
+  collectorSetupPending = false;
+  askAboutCollection();
+}
+
+function askAboutCollection() {
+  const modal = openModal({
+    title: 'Set up collected links',
+    body: [
+      el('p', {
+        text: '“Bookmarks — collected links” is installed. It can keep the address of every page this browser opens, ' +
+          'and how often you opened it, so the pages you really use are here to keep.'
+      }),
+      el('ul', {}, [
+        el('li', { text: 'Only the address and a count: no titles, no page contents, no referrer.' }),
+        el('li', {
+          text: 'It stays on this device. Nothing reaches this vault until you add it, and nothing leaves the device ' +
+            'at all.'
+        }),
+        el('li', { text: 'All of it can be changed or cleared later, in Settings.' })
+      ])
+    ],
+    actions: [
+      el('button', {
+        class: 'button button-quiet',
+        type: 'button',
+        text: 'Keep it off',
+        onclick: () => modal.close()
+      }),
+      el('button', {
+        class: 'button button-primary',
+        type: 'button',
+        text: 'Collect on this device',
+        onclick: () => {
+          modal.close();
+          askAboutDefaults();
+        }
+      })
+    ]
+  });
+}
+
+/** The three answers that make the difference between "it records everything forever" and "it does what I want". */
+function askAboutDefaults() {
+  setCollectorPrefs({ enabled: true });
+
+  const level = el('select', {}, [
+    el('option', { value: 'addresses', text: 'Every page' }),
+    el('option', { value: 'hosts', text: 'One row per hostname' }),
+    el('option', { value: 'domains', text: 'One row for the whole site' })
+  ]);
+  level.value = collectorPrefs().level;
+  level.addEventListener('change', () => setCollectorPrefs({ level: level.value }));
+
+  const retention = el(
+    'select',
+    {},
+    [
+      [7, 'A week'],
+      [30, 'A month'],
+      [60, 'Two months'],
+      [365, 'A year'],
+      [0, 'Until I clear them']
+    ].map(([value, text]) => el('option', { value: String(value), text }))
+  );
+  retention.value = String(collectorPrefs().retentionDays);
+  retention.addEventListener('change', () => setCollectorPrefs({ retentionDays: Number(retention.value) }));
+
+  const privateBox = el('input', { type: 'checkbox' });
+  privateBox.checked = collectorPrefs().includeIncognito;
+  privateBox.addEventListener('change', () => setCollectorPrefs({ includeIncognito: privateBox.checked }));
+
+  const modal = openModal({
+    title: 'How much should it keep?',
+    body: [
+      el('p', {
+        text: 'These are the defaults for every site. In Settings a site can be given a rule of its own, and a site, a ' +
+          'hostname or a single path can be left out entirely.'
+      }),
+      el('label', { class: 'settings-item settings-control' }, [
+        el('strong', { text: 'Record each site as' }),
+        level
+      ]),
+      el('label', { class: 'settings-item settings-control' }, [
+        el('strong', { text: 'Keep collected links for' }),
+        retention
+      ]),
+      el('label', { class: 'settings-item settings-control' }, [
+        el('strong', { text: 'Include private windows' }),
+        el('span', { text: 'The browser also has to allow this extension in private windows.' }),
+        privateBox
+      ])
+    ],
+    actions: [
+      el('button', {
+        class: 'button button-primary',
+        type: 'button',
+        text: 'Done',
+        onclick: () => {
+          modal.close();
+          announce('Collection is on. Open a page and it appears below.');
+        }
+      })
+    ]
+  });
 }
 
 async function tryRemembered() {
@@ -3459,6 +3592,7 @@ function boot() {
   bindEvents();
   applyAppearance();
   registerServiceWorker();
+  takeCollectorSetupLink();
   tryRemembered();
 }
 

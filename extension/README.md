@@ -28,11 +28,15 @@ the file stays on the device.
 2. **Load unpacked** → choose this `extension/` folder.
 3. After editing a file, press the reload arrow on the card. There is no build step.
 
-Then open <https://b.332321.xyz/w/bookmarks/>, unlock the vault, and turn collection on at **Settings → Collected
-links → Collect links on this device**. That screen is the only place collection is switched on: it also holds what
-each site is recorded as, one rule per site that records it differently, the exclusions, how long rows are kept and
-how many, the daily limit for new addresses, the visit floor, and whether private windows are included. Every change
-is written into the sealed vault and pushed to this extension.
+Installing opens the vault's own page, which is where the one question is asked: *"this device's addresses, kept
+here, nothing leaving it — collect?"* Nothing is counted until that is answered, and answering it one way or the
+other is the only setup there is. The page is opened from the extension's own registered origin, only on a first
+install — an update never interrupts whatever is open, and the vault states its policy again on the next unlock.
+
+After that, **Settings → Collected links** holds everything else: what each site is recorded as, one rule per site
+that records it differently, the exclusions, how long rows are kept and how many, the daily limit for new addresses,
+the visit floor, and whether private windows are included. Every change is written into the sealed vault and pushed
+to this extension.
 
 The vault states that policy again on every unlock, so an extension that was reinstalled or updated picks up what
 the vault already decided instead of starting from the defaults.

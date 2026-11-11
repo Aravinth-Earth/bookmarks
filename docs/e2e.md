@@ -41,8 +41,9 @@ vault.
 | `layout.spec.mjs` | overflow and column tracks at phone, tablet and desktop, pills, settings modal, bulk bar, 200% zoom, 320px reflow |
 | `ux.spec.mjs` | first run, refusals, search and sort, lock and unlock, settings, selection, undo, import and export |
 | `perf-security.spec.mjs` | same-origin-only cold load, timings, security headers, sealed bytes, XSS through a name, lock hygiene |
+| `setup.spec.mjs` | the install link, the consent question, the defaults, "keep it off", and that the question is asked once |
 
-Seventy tests; a full run takes about twelve minutes on a laptop.
+Seventy-five tests; a full run takes about six minutes on a laptop.
 
 ## When a requirement is not met
 
