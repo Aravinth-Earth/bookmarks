@@ -80,8 +80,24 @@ async function shrink(blob) {
  *   what an explicit "fetch missing icons" run means.
  * @returns {Promise<string | null>}
  */
+/**
+ * A host the icon proxy will refuse anyway: loopback, a private network name, or a bare address.
+ *
+ * Asking would put an error in the console on every load and spend a request to be told no, and the lettered tile
+ * is the right answer for these anyway — there is nobody to ask.
+ */
+export function uniconable(hostname) {
+  const host = hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
+    return true;
+  }
+  if (/^[\d.]+$/.test(host) || host.startsWith('[')) return true;
+  return /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+}
+
 export async function fetchIcon(hostname, { fresh = false } = {}) {
   if (typeof hostname !== 'string' || hostname === '') return null;
+  if (uniconable(hostname)) return null;
 
   const hash = await hostHash(hostname);
 

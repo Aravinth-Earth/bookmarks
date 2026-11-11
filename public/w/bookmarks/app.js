@@ -1569,7 +1569,10 @@ let collectedTimer = null;
 /** What the section would draw, in one string: the same answer must not repaint the list. */
 function collectedKey(snapshot) {
   if (snapshot === null) return 'none';
-  return `${snapshot.items.length}|${snapshot.items
+
+  /* The settings are part of the shape of what is drawn, not only of what is counted: switching collection on or off
+     changes whether the section appears at all, and the section used to stay as it was until the page was reloaded. */
+  return `${snapshot.policy?.enabled === true ? 'on' : 'off'}|${snapshot.items.length}|${snapshot.items
     .map((item) => `${item.url}:${item.visits}`)
     .join(',')}`;
 }
@@ -1697,7 +1700,13 @@ function pushCollectorPolicy(attempt = 0) {
   }).then((reply) => {
     /* No reply is what an absent extension looks like, and also what a missed message looks like. One retry costs
        nothing and turns the second case into a second chance rather than a silently switched-off collection. */
-    if (reply === null && attempt < 2) setTimeout(() => pushCollectorPolicy(attempt + 1), 900);
+    if (reply === null && attempt < 2) {
+      setTimeout(() => pushCollectorPolicy(attempt + 1), 900);
+      return;
+    }
+    /* The extension has just been told what to collect, so ask it again: switching collection on used to leave the
+       section empty until the page was reloaded. */
+    void loadCollected();
   });
 }
 

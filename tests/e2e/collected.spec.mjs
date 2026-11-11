@@ -170,6 +170,26 @@ test('a site rule records one row per hostname instead of one per page', async (
   expect(row.visits).toBe(3);
 });
 
+test('turning collection back on fills the section without a reload', async ({ page, context }) => {
+  await createVault(page);
+  await enableCollection(page);
+
+  await visit(context, '/kept-while-off');
+  await expectCollectedCount(page, 1);
+
+  /* Off: the addresses stay in the browser but the section goes, which is what makes them look lost. */
+  const off = await openSettings(page);
+  await settingsItem(off, /collection: on|collect links on this device/i).click();
+  await closeSettings(page);
+  await expect(page.locator('#collected')).toBeHidden({ timeout: 20_000 });
+
+  /* On again, with no reload: the list comes back on its own. */
+  const on = await openSettings(page);
+  await settingsItem(on, /collect links on this device/i).click();
+  await closeSettings(page);
+  await expectCollectedCount(page, 1);
+});
+
 test('clearing removes what was collected and keeps the vault', async ({ page, context }) => {
   await createVault(page);
   await enableCollection(page);
