@@ -43,7 +43,7 @@ vault.
 | `perf-security.spec.mjs` | same-origin-only cold load, timings, security headers, sealed bytes, XSS through a name, lock hygiene |
 | `setup.spec.mjs` | the install link, the consent question, the defaults, "keep it off", and that the question is asked once |
 
-Seventy-five tests; a full run takes about six minutes on a laptop.
+Seventy-five tests; a full run takes about five minutes on four workers, sixteen on one (`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance budgets are the one thing to re-read on an idle machine.
 
 ## When a requirement is not met
 

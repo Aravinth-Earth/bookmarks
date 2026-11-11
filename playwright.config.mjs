@@ -5,8 +5,9 @@
  * `wrangler dev` on a port taken from `E2E_PORT`, and the browser is Playwright's own Chromium. Point
  * `E2E_BASE_URL` at any running instance — the deployed origin included — and no server is started at all.
  *
- * One worker, because the extension's storage belongs to one browser profile and two profiles would each collect
- * their own list.
+ * Four workers by default: every test opens its own browser profile with its own copy of the extension, so nothing is
+ * shared but the server. One worker takes the suite from about five minutes to sixteen — the clicks are what cost,
+ * not the app — so `E2E_WORKERS=1` is there for a quiet machine when the timings themselves are the thing being read.
  */
 
 import { defineConfig } from '@playwright/test';
@@ -20,7 +21,7 @@ export default defineConfig({
   timeout: 90_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,
-  workers: 1,
+  workers: Number(process.env.E2E_WORKERS ?? 4),
   retries: 0,
   reporter: [['list']],
   use: {
