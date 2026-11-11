@@ -14,7 +14,6 @@ import { createCollector } from './collector-core.js';
 
 const TIDY_ALARM = 'collector-tidy';
 const TIDY_MINUTES = 360;
-const BADGE_COLOUR = '#c98a1b';
 const CHANGED = 'collected-changed';
 
 /* Who may talk to this worker, and which tabs hear about a change, are one answer: the vault page the manifest
@@ -81,13 +80,20 @@ function signature(items) {
     .join('|');
 }
 
+/**
+ * Announce that the list moved — to the open vault tabs, and nowhere else.
+ *
+ * The toolbar used to carry a count of what was held, capped at "9+". It told nobody anything they could act on,
+ * it could not tell 10 from 400, and it put a number about someone's browsing on screen for whoever walked past.
+ * The only thing the icon says now is that setup has not been finished; once the vault has answered, it says
+ * nothing at all.
+ */
 async function badge() {
   try {
     const { policy, items } = await collector.list();
     const count = policy.enabled ? items.length : 0;
-    const text = count === 0 ? '' : count > 9 ? '9+' : String(count);
-    await chrome.action.setBadgeText({ text });
-    if (text !== '') await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOUR });
+    await chrome.action.setBadgeText({ text: '' });
+
 
     const stamp = signature(items);
     if (stamp === announced) return;
