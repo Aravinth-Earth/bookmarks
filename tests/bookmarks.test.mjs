@@ -358,6 +358,25 @@ test('newerPrefs takes the stamped side, and the later stamp when both carry one
   assert.deepEqual(newerPrefs(undefined, newer), newer, 'a document with no prefs takes the other');
 });
 
+/* Silently losing these is how collection switched itself off: the newer copy simply had never carried the key. */
+test('newerPrefs keeps a preference the winning copy has never carried', () => {
+  const withCollection = {
+    iconOnly: false,
+    view: 'pills',
+    updatedAt: T1,
+    collector: { enabled: true, minVisits: 1, sites: [], exclude: [] }
+  };
+  const newerWithoutIt = { iconOnly: false, view: 'pills', sort: 'name', updatedAt: T2 };
+
+  const merged = newerPrefs(withCollection, newerWithoutIt);
+  assert.deepEqual(merged.collector, withCollection.collector, 'the collection settings survive');
+  assert.equal(merged.sort, 'name', 'and the newer copy still wins on what it carries');
+  assert.equal(merged.updatedAt, T2, 'the newer stamp is the one kept');
+
+  const other = newerPrefs(newerWithoutIt, withCollection);
+  assert.deepEqual(other.collector, withCollection.collector, 'from either side');
+});
+
 test('a preference changed on this device survives a merge with an older server copy', () => {
   const localPrefs = { iconOnly: false, sort: 'clicks', updatedAt: T2 };
   const remotePrefs = { iconOnly: false, sort: 'name', updatedAt: T1 };

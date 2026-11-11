@@ -486,7 +486,14 @@ export function newerPrefs(local, remote) {
 
   if (rightAt === null) return { ...left };
   if (leftAt === null) return { ...right };
-  return { ...(rightAt > leftAt ? right : left) };
+
+  /* The newer copy wins on every key it carries, and the older one fills the keys it does not. Replacing the whole
+     object lost settings whenever the newer copy had never carried them — a build that predates a preference, or an
+     import with none — and the loss is silent: the collection settings live here, so losing them switches collection
+     off without a word. */
+  const newer = rightAt > leftAt ? right : left;
+  const older = newer === right ? left : right;
+  return { ...older, ...newer };
 }
 
 function prefStamp(prefs) {
