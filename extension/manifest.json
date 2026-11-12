@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bookmarks \u2014 collected links",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Optional companion for a bookmark vault on b.332321.xyz. Keeps a local list of the addresses you open, so you can add the ones worth keeping.",
   "minimum_chrome_version": "116",
   "permissions": [

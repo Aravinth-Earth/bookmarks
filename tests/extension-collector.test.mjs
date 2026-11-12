@@ -16,7 +16,10 @@ function memory() {
   return {
     async get(key) { return map.get(key); },
     async put(key, value) { map.set(key, structuredClone(value)); },
+    async putMany(entries) { for (const [key, value] of Object.entries(entries)) map.set(key, structuredClone(value)); },
     async remove(key) { map.delete(key); },
+    async removeMany(keys) { for (const key of keys) map.delete(key); },
+    async all() { return structuredClone(Object.fromEntries(map)); },
     dump() { return Object.fromEntries(map); }
   };
 }
@@ -214,7 +217,7 @@ test('a private window is refused and nothing is written', async () => {
   await enable({ includeIncognito: false });
 
   assert.equal(await collector.capture('https://bank.example/accounts/1', { incognito: true }), 'incognito');
-  assert.deepEqual((await persistent.get('items')) ?? {}, {}, 'the address is nowhere on disk');
+  assert.deepEqual(Object.keys(await persistent.all()).filter((key) => key.startsWith('u:')), [], 'the address is nowhere on disk');
 });
 
 test('a private window is counted when the policy allows it, and marked', async () => {
@@ -252,10 +255,62 @@ test('clearing forgets the rows and the day counter, and keeps collecting', asyn
   await collector.clear();
 
   assert.deepEqual((await collector.list()).items, []);
-  assert.equal(await persistent.get('items'), undefined);
+  assert.deepEqual(Object.keys(await persistent.all()).filter((key) => key.startsWith('u:')), [], 'no row survives a clear');
   assert.equal(await persistent.get('day'), undefined, 'the day counter goes with the rows');
 
   advance(1_000);
   assert.equal(await collector.capture('https://c.example/'), 'captured', 'clearing is not stopping');
   assert.equal(await persistent.get('policy').then((policy) => policy.enabled), true, 'the policy survives');
+});
+
+test('a visit writes one row, not the whole list', async () => {
+  const { collector, enable, persistent } = build();
+  await enable();
+  await collector.capture('https://a.example/one');
+  await collector.capture('https://b.example/two');
+
+  const keys = Object.keys(await persistent.all()).sort();
+  assert.deepEqual(keys, [
+    'day',
+    'policy',
+    'u:https://a.example/one',
+    'u:https://b.example/two'
+  ]);
+});
+
+test('a list kept in the old single object is split into rows and the old key is dropped', async () => {
+  const { collector, enable, persistent } = build();
+  await enable();
+  await persistent.put('items', {
+    'https://kept.example/': {
+      url: 'https://kept.example/',
+      host: 'kept.example',
+      visits: 4,
+      firstSeenAt: '2023-11-14T22:00:00.000Z',
+      lastSeenAt: '2023-11-14T22:13:20.000Z',
+      private: false
+    }
+  });
+
+  const { items } = await collector.list();
+  assert.equal(items.length, 1);
+  assert.equal(items[0].visits, 4, 'the count came across whole');
+
+  const all = await persistent.all();
+  assert.equal(all.items, undefined, 'the old map is gone');
+  assert.equal(all['u:https://kept.example/'].visits, 4);
+});
+
+test('the entry cap reaches the store on a tidy, not on every visit', async () => {
+  const { collector, enable, advance, persistent } = build();
+  await enable({ maxEntries: 2 });
+  for (const name of ['a', 'b', 'c']) {
+    await collector.capture(`https://${name}.example/`);
+    advance(60_000);
+  }
+
+  assert.equal(Object.keys(await persistent.all()).filter((key) => key.startsWith('u:')).length, 3);
+  assert.equal(await collector.tidy(), 2);
+  const rows = Object.entries(await persistent.all()).filter(([key]) => key.startsWith('u:'));
+  assert.deepEqual(rows.map(([, row]) => row.host).sort(), ['b.example', 'c.example']);
 });

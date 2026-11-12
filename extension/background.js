@@ -61,8 +61,19 @@ const persistent = {
   async put(key, value) {
     await chrome.storage.local.set({ [key]: value });
   },
+  /* A whole object in one call, which is what makes splitting an old list into rows a single write per batch. */
+  async putMany(entries) {
+    await chrome.storage.local.set(entries);
+  },
   async remove(key) {
     await chrome.storage.local.remove(key);
+  },
+  async removeMany(keys) {
+    await chrome.storage.local.remove(keys);
+  },
+  /* Everything on the store, rows and bookkeeping alike: the collector asks for it and picks the `u:` keys. */
+  async all() {
+    return chrome.storage.local.get(null);
   }
 };
 
