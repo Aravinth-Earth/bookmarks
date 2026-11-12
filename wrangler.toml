@@ -11,6 +11,10 @@ compatibility_date = "2026-10-30"
 # 429 {error:"full"} at the cap; raise it to open creation to others.
 MAX_ACCOUNTS = "1"
 
+# Whether a new account needs an invite code. Off here so a laptop can create its own vault; set to "true" before a
+# deploy that other people can reach. The operator page can mint codes either way, so the switch can be tried first.
+INVITES_REQUIRED = "false"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"

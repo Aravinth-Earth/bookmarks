@@ -1044,3 +1044,116 @@ test('a verdict is resolved once for a burst of the same host', async () => {
     'one lookup pair for five requests'
   );
 });
+
+/* ---- the operator's routes ------------------------------------------------------------------------------- */
+
+function stubRegistry(handle) {
+  const calls = [];
+  return {
+    calls,
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: async (request) => {
+        calls.push({ url: request.url, method: request.method });
+        return handle(new Request(request.url, { method: request.method }));
+      }
+    })
+  };
+}
+
+function adminRequest(token, path = '/overview', method = 'GET') {
+  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api/admin${path}`, {
+    method,
+    headers: token === null ? {} : { authorization: `Bearer ${token}` }
+  });
+}
+
+test('the operator routes do not exist until a token is configured', async () => {
+  const env = { ...harness().env, ADMIN_TOKEN: '' };
+  const response = await worker.fetch(adminRequest('anything'), env);
+  assert.equal(response.status, 404);
+});
+
+test('the operator routes refuse a wrong token and answer nothing about the server', async () => {
+  const env = { ...harness().env, ADMIN_TOKEN: 'the-right-token' };
+
+  const missing = await worker.fetch(adminRequest(null), env);
+  assert.equal(missing.status, 401);
+
+  const wrong = await worker.fetch(adminRequest('the-wrong-token'), env);
+  assert.equal(wrong.status, 401);
+  assert.deepEqual(await wrong.json(), { error: 'unauthorized' });
+});
+
+test('the overview says how big each vault is, and names no account in full', async () => {
+  const ids = ['a'.repeat(22), 'b'.repeat(22)];
+  const registry = stubRegistry(() => {
+    if (arguments.length === 0) return new Response('{}');
+    return new Response(JSON.stringify({ ids, count: 2, max: 5 }));
+  });
+
+  /* The registry answers three shapes; the stub reads the path it was asked for. */
+  const answers = {
+    '/admin-list': { ids, count: 2, max: 5 },
+    '/invites': { invites: [{ id: 'deadbeef', state: 'live' }], required: true },
+    '/settings': { settings: { maxAccounts: 5 }, max: 5 }
+  };
+  registry.get = () => ({
+    fetch: async (request) => new Response(JSON.stringify(answers[new URL(request.url).pathname] ?? {}))
+  });
+
+  const env = {
+    ...harness().env,
+    ADMIN_TOKEN: 'the-right-token',
+    REGISTRY: registry,
+    VAULTS: {
+      idFromName: (name) => name,
+      get: () => ({
+        fetch: async () =>
+          new Response(
+            JSON.stringify({ ctChars: 2048, vaultVersion: 7, sessions: 2, createdAt: 1, updatedAt: 2, plan: 'free' })
+          )
+      })
+    }
+  };
+
+  const response = await worker.fetch(adminRequest('the-right-token'), env);
+  assert.equal(response.status, 200);
+
+  const body = await response.json();
+  assert.equal(body.totals.accounts, 2);
+  assert.equal(body.totals.bytes, 4096, 'two vaults of two kilobytes');
+  assert.equal(body.max, 5);
+  assert.equal(body.required, true);
+  assert.deepEqual(body.accounts.map((row) => row.id), ['a'.repeat(8), 'b'.repeat(8)], 'eight characters, not twenty-two');
+  assert.equal(body.accounts[0].version, 7);
+});
+
+test('a vault answers its own size without opening anything', async () => {
+  const { Vault } = await import('../src/vault.js');
+  const map = new Map([
+    ['account', { accountId: 'x', authSecret: 'y', plan: 'free', createdAt: 10 }],
+    ['vault', { version: 3, updatedAt: 20, ct: 'a'.repeat(64) }],
+    ['session:one', { expiresAt: Date.now() + 60_000 }],
+    ['session:two', { expiresAt: Date.now() + 60_000 }],
+    ['session:gone', { expiresAt: Date.now() - 60_000 }]
+  ]);
+  const storage = {
+    async get(key) { return map.get(key); },
+    async put(key, value) { map.set(key, value); },
+    async delete(key) { return map.delete(key); },
+    async list({ prefix }) {
+      return [...map.entries()].filter(([key]) => key.startsWith(prefix));
+    }
+  };
+
+  const vault = new Vault({ storage, id: { name: 'x' } }, {});
+  const response = await vault.fetch(new Request('https://vault/admin-stats'));
+  const stats = await response.json();
+
+  assert.equal(stats.vaultVersion, 3);
+  assert.equal(stats.ctChars, 64, 'the length of the sealed copy, not the copy');
+  assert.equal(stats.sessions, 2, 'a session that has expired is not a place');
+  assert.equal(JSON.stringify(stats).includes('a'.repeat(64)), false, 'the sealed bytes are counted, not copied');
+  assert.equal(JSON.stringify(stats).includes('authSecret'), false, 'and no secret is in the answer');
+});

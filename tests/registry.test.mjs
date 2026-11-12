@@ -198,3 +198,152 @@ test('the admin list is a GET route, starts empty and answers a POST with 404', 
   );
   assert.equal(posted.status, 404);
 });
+
+/* ---- invite codes ---------------------------------------------------------------------------------------- */
+
+function operator(body, path) {
+  return new Request(`https://registry${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {})
+  });
+}
+
+async function mint(registry, body = { count: 1 }) {
+  return json(await registry.fetch(operator(body, '/invites/new')));
+}
+
+async function spend(registry, code) {
+  const { hashCode } = await import('../src/invites.js');
+  return json(await registry.fetch(reserve({ accountId: accountId(9), inviteHash: await hashCode(code) })));
+}
+
+test('a code is a long, unambiguous string with a digest kept in its place', async () => {
+  const { newCode, hashCode, normaliseCode, CODE_CHARS } = await import('../src/invites.js');
+
+  const code = newCode();
+  const bare = normaliseCode(code);
+  assert.equal(bare.length, CODE_CHARS, 'fifty-one characters of Crockford base32');
+  assert.match(bare, /^[0-9A-HJKMNP-TV-Z]{51}$/, 'no I, L, O or U');
+  assert.notEqual(newCode(), code, 'two codes are not the same code');
+
+  const digest = await hashCode(code);
+  assert.match(digest, /^[0-9a-f]{64}$/);
+  assert.equal(await hashCode(code.toLowerCase().replace(/-/g, '')), digest, 'case and dashes do not matter');
+});
+
+test('a code is needed to create an account when the server says so, and nothing else changes', async () => {
+  const { registry } = harness({ INVITES_REQUIRED: 'true' });
+
+  const refused = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.error, 'invite_required');
+
+  const fresh = await mint(registry);
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.body.codes.length, 1);
+
+  const spent = await spend(registry, fresh.body.codes[0]);
+  assert.equal(spent.status, 200);
+  assert.equal(spent.body.ok, true);
+
+  /* The same code again is the same slot asked for twice. */
+  const twice = await json(
+    await registry.fetch(
+      reserve({ accountId: accountId(2), inviteHash: (await import('../src/invites.js')).hashCode(fresh.body.codes[0]) ? await (await import('../src/invites.js')).hashCode(fresh.body.codes[0]) : '' })
+    )
+  );
+  assert.equal(twice.status, 422);
+  assert.equal(twice.body.error, 'invite_used');
+});
+
+test('a code that has expired is refused, and one that was never minted cannot be guessed', async () => {
+  const { registry } = harness({ INVITES_REQUIRED: 'true' });
+  const minted = await mint(registry, { count: 1, days: 1 });
+
+  const stored = await registry.storage.get('invites');
+  await registry.storage.put(
+    'invites',
+    stored.map((entry) => ({ ...entry, expiresAt: Date.now() - 1 }))
+  );
+
+  const expired = await spend(registry, minted.body.codes[0]);
+  assert.equal(expired.status, 410);
+  assert.equal(expired.body.error, 'invite_expired');
+
+  const invented = await json(await registry.fetch(reserve({ accountId: accountId(3), inviteHash: 'ab'.repeat(32) })));
+  assert.equal(invented.status, 403);
+});
+
+test('an account that already exists is never asked for a code', async () => {
+  const { registry } = harness({ INVITES_REQUIRED: 'true' });
+  const minted = await mint(registry);
+  assert.equal((await spend(registry, minted.body.codes[0])).status, 200);
+
+  /* Same account, no code: this is a retried first sync, or the same phrase on another device. */
+  const again = await json(await registry.fetch(reserve({ accountId: accountId(9) })));
+  assert.equal(again.status, 200);
+  assert.equal(again.body.alreadyReserved, true);
+});
+
+test('the server will not hand out more codes than there are slots', async () => {
+  const { registry } = harness({ INVITES_REQUIRED: 'true', MAX_ACCOUNTS: '2' });
+
+  const first = await mint(registry, { count: 5 });
+  assert.equal(first.body.codes.length, 2, 'two slots, two codes');
+
+  const second = await mint(registry, { count: 1 });
+  assert.equal(second.status, 429);
+  assert.equal(second.body.error, 'no_room_for_codes');
+
+  /* Spending one code makes an account of it, and the other code is still a promise: still nothing to give. */
+  await spend(registry, first.body.codes[0]);
+  assert.equal((await mint(registry, { count: 1 })).status, 429, 'an account and a code fill two slots');
+
+  /* Raise the cap and there is room again: the count is recounted from the accounts and the codes, not remembered. */
+  await registry.fetch(operator({ maxAccounts: 3 }, '/settings'));
+  const third = await mint(registry, { count: 2 });
+  assert.equal(third.status, 200);
+  assert.equal(third.body.codes.length, 1, 'one free slot, one code');
+});
+
+test('the cap can be set from the operator side, and lowering it deletes nothing', async () => {
+  const { registry } = harness({ MAX_ACCOUNTS: '1' });
+  assert.equal((await json(await registry.fetch(reserve({ accountId: accountId(1) })))).status, 200);
+  assert.equal((await json(await registry.fetch(reserve({ accountId: accountId(2) })))).status, 429);
+
+  const raised = await json(await registry.fetch(operator({ maxAccounts: 3 }, '/settings')));
+  assert.equal(raised.status, 200);
+  assert.equal(raised.body.max, 3);
+  assert.equal((await json(await registry.fetch(reserve({ accountId: accountId(2) })))).status, 200);
+
+  const lowered = await json(await registry.fetch(operator({ maxAccounts: 1 }, '/settings')));
+  assert.equal(lowered.body.max, 1);
+  assert.equal(lowered.body.accounts, 2, 'the accounts that exist keep existing');
+
+  const list = await json(await registry.fetch(new Request('https://registry/admin-list')));
+  assert.equal(list.body.ids.length, 2, 'and none was deleted');
+});
+
+test('a revoked code is gone, and a spent one cannot be revoked', async () => {
+  const { registry } = harness({ INVITES_REQUIRED: 'true' });
+  const minted = await mint(registry, { count: 2 });
+  const [first, second] = minted.body.codes;
+
+  const listed = await json(await registry.fetch(new Request('https://registry/invites')));
+  assert.equal(listed.body.invites.length, 2);
+  assert.equal(listed.body.invites[0].id.length, 8, 'named by a digest prefix, not by the code');
+
+  const revoked = await json(
+    await registry.fetch(operator({ id: listed.body.invites[0].id }, '/invites/revoke'))
+  );
+  assert.equal(revoked.body.revoked, 1);
+
+  assert.equal((await spend(registry, first)).status, 403, 'the revoked code opens nothing');
+  assert.equal((await spend(registry, second)).status, 200, 'the other one still does');
+
+  const afterUse = await json(
+    await registry.fetch(operator({ id: listed.body.invites[1].id }, '/invites/revoke'))
+  );
+  assert.equal(afterUse.status, 404, 'a spent code is not a code that can be revoked');
+});
