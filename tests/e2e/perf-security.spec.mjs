@@ -41,7 +41,10 @@ const DEVICE_KEYS = new Set([
   'bookmarks-view',
   'bookmarks-font-size',
   'site-theme',
-  'collected-icons'
+  'collected-icons',
+  /* Eight random bytes that name this browser profile and nothing else: it is what lets two devices' counts be
+     added without counting one device's visits twice. It outlives "clear this device" for that reason. */
+  'bookmarks-device-id'
 ]);
 
 /** Every record in the vault's IndexedDB store, decoded far enough to read as bytes and strings. */

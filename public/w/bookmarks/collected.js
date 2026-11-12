@@ -261,19 +261,21 @@ export function fold(items, { level = DEFAULT_LEVEL, order = DEFAULT_ORDER, held
  * The counts the vault's own bookmarks should take from the extension.
  *
  * Every address the extension counted keeps counting whether or not it is in the vault, so opening a saved bookmark
- * from the browser's own list raises its count here too. The extension's number is a total, so a bookmark only ever
- * moves up to it — returning it twice changes nothing.
+ * from the browser's own list raises its count here too. The extension's number is this device's total, so the slot
+ * only ever moves up to it — returning it twice changes nothing.
  */
-export function openCounts(items, bookmarks) {
+export function openCounts(items, bookmarks, deviceId) {
   const visits = new Map(
     (Array.isArray(items) ? items : []).map((item) => [item.url, Number.isInteger(item.visits) ? item.visits : 0])
   );
 
+  /* Only this device's slot is compared and only this device's slot is written: another device's visits are its own,
+     and a device that wrote both would be the one way to count the same visit twice. */
   const changes = [];
   for (const bookmark of Array.isArray(bookmarks) ? bookmarks : []) {
     const total = visits.get(bookmark.url);
     if (total === undefined) continue;
-    if (total > (Number.isInteger(bookmark.openCount) ? bookmark.openCount : 0)) {
+    if (total > (bookmark.uses?.[deviceId] ?? 0)) {
       changes.push({ id: bookmark.id, openCount: total });
     }
   }

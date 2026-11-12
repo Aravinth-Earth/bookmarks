@@ -11,6 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEVICE_ID_KEY,
   DEVICE_KEYS,
   ICON_TRIES_KEY,
   SIZE_KEY,
@@ -77,7 +78,40 @@ test('clearing a device removes every key the page writes', () => {
 
 test('the page lists the keys it writes, and the icon index is one of them', () => {
   assert.deepEqual([...DEVICE_KEYS], [ICON_TRIES_KEY, VIEW_KEY, SIZE_KEY, THEME_KEY]);
+  assert.equal(
+    DEVICE_KEYS.includes(DEVICE_ID_KEY),
+    false,
+    'the device name outlives a wipe: a new name would count the same visits twice'
+  );
   assert.equal(ICON_TRIES_KEY, 'bookmarks-icon-tries');
+});
+
+test('a device names itself once, keeps the name, and is cleared with the rest', async () => {
+  const { deviceId } = await import('../public/w/bookmarks/device-store.js');
+  const map = new Map();
+  const storage = {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => map.set(key, String(value)),
+    removeItem: (key) => map.delete(key)
+  };
+
+  const first = deviceId(storage);
+  assert.match(first, /^[0-9a-f]{16}$/, 'a name, not a fingerprint');
+  assert.equal(deviceId(storage), first, 'the same name the second time');
+  assert.notEqual(deviceId({ getItem: () => null, setItem: () => {} }), first, 'another device, another name');
+});
+
+test('a device with no storage still counts, under a name that lasts as long as the page', async () => {
+  const { deviceId } = await import('../public/w/bookmarks/device-store.js');
+  const broken = {
+    getItem() {
+      throw new Error('denied');
+    },
+    setItem() {
+      throw new Error('denied');
+    }
+  };
+  assert.equal(deviceId(broken), 'unsettled');
 });
 
 test('clearing a device survives storage that refuses to be read', () => {

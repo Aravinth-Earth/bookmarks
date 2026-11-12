@@ -17,7 +17,7 @@ import {
   recordClick,
   searchNarrowsList,
   sortBookmarks,
-  setOpenCount,
+  recordUses,
   togglePin,
   updateBookmark,
   useCount
@@ -36,6 +36,7 @@ import {
   SIZE_KEY,
   VIEW_KEY,
   clearDeviceStorage,
+  deviceId,
   hostKey,
   pruneIconTries
 } from './device-store.js';
@@ -1723,11 +1724,11 @@ let collectedFingerprint = null;
 function applyOpenCounts(snapshot) {
   if (!snapshot || !state.document) return false;
 
-  const changes = openCounts(snapshot.items, state.document.bookmarks);
+  const changes = openCounts(snapshot.items, state.document.bookmarks, deviceId());
   if (changes.length === 0) return false;
 
   let next = state.document;
-  for (const change of changes) next = setOpenCount(next, change.id, change.openCount, Date.now);
+  for (const change of changes) next = recordUses(next, change.id, deviceId(), change.openCount, Date.now);
   state.document = next;
   return true;
 }
@@ -2031,7 +2032,7 @@ function approveMany(rows) {
     try {
       const result = addBookmark(
         next,
-        { url: row.url, name: nameForCollected(row), openCount: row.visits },
+        { url: row.url, name: nameForCollected(row), uses: { [deviceId()]: Number(row.visits) || 0 } },
         Date.now
       );
       next = result.document;
@@ -2196,7 +2197,7 @@ function approveCollected(url, visits, label = '') {
        would throw away the only thing the extension was counting. */
     const { document: next, bookmark } = addBookmark(
       state.document,
-      { url, name: nameForCollected({ url }), openCount: Number.isInteger(visits) ? visits : 0 },
+      { url, name: nameForCollected({ url }), uses: { [deviceId()]: Number.isInteger(visits) ? visits : 0 } },
       Date.now
     );
     state.document = next;
