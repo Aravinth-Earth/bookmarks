@@ -73,7 +73,7 @@ function harness(limiters = {}) {
 }
 
 function api(path, { method = 'GET', source = SOURCE, body, headers = {} } = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api${path}`, {
+  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api${path}`, {
     method,
     headers: {
       'cf-connecting-ip': source,
@@ -161,7 +161,7 @@ test('the stylesheet proxy spends the same fetch budget as the icon route', asyn
       return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
     },
     async () => {
-      const sheet = new Request('https://b.332321.xyz/css/tokens.css', {
+      const sheet = new Request('https://bookmarks.332321.xyz/css/tokens.css', {
         headers: { 'cf-connecting-ip': SOURCE }
       });
 

@@ -15,7 +15,7 @@ import { digestHex, logEvent } from './events.js';
 const CANONICAL = '/w/bookmarks';
 /* The app's own host. Anything under the old www path is sent here, so the app is never used
    on an origin that other site pages can read storage from. */
-const APP_HOST = 'b.332321.xyz';
+const APP_HOST = 'bookmarks.332321.xyz';
 const API_PREFIX = `${CANONICAL}/api`;
 const VERSION = '0.1.0';
 
@@ -1173,23 +1173,20 @@ async function handleApi(request, env, url) {
   return json({ error: 'not_found' }, 404);
 }
 
+/* The app answers on its own host and nowhere else. One origin, one vault: if this Worker were also bound to the
+   site's host, a page there would open a second, empty vault with the same phrase, and the person would see their
+   bookmarks missing. The dev server is loopback, which is why that is allowed. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+function onItsOwnHost(hostname) {
+  return hostname === APP_HOST || LOOPBACK_HOSTS.has(hostname);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    /* The app moved to its own host. Anything still pointed at the old path is sent there so
-       no one keeps using the copy that shares storage with the rest of the site. */
-    if (
-      url.hostname === 'www.332321.xyz' &&
-      (url.pathname === CANONICAL || url.pathname.startsWith(`${CANONICAL}/`))
-    ) {
-      const target = new URL(url);
-      target.hostname = APP_HOST;
-      return new Response(null, {
-        status: 301,
-        headers: { location: target.toString(), 'cache-control': 'no-store' }
-      });
-    }
+    if (!onItsOwnHost(url.hostname)) return json({ error: 'wrong_host' }, 421);
 
     if (url.pathname === CANONICAL) return redirect(url, `${CANONICAL}/`);
 

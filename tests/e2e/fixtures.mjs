@@ -44,14 +44,14 @@ export async function launch({ withExtension = true, slowMo = 0 } = {}) {
           `--load-extension=${EXTENSION_DIR}`,
           /* A first install opens the hosted vault before any route is registered, so the name is pointed at the
              machine itself: it fails at once instead of reaching for the deployed build on every test. */
-          '--host-resolver-rules=MAP b.332321.xyz 127.0.0.1'
+          '--host-resolver-rules=MAP bookmarks.332321.xyz 127.0.0.1'
         ]
-      : ['--host-resolver-rules=MAP b.332321.xyz 127.0.0.1']
+      : ['--host-resolver-rules=MAP bookmarks.332321.xyz 127.0.0.1']
   });
 
   /* A first install opens the hosted vault to ask its question. The suite answers that origin itself, so a test run
      never reaches the network and never depends on the deployed build. */
-  await context.route('https://b.332321.xyz/**', (route) =>
+  await context.route('https://bookmarks.332321.xyz/**', (route) =>
     route.fulfill({ status: 204, contentType: 'text/html', body: '' })
   );
 

@@ -77,20 +77,12 @@ new_sqlite_classes = ["Registry"]
 # The app's own origin. IndexedDB belongs to a host, not a path, so serving the app here keeps
 # its remembered key out of reach of every other page on www.
 [[routes]]
-pattern = "b.332321.xyz/*"
-zone_name = "332321.xyz"
-
-[[routes]]
-pattern = "b.332321.xyz"
-zone_name = "332321.xyz"
-
-[[routes]]
-pattern = "www.332321.xyz/w/bookmarks/*"
+pattern = "bookmarks.332321.xyz/*"
 zone_name = "332321.xyz"
 
 # A wildcard route does not match the slash-less path, so the bare canonical path needs its own.
 [[routes]]
-pattern = "www.332321.xyz/w/bookmarks"
+pattern = "bookmarks.332321.xyz"
 zone_name = "332321.xyz"
 
 # Workers Builds runs `npx wrangler preview` for every branch push, and that command refuses to

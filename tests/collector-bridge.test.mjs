@@ -13,7 +13,7 @@ function fakeWindow() {
   const listeners = new Set();
   const posted = [];
   const host = {
-    location: { origin: 'https://b.332321.xyz' },
+    location: { origin: 'https://bookmarks.332321.xyz' },
     addEventListener(type, listener) {
       if (type === 'message') listeners.add(listener);
     },

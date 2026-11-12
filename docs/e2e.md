@@ -24,7 +24,7 @@ Nothing in the suite names a path on the machine it was written on:
 | the app | `wrangler dev` on `E2E_PORT` (default 8899), started and stopped by Playwright |
 | the browser | Playwright's own Chromium, `npx playwright install chromium` |
 | the pages a test "visits" | a Playwright route answering `https://e2e.local/**`, so no network is needed |
-| a different target | set `E2E_BASE_URL=https://b.332321.xyz` and no server is started |
+| a different target | set `E2E_BASE_URL=https://bookmarks.332321.xyz` and no server is started |
 
 `wrangler dev` writes into `.wrangler/e2e-state`, which is ignored by git, so a run never mixes with a development
 vault.

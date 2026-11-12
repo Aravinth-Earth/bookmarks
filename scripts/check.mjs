@@ -320,7 +320,7 @@ try {
   }
 
   /* A content script may only be injected into the vault, and only if the file it names is actually present. */
-  const vault = new URL('https://b.332321.xyz/w/bookmarks/');
+  const vault = new URL('https://bookmarks.332321.xyz/w/bookmarks/');
   const names = extensionNames;
   if (names.length === 0) problems.push('extension: no files found');
 
@@ -350,7 +350,7 @@ try {
 
   /* This host set is deliberately smaller than the page's: the page may talk to its own Worker, the extension
      may talk to nothing. Loopback is not an exception — a local port is still somewhere a URL can be sent. */
-  const extensionHosts = new Set(['b.332321.xyz', '332321.xyz', 'www.332321.xyz']);
+  const extensionHosts = new Set(['bookmarks.332321.xyz', '332321.xyz', 'www.332321.xyz']);
 
   /* Calls that would reach the network, whatever they are handed. A literal-URL scan cannot see
      `fetch(\`https://${host}/?u=${url}\`)`, which is the shape exfiltration actually takes. */

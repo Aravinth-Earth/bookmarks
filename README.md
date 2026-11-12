@@ -1,7 +1,7 @@
 # Bookmarks
 
 An end-to-end encrypted, local-first bookmark vault, served at
-<https://b.332321.xyz/w/bookmarks/>. The local vault is free for everyone, for good; the hosted
+<https://bookmarks.332321.xyz/w/bookmarks/>. The local vault is free for everyone, for good; the hosted
 sync service is the paid part, and it is still being built.
 
 The vault is sealed in the browser with AES-256-GCM under a key derived from a 13-word phrase.
@@ -53,9 +53,10 @@ extension/                    the optional companion extension (MV3, unpacked du
 
 ## Hosting
 
-The app is served from **b.332321.xyz**, its own origin. IndexedDB belongs to a host, not a
+The app is served from **bookmarks.332321.xyz**, its own origin. IndexedDB belongs to a host, not a
 path, so the remembered key cannot be read by any other page on the site. The old
-`www.332321.xyz/w/bookmarks/` path redirects here.
+The site links to it from a page of its own; the app is served only on that host, so the vault's storage is never
+shared with the rest of the site.
 
 The host needs one proxied DNS record in the Cloudflare zone (an AAAA to `100::`, or a CNAME to
 the apex); the Worker route does the rest.
@@ -74,7 +75,7 @@ merge to `main` builds and deploys. A manual `wrangler deploy` is break-glass on
 is live with
 
 ```sh
-curl -s https://b.332321.xyz/w/bookmarks/api/health   # {"ok":true,"version":"0.1.0"}
+curl -s https://bookmarks.332321.xyz/w/bookmarks/api/health   # {"ok":true,"version":"0.1.0"}
 ```
 
 If a merge does not appear live within five minutes, check the build in the Cloudflare dashboard

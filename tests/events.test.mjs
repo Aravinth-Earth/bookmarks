@@ -433,7 +433,7 @@ function workerHarness({ refuse = [], throwOnObject = false } = {}) {
 }
 
 function api(path, { method = 'GET', body, headers = {}, source = SOURCE } = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api${path}`, {
+  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api${path}`, {
     method,
     headers: {
       'cf-connecting-ip': source,

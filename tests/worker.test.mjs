@@ -55,7 +55,7 @@ function harness({ doStatus = 201, doBody = { ok: true } } = {}) {
 }
 
 function api(path, options = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api${path}`, options);
+  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api${path}`, options);
 }
 
 test('health answers without any credential', async () => {
@@ -154,7 +154,7 @@ test('an unknown API path is a 404', async () => {
 
 test('the app is served through the assets binding with the security headers', async () => {
   const response = await worker.fetch(
-    new Request('https://b.332321.xyz/w/bookmarks/'),
+    new Request('https://bookmarks.332321.xyz/w/bookmarks/'),
     harness().env
   );
 
@@ -166,12 +166,12 @@ test('the app is served through the assets binding with the security headers', a
 
 test('the bare path redirects to the slashed one', async () => {
   const response = await worker.fetch(
-    new Request('https://b.332321.xyz/w/bookmarks'),
+    new Request('https://bookmarks.332321.xyz/w/bookmarks'),
     harness().env
   );
 
   assert.equal(response.status, 301);
-  assert.equal(response.headers.get('location'), 'https://b.332321.xyz/w/bookmarks/');
+  assert.equal(response.headers.get('location'), 'https://bookmarks.332321.xyz/w/bookmarks/');
 });
 
 /* A preview path on either host is now an unknown path: the asset tree has no such directory,
@@ -197,7 +197,7 @@ test('the preview path is an unknown path, on the app host and on www', async ()
     }
   };
 
-  for (const host of ['b.332321.xyz', 'www.332321.xyz']) {
+  for (const host of ['bookmarks.332321.xyz']) {
     for (const path of ['/w/bookmarks-preview', '/w/bookmarks-preview/']) {
       const response = await worker.fetch(new Request(`https://${host}${path}`), env);
 
@@ -214,7 +214,7 @@ test('the preview path is an unknown path, on the app host and on www', async ()
 
   /* The sibling path the loop above must not be confused with. */
   const canonical = await worker.fetch(
-    new Request('https://b.332321.xyz/w/bookmarks/'),
+    new Request('https://bookmarks.332321.xyz/w/bookmarks/'),
     env
   );
   assert.equal(canonical.status, 200);
@@ -227,7 +227,7 @@ const ICON_HOST = 'example.com';
 const ICON_HASH = createHash('sha256').update(ICON_HOST).digest('base64url');
 
 function iconRequest({ host = ICON_HOST, hash = ICON_HASH } = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api/icon?h=${hash}`, {
+  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api/icon?h=${hash}`, {
     headers: host ? { 'x-icon-host': host } : {}
   });
 }
@@ -248,7 +248,7 @@ test('the icon service refuses a missing hostname, a non-DNS host or a wrong has
   }
 
   const noHost = await worker.fetch(
-    new Request('https://b.332321.xyz/w/bookmarks/api/icon?h=x'),
+    new Request('https://bookmarks.332321.xyz/w/bookmarks/api/icon?h=x'),
     harness().env
   );
   assert.equal(noHost.status, 400);
@@ -469,14 +469,14 @@ test('a redirect that leaves https is not followed', async () => {
   assert.equal(response.status, 404);
 });
 
-test('the old www path redirects to the app host', async () => {
-  const response = await worker.fetch(
-    new Request('https://www.332321.xyz/w/bookmarks/'),
-    harness().env
-  );
+test('the app answers on its own host and nowhere else', async () => {
+  const onApp = await worker.fetch(new Request('https://bookmarks.332321.xyz/w/bookmarks/'), harness().env);
+  assert.equal(onApp.status, 200);
 
-  assert.equal(response.status, 301);
-  assert.equal(response.headers.get('location'), 'https://b.332321.xyz/w/bookmarks/');
+  /* The site's own path is not routed here any more, so this Worker is never asked about it; if it is, it must not
+     answer with the app. No redirect stands in for the old address: one origin, one vault. */
+  const onSite = await worker.fetch(new Request('https://www.332321.xyz/w/bookmarks/'), harness().env);
+  assert.notEqual(onSite.status, 200);
 });
 
 test('the site stylesheets are proxied with a cache header', async () => {
@@ -487,7 +487,7 @@ test('the site stylesheets are proxied with a cache header', async () => {
       asked.push({ url, init });
       return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
     },
-    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
+    () => worker.fetch(new Request('https://bookmarks.332321.xyz/css/tokens.css'), harness().env)
   );
 
   assert.equal(response.status, 200);
@@ -512,7 +512,7 @@ test('the stylesheet proxy copies no upstream header and follows no redirect', a
         }
       });
     },
-    () => worker.fetch(new Request('https://b.332321.xyz/css/themes.css'), harness().env)
+    () => worker.fetch(new Request('https://bookmarks.332321.xyz/css/themes.css'), harness().env)
   );
 
   assert.equal(response.status, 200);
@@ -531,13 +531,13 @@ test('the stylesheet proxy refuses a redirect, a non-CSS answer and a non-read m
         status: 302,
         headers: { location: 'https://elsewhere.example/x.css', 'content-type': 'text/css' }
       }),
-    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
+    () => worker.fetch(new Request('https://bookmarks.332321.xyz/css/tokens.css'), harness().env)
   );
   assert.equal(redirected.status, 502);
 
   const html = await withFetch(
     () => new Response('<p>no</p>', { headers: { 'content-type': 'text/html' } }),
-    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
+    () => worker.fetch(new Request('https://bookmarks.332321.xyz/css/tokens.css'), harness().env)
   );
   assert.equal(html.status, 502);
 
@@ -548,7 +548,7 @@ test('the stylesheet proxy refuses a redirect, a non-CSS answer and a non-read m
       return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
     },
     () =>
-      worker.fetch(new Request('https://b.332321.xyz/css/tokens.css', { method: 'POST' }), harness().env)
+      worker.fetch(new Request('https://bookmarks.332321.xyz/css/tokens.css', { method: 'POST' }), harness().env)
   );
   assert.equal(written.status, 405);
   assert.equal(asked.length, 0);
@@ -557,7 +557,7 @@ test('the stylesheet proxy refuses a redirect, a non-CSS answer and a non-read m
 /* -------------------------------------------------------------- title service */
 
 function titleRequest({ host = ICON_HOST, hash = ICON_HASH, method = 'GET' } = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api/title?h=${hash}`, {
+  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api/title?h=${hash}`, {
     method,
     headers: host ? { 'x-page-host': host } : {}
   });
