@@ -237,10 +237,22 @@ test('the sealed vault in IndexedDB and the device storage hold no readable book
   expect(stored.sealed.ct.length, 'sealed ciphertext length').toBeGreaterThan(40);
   expect(stored.sealed.iv.length, 'sealed iv length').toBeGreaterThan(8);
 
-  const sealedDump = JSON.stringify(records).toLowerCase();
+  /* The claim is that nothing readable about the bookmark is stored, so the search runs over
+     everything except the ciphertext itself. Ciphertext is base64 of opaque bytes, and a short
+     needle can fall out of base64 by chance — `http` did once, about once in a few thousand runs,
+     and a test that fails on luck teaches people to ignore it. The ciphertext is checked the other
+     way round: it must look like ciphertext and be long enough to be one. */
+  const readable = JSON.stringify({
+    keys: records.keys,
+    values: records.keys.map((key) => {
+      const value = records.values[records.keys.indexOf(key)] ?? {};
+      return { ...value, sealed: { ...value.sealed, ct: undefined, iv: undefined } };
+    })
+  }).toLowerCase();
   for (const needle of ['e2e.local', 'sekret-title', 'secret-path', 'http']) {
-    expect(sealedDump, `"${needle}" is readable inside the sealed IndexedDB record`).not.toContain(needle);
+    expect(readable, `"${needle}" is readable inside the sealed IndexedDB record`).not.toContain(needle);
   }
+  expect(stored.sealed.ct, 'the ciphertext is base64, not text').toMatch(/^[A-Za-z0-9+/_-]+={0,2}$/);
 
   const storage = await page.evaluate(() => ({ keys: Object.keys(localStorage), all: JSON.stringify(localStorage) }));
   console.log(
