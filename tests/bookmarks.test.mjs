@@ -27,7 +27,7 @@ import {
   sortBookmarks,
   togglePin,
   updateBookmark
-} from '../public/w/bookmarks/bookmarks.js';
+} from '../public/bookmarks.js';
 
 const T1 = Date.UTC(2026, 0, 1, 10, 0, 0);
 const T2 = Date.UTC(2026, 0, 2, 10, 0, 0);
@@ -358,6 +358,25 @@ test('newerPrefs takes the stamped side, and the later stamp when both carry one
   assert.deepEqual(newerPrefs(undefined, newer), newer, 'a document with no prefs takes the other');
 });
 
+/* Silently losing these is how collection switched itself off: the newer copy simply had never carried the key. */
+test('newerPrefs keeps a preference the winning copy has never carried', () => {
+  const withCollection = {
+    iconOnly: false,
+    view: 'pills',
+    updatedAt: T1,
+    collector: { enabled: true, minVisits: 1, sites: [], exclude: [] }
+  };
+  const newerWithoutIt = { iconOnly: false, view: 'pills', sort: 'name', updatedAt: T2 };
+
+  const merged = newerPrefs(withCollection, newerWithoutIt);
+  assert.deepEqual(merged.collector, withCollection.collector, 'the collection settings survive');
+  assert.equal(merged.sort, 'name', 'and the newer copy still wins on what it carries');
+  assert.equal(merged.updatedAt, T2, 'the newer stamp is the one kept');
+
+  const other = newerPrefs(newerWithoutIt, withCollection);
+  assert.deepEqual(other.collector, withCollection.collector, 'from either side');
+});
+
 test('a preference changed on this device survives a merge with an older server copy', () => {
   const localPrefs = { iconOnly: false, sort: 'clicks', updatedAt: T2 };
   const remotePrefs = { iconOnly: false, sort: 'name', updatedAt: T1 };
@@ -387,4 +406,92 @@ test('no operation mutates the document it was given', () => {
   togglePin(document, bookmark.id, at(T2));
 
   assert.equal(JSON.stringify(document), before);
+});
+
+
+test('a bookmark counts every use: the ones opened here and the ones opened in the browser', async () => {
+  const { addBookmark, recordUses, useCount } = await import('../public/bookmarks.js');
+
+  const document = { schema: 1, bookmarks: [], tombstones: [], prefs: { iconOnly: false } };
+  const { document: added, bookmark } = addBookmark(document, { url: 'https://a.example/x', name: 'A' });
+
+  assert.deepEqual(bookmark.uses, {}, 'a new bookmark has been opened nowhere');
+  assert.equal(useCount(bookmark), 0);
+
+  const counted = recordUses(added, bookmark.id, 'device-one', 4);
+  assert.equal(useCount(counted.bookmarks[0]), 4);
+  assert.equal(recordUses(counted, bookmark.id, 'device-one', 4), counted, 'the same total is not a change');
+  assert.equal(recordUses(counted, bookmark.id, 'device-one', 2), counted, 'a smaller total is ignored');
+
+  /* A second device has its own slot, and the two are added: 4 here and 3 there is seven uses. */
+  const both = recordUses(counted, bookmark.id, 'device-two', 3);
+  assert.equal(useCount(both.bookmarks[0]), 7);
+  assert.equal(recordUses(both, bookmark.id, 'device-two', 3), both, 'and the same slot twice is not');
+});
+
+test('a merge adds two devices\' slots and keeps the larger number inside one slot', async () => {
+  const { mergeBookmark, useCount } = await import('../public/bookmarks.js');
+
+  const base = {
+    id: 'a',
+    url: 'https://a.example/',
+    clickCount: 1,
+    uses: { one: 4, two: 1 },
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  };
+  const other = { ...base, uses: { one: 2, two: 6 }, updatedAt: '2026-01-02T00:00:00.000Z' };
+  const merged = mergeBookmark(base, other);
+
+  assert.deepEqual(merged.uses, { one: 4, two: 6 }, 'the larger number inside each slot');
+  assert.equal(useCount(merged), 11, 'and the total is their sum, plus the one click');
+
+  /* A merge is idempotent: the same two sides again is the same answer, which is what stops a count from growing
+     every time the same blob is merged. */
+  assert.deepEqual(mergeBookmark(merged, other).uses, { one: 4, two: 6 });
+
+  /* A document that only ever had one number keeps it, in a slot of its own. */
+  const legacy = { ...base, uses: undefined, openCount: 7 };
+  assert.deepEqual(mergeBookmark(legacy, other).uses, { legacy: 7, one: 2, two: 6 });
+});
+
+test('two devices that counted the same bookmark add up, and merging again adds nothing', async () => {
+  const { mergeDocuments, useCount } = await import('../public/bookmarks.js');
+
+  const device = (deviceId, count, updatedAt) => ({
+    schema: 1,
+    bookmarks: [
+      {
+        id: 'same',
+        url: 'https://a.example/',
+        hostname: 'a.example',
+        origin: 'https://a.example',
+        name: 'A',
+        search: '',
+        clickCount: 0,
+        uses: { [deviceId]: count },
+        pinned: false,
+        hideLabel: false,
+        icon: null,
+        color: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt,
+        lastClickedAt: null
+      }
+    ],
+    tombstones: [],
+    prefs: { iconOnly: false }
+  });
+
+  const laptop = device('laptop', 3, '2026-01-02T00:00:00.000Z');
+  const phone = device('phone', 2, '2026-01-03T00:00:00.000Z');
+
+  const once = mergeDocuments(laptop, phone).document;
+  assert.equal(useCount(once.bookmarks[0]), 5, 'three on one device and two on the other');
+
+  const twice = mergeDocuments(once, phone).document;
+  assert.equal(useCount(twice.bookmarks[0]), 5, 'merging the same device again adds nothing');
+
+  const third = mergeDocuments(twice, device('tablet', 4, '2026-01-04T00:00:00.000Z')).document;
+  assert.equal(useCount(third.bookmarks[0]), 9, 'a third device brings its own count');
 });

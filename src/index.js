@@ -12,17 +12,12 @@
 
 import { digestHex, logEvent } from './events.js';
 
-const CANONICAL = '/w/bookmarks';
-/* The app's own host. Anything under the old www path is sent here, so the app is never used
-   on an origin that other site pages can read storage from. */
-const APP_HOST = 'b.332321.xyz';
-const API_PREFIX = `${CANONICAL}/api`;
+/* The app is the whole of its own origin: the page sits at `/`, so there is no prefix to strip and
+   no path to redirect. The path it was first served under is an unknown path here now, and the
+   site's host does not reach this Worker at all — retired, not redirected. */
+const APP_HOST = 'bookmarks.332321.xyz';
+const API_PREFIX = '/api';
 const VERSION = '0.1.0';
-
-/* The two site stylesheets the app uses. They live on www; on the app's own host they are
-   proxied from there, so the browser still sees a same-origin request and the CSP needs no
-   exception. The allowlist is the guard: only these two paths are ever fetched. */
-const SITE_STYLESHEETS = new Set(['/css/tokens.css', '/css/themes.css']);
 
 /* The same policy the rest of the site's Worker-served apps carry, and the reason no inline
    script exists in this app: `script-src 'self'` would refuse one. `img-src` allows data: so a
@@ -54,74 +49,6 @@ function json(body, status = 200) {
   });
 }
 
-function redirect(url, pathname) {
-  const target = new URL(url);
-  target.pathname = pathname;
-  return new Response(null, {
-    status: 301,
-    headers: { location: target.toString(), 'cache-control': 'no-store' }
-  });
-}
-
-/* The site's two stylesheets live on the site host and are served from the app host, which is
-   the one that holds the sealed vault. The request names one fixed origin and one of two fixed
-   paths, follows no redirect, and answers with a header set written here rather than copied from
-   the site: a header the site sets — a cookie in particular — would otherwise be stored against
-   the vault's own origin. */
-const STYLESHEET_TIMEOUT_MS = 5000;
-
-function stylesheetUnavailable() {
-  return new Response(null, {
-    status: 502,
-    headers: { 'cache-control': 'no-store' }
-  });
-}
-
-async function proxyStylesheet(pathname, request) {
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    return new Response(null, {
-      status: 405,
-      headers: { allow: 'GET, HEAD', 'cache-control': 'no-store' }
-    });
-  }
-
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), STYLESHEET_TIMEOUT_MS);
-
-  try {
-    const upstream = await fetch(`https://www.332321.xyz${pathname}`, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: abort.signal,
-      headers: { accept: 'text/css' }
-    });
-
-    /* Only a direct 200 that says it is CSS is passed on. A redirect is refused rather than
-       followed, so the destination is never a host this file did not name. */
-    const type = upstream.headers.get('content-type') ?? '';
-    if (upstream.status !== 200 || !/^text\/css\b/i.test(type)) {
-      if (upstream.body) await upstream.body.cancel().catch(() => {});
-      return stylesheetUnavailable();
-    }
-
-    const headers = {
-      'content-type': 'text/css; charset=utf-8',
-      'cache-control': 'public, max-age=86400',
-      'x-content-type-options': 'nosniff'
-    };
-    const etag = upstream.headers.get('etag');
-    const lastModified = upstream.headers.get('last-modified');
-    if (etag) headers.etag = etag;
-    if (lastModified) headers['last-modified'] = lastModified;
-
-    return new Response(request.method === 'HEAD' ? null : upstream.body, { status: 200, headers });
-  } catch {
-    return stylesheetUnavailable();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
  * Has this source spent its class's budget?
  *
@@ -133,6 +60,12 @@ async function overLimit(env, className, request) {
   const rule = LIMITS[className];
   const binding = env?.[rule.binding];
   if (!binding) return false;
+
+  /* A laptop is not a source to defend against. The dev server rewrites the request to the route's
+     own host, so there is no loopback address left to test; the dev machine instead says so in its
+     own `.dev.vars`, which is not committed. Nothing in `[vars]` may carry the switch — check.mjs
+     refuses a deploy that does — so the deployed Worker cannot be put in this state. */
+  if (String(env?.RATE_LIMIT_DISABLED ?? '').toLowerCase() === 'true') return false;
 
   const address = request.headers.get('cf-connecting-ip') ?? '';
   const digest = await crypto.subtle.digest(
@@ -224,7 +157,7 @@ function notFound() {
 <main>
   <h1>Not found</h1>
   <p>That page does not exist.</p>
-  <p><a href="${CANONICAL}/">Back to Bookmarks</a></p>
+  <p><a href="/">Back to Bookmarks</a></p>
 </main>
 </body>
 </html>
@@ -312,7 +245,7 @@ function accountOf(pathname) {
   return match && ACCOUNT_ID.test(match[1]) ? match[1] : undefined;
 }
 
-const USER_AGENT = 'Bookmarks/0.1 (+https://www.332321.xyz/w/bookmarks/)';
+const USER_AGENT = 'Bookmarks/0.1 (+https://bookmarks.332321.xyz/)';
 
 /* A hostname, not a URL: no scheme, no port, no path, no IP literal, no single label. */
 const HOSTNAME = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
@@ -1173,30 +1106,23 @@ async function handleApi(request, env, url) {
   return json({ error: 'not_found' }, 404);
 }
 
+/* The app answers on its own host and nowhere else. One origin, one vault: if this Worker were also bound to the
+   site's host, a page there would open a second, empty vault with the same phrase, and the person would see their
+   bookmarks missing. The dev server is loopback, which is why that is allowed. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+function onItsOwnHost(hostname) {
+  return hostname === APP_HOST || LOOPBACK_HOSTS.has(hostname);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    /* The app moved to its own host. Anything still pointed at the old path is sent there so
-       no one keeps using the copy that shares storage with the rest of the site. */
-    if (
-      url.hostname === 'www.332321.xyz' &&
-      (url.pathname === CANONICAL || url.pathname.startsWith(`${CANONICAL}/`))
-    ) {
-      const target = new URL(url);
-      target.hostname = APP_HOST;
-      return new Response(null, {
-        status: 301,
-        headers: { location: target.toString(), 'cache-control': 'no-store' }
-      });
-    }
+    if (!onItsOwnHost(url.hostname)) return json({ error: 'wrong_host' }, 421);
 
-    if (url.pathname === CANONICAL) return redirect(url, `${CANONICAL}/`);
-
-    if (SITE_STYLESHEETS.has(url.pathname)) {
-      return limited(env, 'fetch', request, () => proxyStylesheet(url.pathname, request));
-    }
-
+    /* No path redirect: `/` is the app, and any other path is either an asset or a 404. The path
+       this app was first served under has no route and no handler, so it cannot come back. */
     if (url.pathname === API_PREFIX || url.pathname.startsWith(`${API_PREFIX}/`)) {
       try {
         return await handleApi(request, env, url);
@@ -1213,7 +1139,11 @@ export default {
       }
     }
 
-    const assetUrl = new URL(url.pathname + url.search, url.origin);
+    /* `html_handling = "auto-trailing-slash"` answers `/index.html` with a 307 to `/`, which is a
+       redirect for a file that is already the page. Serving the root document under both names
+       keeps it one answer, and keeps the offline shell's copy from being a redirect. */
+    const pathname = url.pathname === '/index.html' ? '/' : url.pathname;
+    const assetUrl = new URL(pathname + url.search, url.origin);
     const response = await env.ASSETS.fetch(new Request(assetUrl, request));
     const headers = new Headers(response.headers);
 

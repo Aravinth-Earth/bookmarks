@@ -16,7 +16,9 @@
 }
 
 html {
-    color-scheme: dark light;
+    /* Only dark: with "dark light" the browser draws its own controls — checkboxes, selects, scrollbars — in the
+       system's light style, which is a row of white squares inside a dark page. */
+    color-scheme: dark;
 }
 
 body {
@@ -888,11 +890,123 @@ body.modal-open {
     gap: var(--space-2, 0.5rem);
 }
 
+/* ---- the settings sheet ---------------------------------------------------------------- */
+
+/* Two rows per line where there is room for them, three where there is a lot: the sheet used to be one long column
+   that the reader had to scroll through one switch at a time. */
+.settings-modal {
+    max-width: 46rem;
+}
+
+.settings-modal .modal-body {
+    /* Everything in this sheet is on the page at once, so the page gives it the whole screen instead of a slice. */
+    max-height: 86vh;
+}
+
+.settings-chips {
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    margin: 0 0 0.7rem;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 0.15rem 0 0.45rem;
+    background: linear-gradient(var(--bg-secondary, #121620) 70%, transparent);
+}
+
+.settings-chip {
+    border: 1px solid var(--border, #21262d);
+    background: var(--bg-inset, #0d1117);
+    color: var(--text-muted, #6e7681);
+    border-radius: 999px;
+    padding: 0.28rem 0.7rem;
+    font: inherit;
+    font-size: var(--font-size-xs, 0.72rem);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.settings-chip:hover {
+    border-color: var(--border-strong, #30363d);
+    color: var(--text-primary, #c9d1d9);
+}
+
+.settings-chip.is-current {
+    background: color-mix(in srgb, var(--accent, #58a6ff) 18%, transparent);
+    border-color: color-mix(in srgb, var(--accent, #58a6ff) 45%, transparent);
+    color: var(--text-primary, #c9d1d9);
+}
+
+.settings-list {
+    display: grid;
+    gap: 0.3rem;
+    align-content: start;
+}
+
+@media (min-width: 46rem) {
+    .settings-modal .settings-list {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+/* On a wide screen the sheet takes the width it is given and lays its rows three across: every control is on the page
+   at once, so the only thing left to save is lines. */
+@media (min-width: 80rem) {
+    .settings-modal {
+        max-width: 60rem;
+    }
+
+    .settings-modal .settings-list {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}
+
+@media (min-width: 80rem) {
+    .settings-modal .modal-body {
+        max-height: 90vh;
+    }
+}
+
+@media (min-width: 110rem) {
+    .settings-modal {
+        max-width: 72rem;
+    }
+
+    .settings-modal .settings-list {
+        grid-template-columns: repeat(4, 1fr);
+    }
+}
+
+/* The sheet is one width at every window size, so its rows are two per line at every window size: three columns of
+   cards inside a 46rem sheet were cramped on a monitor and doubled on a laptop, which read as two different designs. */
+/* A change says so where it was made, and the row holds still while it says it. */
+.settings-saved {
+    color: var(--success, #3fb950);
+    font-size: var(--font-size-xs, 0.7rem);
+    white-space: nowrap;
+}
+
+.settings-saved::before {
+    content: '✓ ';
+}
+
+/* The one line under a control's name, and the label above a group: dimmer than the name they sit under, and no
+   dimmer than 4.5:1 against the card, which the muted grey in the page's tokens is not. */
+.settings-modal .settings-item > span,
+.settings-modal .settings-heading {
+    color: var(--text-secondary, #8b949e);
+}
+
+.settings-item.just-saved {
+    border-color: color-mix(in srgb, var(--success, #3fb950) 55%, var(--border, #21262d));
+}
+
 .settings-item {
     display: grid;
     gap: 0.15rem;
     width: 100%;
-    padding: 0.65rem 0.75rem;
+    padding: 0.45rem 0.55rem;
     background: var(--bg-inset, #0d1117);
     border: 1px solid var(--border, #21262d);
     border-radius: var(--radius-lg, 8px);
@@ -920,8 +1034,28 @@ body.modal-open {
     cursor: default;
 }
 
+/* The invite row holds a field rather than a switch: its surface is not something to press, so it
+   keeps the flat card and the plain cursor, and its field and button stay inside the card's width
+   at every sheet width instead of pushing the page sideways. */
+.settings-invite,
+.settings-invite:hover {
+    background: var(--bg-inset, #0d1117);
+    border-color: var(--border, #21262d);
+    cursor: default;
+}
+
+.settings-invite .settings-invite-field {
+    min-width: 0;
+}
+
+.settings-invite .settings-invite-use {
+    justify-self: start;
+    width: auto;
+    cursor: pointer;
+}
+
 .settings-heading {
-    margin: var(--space-2, 0.5rem) 0 0;
+    margin: 0.45rem 0 0.25rem;
     color: var(--text-muted, #6e7681);
     font-size: var(--font-size-xs, 0.7rem);
     text-transform: uppercase;
@@ -1026,10 +1160,30 @@ body.modal-open {
         width: 100%;
     }
 
+    /* Two lines of controls and a heading fitted into 120px of a phone screen: every pixel here is one the first
+       bookmark does not get. */
+    .masthead {
+        margin-bottom: 0.15rem;
+    }
+
+    .masthead h1 {
+        font-size: 1rem;
+        line-height: 1.2;
+        margin: 0;
+    }
+
     .toolbar {
         flex-wrap: wrap;
-        gap: var(--space-1, 0.25rem);
-        padding: var(--space-1, 0.25rem) 0;
+        gap: 0.25rem;
+        padding: 0.1rem 0 0.25rem;
+    }
+
+    .search input {
+        padding: 0.35rem 0.55rem;
+    }
+
+    .toolbar .button {
+        padding: 0.3rem 0.5rem;
     }
 
     .search {
@@ -1065,6 +1219,94 @@ body.modal-open {
     .row-actions {
         opacity: 1;
     }
+
+    /* A phone has no room for six columns. Six fixed tracks and two flexible ones inside 390px left the name at 0px
+       and the address at 5px: a row became a tile, a number, a date and three buttons with nothing naming it. Two
+       lines instead — the name with its count and its actions, then the address and the day — and the drawn header
+       goes, because nothing lines up under it any more. */
+    .row,
+    #collected-list .row {
+        grid-template-columns: 2.125rem minmax(0, 1fr) auto auto;
+        grid-template-areas:
+            'pick link uses actions'
+            'pick addr when actions';
+        row-gap: 0.1rem;
+        align-items: center;
+        padding: 0.25rem var(--space-1, 0.25rem);
+    }
+
+    .row > .row-pick {
+        grid-area: pick;
+        align-self: center;
+    }
+
+    .row > .row-link {
+        grid-area: link;
+    }
+
+    .row > .row-host {
+        grid-area: addr;
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .row > .clicks {
+        grid-area: uses;
+    }
+
+    .row > .row-when {
+        grid-area: when;
+        text-align: right;
+    }
+
+    .row > .row-actions {
+        grid-area: actions;
+    }
+
+    .row-head {
+        display: none;
+    }
+
+    /* The count and the buttons are the narrowest they can be, so the name gets what is left of the line. */
+    .row > .clicks {
+        width: 2rem;
+        font-size: var(--font-size-xs, 0.75rem);
+    }
+
+    .row > .row-actions .icon-button {
+        padding: 0.22rem 0.3rem;
+    }
+
+    /* The lettered tile is the first thing to go when the line is short: it repeats the first letter of the name
+       that is right beside it, and it costs the name a third of its space. */
+    .row > .row-link .tile {
+        display: none;
+    }
+
+    .row > .row-link {
+        padding-left: 0;
+    }
+
+    /* The collected row indents a grouped child through its link; with the link no longer spanning columns, the
+       indent moves to the row. */
+    .collected-list .row[data-depth='1'] {
+        padding-left: 1rem;
+    }
+
+    .collected-list .row[data-depth='2'] {
+        padding-left: 2rem;
+    }
+
+    .collected-list .row[data-depth='1'] .row-link,
+    .collected-list .row[data-depth='2'] .row-link {
+        padding-left: 0;
+    }
+}
+
+/* A refused address marks the field, not only the corner of the screen. */
+.field input.invalid,
+.field textarea.invalid {
+    border-color: var(--danger, #f85149);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1074,4 +1316,112 @@ body.modal-open {
         transition-duration: 0.01ms !important;
         animation-duration: 0.01ms !important;
     }
+}
+
+
+/* ---------------------------------------------------------------- collected links */
+
+/* The extension's rows, below the vault's own. The markup is the vault's row, so pills and list both come for
+   free; only the heading, the rule above it and the indentation of a grouped row are this section's own. */
+.collected {
+    margin-top: 1.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border, #2a2f36);
+}
+
+.collected-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin: 0 0 0.35rem;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.collected-count {
+    color: var(--text-muted, #6e7681);
+    font-size: 0.875rem;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+}
+
+.collected .view-hint {
+    margin: 0 0 0.5rem;
+}
+
+/* A grouped row holds the rows under it, and the indent is the only thing that says so. Pills never indent: a
+   chip is a chip, and its count already states what it rolls up. */
+.collected-list .row[data-depth='1'] .row-link {
+    padding-left: 1rem;
+}
+
+.collected-list .row[data-depth='2'] .row-link {
+    padding-left: 2rem;
+}
+
+.collected-list[data-view='pills'] .row .row-link {
+    padding-left: 0;
+}
+
+.collected-add {
+    white-space: nowrap;
+}
+
+
+
+/* ------------------------------------------------------------------ collected: bulk selection */
+
+/* A collected row gains one cell for its checkbox, so this list carries seven tracks where the vault's own carries
+   six. The link still covers the tile and the name, which is the target a person aims at. */
+.collected-list .row {
+    grid-template-columns: 1.75rem 2.125rem minmax(0, 1.2fr) minmax(0, 1fr) 4rem 5.5rem 6rem;
+}
+
+.collected-list .row-link {
+    grid-column: 2 / 4;
+}
+
+.collected-list .row-head .row-pick,
+.collected-list .row .row-pick {
+    display: flex;
+    justify-content: center;
+}
+
+/* Pills are a reading view: no checkbox, no bar, nothing to press. */
+.list[data-view='pills'] .row .row-pick {
+    display: none;
+}
+
+.list[data-view='pills'] .row-head {
+    display: none;
+}
+
+.collected-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 0.6rem;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border, #2a2f36);
+    border-radius: var(--radius-md, 6px);
+    background: var(--bg-elevated, #161b22);
+}
+
+.collected-bar-count {
+    margin-right: auto;
+    color: var(--text-muted, #6e7681);
+    font-size: var(--font-size-xs, 0.75rem);
+    font-variant-numeric: tabular-nums;
+}
+
+.collected-scope select {
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--border, #2a2f36);
+    border-radius: var(--radius-md, 6px);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: var(--font-size-xs, 0.75rem);
 }

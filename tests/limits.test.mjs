@@ -73,7 +73,7 @@ function harness(limiters = {}) {
 }
 
 function api(path, { method = 'GET', source = SOURCE, body, headers = {} } = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api${path}`, {
+  return new Request(`https://bookmarks.332321.xyz/api${path}`, {
     method,
     headers: {
       'cf-connecting-ip': source,
@@ -150,7 +150,7 @@ test('a burst on the icon and title routes is refused before anything is fetched
   );
 });
 
-test('the stylesheet proxy spends the same fetch budget as the icon route', async () => {
+test('a stylesheet request is an asset request, so it spends no fetch budget', async () => {
   const { env: limiters } = limits();
   const { env } = harness(limiters);
   let upstream = 0;
@@ -158,28 +158,25 @@ test('the stylesheet proxy spends the same fetch budget as the icon route', asyn
   await withFetch(
     async () => {
       upstream += 1;
-      return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
+      return upstreamMiss();
     },
     async () => {
-      const sheet = new Request('https://b.332321.xyz/css/tokens.css', {
+      const sheet = new Request('https://bookmarks.332321.xyz/css/tokens.css', {
         headers: { 'cf-connecting-ip': SOURCE }
       });
 
+      /* The two stylesheets are the app's own files. An asset request costs nothing against the
+         outbound budget, so a page load cannot be throttled by its own stylesheet and the whole
+         budget is still there for the one route that does leave this origin. */
       for (let at = 0; at < LIMITS.fetch.limit; at += 1) {
         const response = await worker.fetch(sheet, env);
         assert.equal(response.status, 200, `stylesheet request ${at + 1} is served`);
       }
 
-      const before = upstream;
-      const refused = await worker.fetch(sheet, env);
-      assert.equal(refused.status, 429);
-      assert.equal(refused.headers.get('retry-after'), '10');
-      assert.equal(upstream, before, 'the refused request fetched nothing');
+      assert.equal(upstream, 0, 'no stylesheet request fetched another origin');
 
-      /* The class is shared, so the icon route is already spent. */
       const icon = await worker.fetch(api(ICON.path, { headers: ICON.headers }), env);
-      assert.equal(icon.status, 429);
-      assert.equal(upstream, before, 'the refused icon fetched nothing');
+      assert.equal(icon.status, 404, 'the icon route still has its whole budget');
     }
   );
 });

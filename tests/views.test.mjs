@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from '../public/w/bookmarks/views.js';
+import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from '../public/views.js';
 
 test('two views exist and both are recognised', () => {
   assert.deepEqual([...VIEW_NAMES], ['pills', 'list']);

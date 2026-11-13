@@ -1,7 +1,7 @@
 # Bookmarks
 
 An end-to-end encrypted, local-first bookmark vault, served at
-<https://b.332321.xyz/w/bookmarks/>. The local vault is free for everyone, for good; the hosted
+<https://bookmarks.332321.xyz/>. The local vault is free for everyone, for good; the hosted
 sync service is the paid part, and it is still being built.
 
 The vault is sealed in the browser with AES-256-GCM under a key derived from a 13-word phrase.
@@ -20,27 +20,50 @@ sync only ever moves the sealed blob.
 - **No third-party code.** No CDN, no web font, no analytics, no tracker, no vendor icon
   service. The page loads only files this Worker serves.
 
+## Collected links (an optional extension)
+
+Beside the vault there is an optional companion extension, in `extension/`. Installed, it counts the addresses this
+browser opens and lists them under the vault's own list as a second section, where the ones worth keeping can be
+added. It is a separate, opt-in install: the vault works exactly as it does without it.
+
+Nothing collected is in the vault until it is added. The list lives in the extension's own local storage, is never
+synced, and cannot reach the sealed blob on its own — so it is local only whether or not sync is on. Turning it on,
+how long and how many rows are kept, what each site is recorded as, and what is never collected are all decided in
+Settings → Collected links inside the vault, sealed with the vault and pushed to the extension.
+
+The extension asks for `tabs` (the permission a browser describes as reading your browsing history), `storage` and
+`alarms`, and makes no network request at all; `npm run check` fails if that stops being true.
+
 ## Layout
 
 ```
 src/index.js                  the Worker: security headers, routing, the API, the icon proxy
 src/vault.js                  one Durable Object per account: nonce, sessions, sealed vault
 src/registry.js               one Durable Object that caps how many accounts may exist
+src/invites.js                the codes that let one account be created while the cap holds
 src/events.js                 the one shape a logged event has, and the digest it names an account by
-public/w/bookmarks/crypto.js  phrase -> account id, key and auth secret; seal and open
-public/w/bookmarks/vault.js   this device's copy: one sealed blob, a bounded history
-public/w/bookmarks/bookmarks.js  the document: add, edit, delete, sort, filter, merge
-public/w/bookmarks/sync.js    the client half: sign in, pull, push
-public/w/bookmarks/wordlist.js   the 1,296 words a phrase is drawn from
+public/crypto.js              phrase -> account id, key and auth secret; seal and open
+public/vault.js               this device's copy: one sealed blob, a bounded history
+public/bookmarks.js           the document: add, edit, delete, sort, filter, merge
+public/sync.js                the client half: sign in, pull, push
+public/wordlist.js            the 1,296 words a phrase is drawn from
 tests/                        node --test, no dependencies
 scripts/check.mjs             the guards that run before a deploy
+extension/                    the optional companion extension (MV3, unpacked during development)
 ```
+
+The operator page — the one that mints invite codes and lists accounts — is a companion
+repository, **bookmarks-admin**, deployed separately. Nothing here needs it: this Worker answers
+the app and the API, and the admin panel talks to the same objects under the operator routes.
 
 ## Hosting
 
-The app is served from **b.332321.xyz**, its own origin. IndexedDB belongs to a host, not a
-path, so the remembered key cannot be read by any other page on the site. The old
-`www.332321.xyz/w/bookmarks/` path redirects here.
+The app is served from **bookmarks.332321.xyz**, at the root of that host, on its own origin.
+IndexedDB belongs to a host, not a path, so the remembered key cannot be read by any other page on
+the site. The app is the whole of that host: no other page shares the origin, and the earlier
+addresses — the path it was first served under on www, and a shorter host beside it — are gone
+from the routes rather than redirected, so a stale link reaches nothing instead of arriving
+somewhere new.
 
 The host needs one proxied DNS record in the Cloudflare zone (an AAAA to `100::`, or a CNAME to
 the apex); the Worker route does the rest.
@@ -59,7 +82,7 @@ merge to `main` builds and deploys. A manual `wrangler deploy` is break-glass on
 is live with
 
 ```sh
-curl -s https://b.332321.xyz/w/bookmarks/api/health   # {"ok":true,"version":"0.1.0"}
+curl -s https://bookmarks.332321.xyz/api/health   # {"ok":true,"version":"0.1.0"}
 ```
 
 If a merge does not appear live within five minutes, check the build in the Cloudflare dashboard

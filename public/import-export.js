@@ -243,9 +243,16 @@ export function importBrowserBookmarks(html, now = Date.now) {
     if (!/^https?:\/\//i.test(url)) continue;
 
     const addDate = match[0].match(/add_date\s*=\s*"(\d+)"/i);
+    /* Anchor text may hold nested tags, and one pass can leave a tag behind (`<<a>>` -> `<a>`); strip until the
+       string stops changing, then decode what is left. */
+    let name = match[2];
+    for (let previous = null; previous !== name;) {
+      previous = name;
+      name = name.replace(/<[^>]*>/g, '');
+    }
     entries.push({
       url,
-      name: decodeEntities(match[2].replace(/<[^>]*>/g, '')).trim(),
+      name: decodeEntities(name).trim(),
       created_date: addDate ? Number(addDate[1]) * 1000 : undefined
     });
   }

@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { LOCK_CHANNEL, createLockSignal } from '../public/w/bookmarks/lock-signal.js';
+import { LOCK_CHANNEL, createLockSignal } from '../public/lock-signal.js';
 
 /** A channel that records what it was asked to send and lets a test deliver a message. */
 function fakeChannel() {
@@ -36,6 +36,17 @@ function fakeChannel() {
   };
 }
 
+/** BroadcastChannel delivers on a task, and how soon depends on what else the machine is doing: wait for the fact
+    rather than for a clock, or this file fails only in the runs that are busy. */
+async function until(predicate, timeout = 2000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return predicate();
+}
+
 test('a lock posted in one tab reaches another tab on the same name', async () => {
   const left = createLockSignal();
   const right = createLockSignal();
@@ -48,9 +59,7 @@ test('a lock posted in one tab reaches another tab on the same name', async () =
     assert.equal(LOCK_CHANNEL, 'bookmarks-lock');
     assert.equal(left.broadcast(), true);
 
-    /* BroadcastChannel delivers on a task, not synchronously. */
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(locked, 1, 'the other tab was told to lock');
+    assert.equal(await until(() => locked === 1), true, 'the other tab was told to lock');
     unwatch();
   } finally {
     left.close();
@@ -66,7 +75,7 @@ test('a tab never locks itself from its own broadcast', async () => {
       locked += 1;
     });
     signal.broadcast();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await until(() => locked > 0);
     assert.equal(locked, 0, 'the sender handles its own lock directly');
   } finally {
     signal.close();

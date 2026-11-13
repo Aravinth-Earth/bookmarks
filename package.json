@@ -3,15 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Bookmarks — end-to-end encrypted, local-first bookmark vault at 332321.xyz/w/bookmarks/",
+  "description": "Bookmarks \u2014 end-to-end encrypted, local-first bookmark vault at bookmarks.332321.xyz",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "dev": "wrangler dev",
     "test": "node --test tests/*.test.mjs",
     "check": "node scripts/check.mjs",
-    "deploy": "node scripts/check.mjs && wrangler deploy"
+    "deploy": "node scripts/check.mjs && wrangler deploy",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "wrangler": "^4.42.0"
   }
 }

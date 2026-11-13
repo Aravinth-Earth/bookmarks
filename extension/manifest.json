@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Bookmarks \u2014 collected links",
+  "version": "0.2.5",
+  "description": "Optional companion for a bookmark vault on bookmarks.332321.xyz. Keeps a local list of the addresses you open, so you can add the ones worth keeping.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "tabs",
+    "storage",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "incognito": "spanning",
+  "action": {
+    "default_title": "Bookmarks \u2014 collected links"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'none'"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://bookmarks.332321.xyz/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

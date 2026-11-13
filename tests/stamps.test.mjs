@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { MISSING_STAMP, formatStamp } from '../public/w/bookmarks/stamps.js';
+import { MISSING_STAMP, formatStamp } from '../public/stamps.js';
 
 /* 2026-11-08T09:04:00Z. Both zones below are named so the expected string does not move with
    the machine the tests run on. */

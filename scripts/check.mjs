@@ -11,7 +11,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,6 +32,12 @@ function walk(directory) {
 
 const assets = walk(publicDir);
 
+/* The extension is a second parcel of browser modules. A syntax error there fails only when the worker is loaded,
+   which nothing in this repository reaches, so it is parsed here with the page's own modules. */
+const extensionDir = join(root, 'extension');
+const extensionFiles = existsSync(extensionDir) ? walk(extensionDir) : [];
+const extensionNames = extensionFiles.map((path) => relative(extensionDir, path));
+
 /* 0. A scan over nothing proves nothing. */
 if (assets.length === 0) {
   console.error(`check failed: no assets found under ${publicDir}`);
@@ -39,7 +45,7 @@ if (assets.length === 0) {
 }
 
 /* 1. Every browser module must parse. */
-for (const file of assets.filter((path) => path.endsWith('.js'))) {
+for (const file of [...assets, ...extensionFiles].filter((path) => path.endsWith('.js'))) {
   try {
     execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
   } catch (error) {
@@ -51,8 +57,7 @@ for (const file of assets.filter((path) => path.endsWith('.js'))) {
    `332321.xyz.attacker.example` and a `localhost` that only appears in a path cannot pass. */
 /* The SVG namespace is an identifier, never a request, but the scan cannot tell the difference. */
 const allowedHosts = new Set([
-  '332321.xyz',
-  'www.332321.xyz',
+  'bookmarks.332321.xyz',
   'localhost',
   '127.0.0.1',
   'www.w3.org'
@@ -152,6 +157,36 @@ for (const file of assets) {
   }
 }
 
+/* 2b. The two stylesheets the page draws with are the app's own files now, not the site's. A page
+   that links a path nobody ships renders unstyled and says so only in a console nobody reads, and
+   these two paths used to be proxied from the site host — so the links, the files they name, and
+   the absence of that host are all checked here. Nothing in public/ may name www.332321.xyz again:
+   the app answers with the bytes in its own repository or it does not draw at all. */
+try {
+  const page = readFileSync(join(publicDir, 'index.html'), 'utf8');
+
+  for (const name of ['tokens.css', 'themes.css']) {
+    if (!page.includes(`href="/css/${name}"`)) {
+      problems.push(`stylesheets: index.html does not link /css/${name}`);
+    }
+
+    const file = join(publicDir, 'css', name);
+    if (!existsSync(file)) problems.push(`stylesheets: public/css/${name} is missing`);
+    else if (statSync(file).size < 1000) problems.push(`stylesheets: public/css/${name} looks truncated`);
+  }
+
+  for (const file of assets) {
+    if (readFileSync(file, 'utf8').includes('www.332321.xyz')) {
+      problems.push(
+        `${relative(root, file)}: names www.332321.xyz, which this app no longer reads a stylesheet from`
+      );
+      break;
+    }
+  }
+} catch (error) {
+  problems.push(`stylesheets: ${error.message}`);
+}
+
 /* 3. README.md makes the same promises to a reader who never opens the page, so it is held to
    the same list. It is read directly: a repository with no README fails here rather than
    passing the way an empty scan would. */
@@ -167,7 +202,7 @@ try {
 /* 4. The word list is the entropy of every vault: a truncated one silently weakens every phrase
    made after the truncation, and nothing else would notice. */
 try {
-  const { WORDLIST } = await import(join(publicDir, 'w/bookmarks/wordlist.js'));
+  const { WORDLIST } = await import(join(publicDir, 'wordlist.js'));
   if (WORDLIST.length !== 1296) {
     problems.push(`wordlist: expected 1296 words, got ${WORDLIST.length}`);
   }
@@ -216,6 +251,19 @@ try {
   problems.push(`limits: ${error.message}`);
 }
 
+/* 5b. The throttle cannot be switched off by anything a deploy reads. The dev machine turns it
+   off in its own `.dev.vars` so a test suite can exercise the product instead of the limiter; a
+   `[vars]` entry with the same name would ship that state to everyone. */
+try {
+  const config = readFileSync(join(root, 'wrangler.toml'), 'utf8');
+  const vars = config.split(/^\[vars\]$/m)[1]?.split(/^\[[^\]]+\]$/m)[0] ?? '';
+  if (/^\s*RATE_LIMIT_DISABLED\s*=/m.test(vars)) {
+    problems.push('limits: [vars] carries RATE_LIMIT_DISABLED — the deployed throttle would be off');
+  }
+} catch (error) {
+  problems.push(`limits: ${error.message}`);
+}
+
 /* 6. Invocation logging must stay off. Every account route carries `/a/<accountId>/`, and the
    invocation line is written from the request path, so a config edit that turns it back on
    publishes the id that `src/events.js` digests on purpose. The event stream is the intended
@@ -247,19 +295,187 @@ try {
    SHELL works on the first visit and then fails once the page is offline, which is the one state
    the page cannot report. Both lists are read from the files rather than written down again. */
 try {
-  const page = readFileSync(join(publicDir, 'w/bookmarks/app.js'), 'utf8');
-  const worker = readFileSync(join(publicDir, 'w/bookmarks/sw.js'), 'utf8');
+  const page = readFileSync(join(publicDir, 'app.js'), 'utf8');
+  const worker = readFileSync(join(publicDir, 'sw.js'), 'utf8');
   const imported = [...page.matchAll(/from '\.\/([\w-]+\.js)'/g)].map((match) => match[1]);
-  const shell = new Set([...worker.matchAll(/'\/w\/bookmarks\/([\w-]+\.js)'/g)].map((match) => match[1]));
+  /* The shell's entries are root-absolute now, so the prefix is one slash: `'/app.js'`. */
+  const shell = new Set([...worker.matchAll(/'\/([\w-]+\.js)'/g)].map((match) => match[1]));
 
   if (imported.length === 0) problems.push('shell: no module imports found in app.js');
 
   for (const name of imported) {
     if (!shell.has(name)) problems.push(`shell: app.js imports ${name}, which sw.js does not cache`);
   }
+
+  /* The two stylesheets are same-origin files now, so they belong in the same atomic install as the
+     modules: a page that loads offline without them renders as unstyled markup. */
+  for (const path of ['/css/tokens.css', '/css/themes.css']) {
+    if (!worker.includes(`'${path}'`)) problems.push(`shell: sw.js does not cache ${path}`);
+  }
 } catch (error) {
   problems.push(`shell: ${error.message}`);
 }
+
+/* 8. The extension is optional, local and silent. Every clause here is a promise made to whoever installs it:
+   it asks for nothing beyond the three permissions the feature needs, it declares nothing that would let another
+   origin reach it, it contacts nobody, and it names the same bridge as the page. A key this guard does not know
+   about is a key nobody reviewed, so the manifest is compared against an allowed set and fails closed. */
+try {
+  const manifest = JSON.parse(readFileSync(join(extensionDir, 'manifest.json'), 'utf8'));
+
+  if (manifest.manifest_version !== 3) {
+    problems.push(`extension: manifest_version is ${manifest.manifest_version}, not 3`);
+  }
+
+  const allowedKeys = new Set([
+    'manifest_version', 'name', 'version', 'description', 'minimum_chrome_version', 'permissions',
+    'background', 'incognito', 'action', 'content_scripts', 'content_security_policy', 'icons', 'author'
+  ]);
+  const named = new Set(['optional_permissions', 'externally_connectable', 'web_accessible_resources', 'sandbox']);
+  for (const key of Object.keys(manifest)) {
+    if (!allowedKeys.has(key) && !named.has(key)) {
+      problems.push(`extension: manifest declares "${key}", which no guard has reviewed`);
+    }
+  }
+
+  const allowedPermissions = new Set(['tabs', 'storage', 'alarms']);
+  for (const permission of manifest.permissions ?? []) {
+    if (!allowedPermissions.has(permission)) {
+      problems.push(`extension: manifest asks for "${permission}", which is not in the reviewed set`);
+    }
+  }
+  if ((manifest.permissions ?? []).length === 0) {
+    problems.push('extension: manifest declares no permissions, so this guard is inspecting nothing');
+  }
+  if ((manifest.host_permissions ?? []).length > 0) {
+    problems.push('extension: manifest declares host_permissions, which is a warning it does not need');
+  }
+
+  /* These four are the ways a manifest widens its own reach after review: a second origin that can message the
+     worker, a resource any page may load, or permissions granted later without a reinstall. */
+  for (const key of ['optional_permissions', 'externally_connectable', 'web_accessible_resources', 'sandbox']) {
+    if (key in manifest) {
+      problems.push(`extension: manifest declares "${key}", which widens reach beyond the reviewed surface`);
+    }
+  }
+
+  if (manifest.background?.type !== 'module') {
+    problems.push('extension: the service worker is not declared as a module, so its imports would not load');
+  }
+
+  const csp = manifest.content_security_policy?.extension_pages ?? '';
+  if (!/\bconnect-src 'none'/.test(csp)) {
+    problems.push('extension: the extension pages do not set connect-src \'none\', so a fetch would be allowed');
+  }
+
+  /* A content script may only be injected into the vault, and only if the file it names is actually present. */
+  const vault = new URL('https://bookmarks.332321.xyz/');
+  const names = extensionNames;
+  if (names.length === 0) problems.push('extension: no files found');
+
+  const declared = manifest.content_scripts ?? [];
+  for (const script of declared) {
+    for (const match of script.matches ?? []) {
+      let parsed = null;
+      try {
+        parsed = new URL(match.replaceAll('*', 'x'));
+      } catch {
+        parsed = null;
+      }
+      /* The vault itself, plus the local dev server it is worked on against — the bridge has to be provable
+         before it is deployed, and a loopback origin is not another site. The app owns the root of its origin,
+         so the origin is the whole test: there is no prefix for the pattern to have to match. */
+      const isLoopback = parsed !== null && parsed.hostname === '127.0.0.1';
+      const onVault = parsed !== null && parsed.origin === vault.origin;
+      if (parsed === null || !(isLoopback || onVault)) {
+        problems.push(`extension: content script matches ${match}, which is not the vault`);
+      }
+    }
+    for (const file of script.js ?? []) {
+      if (!names.includes(file)) {
+        problems.push(`extension: content script names ${file}, which is not in the extension`);
+      }
+    }
+  }
+
+  /* This host set is deliberately smaller than the page's: the page may talk to its own Worker, the extension
+     may talk to nothing. Loopback is not an exception — a local port is still somewhere a URL can be sent. */
+  const extensionHosts = new Set(['bookmarks.332321.xyz']);
+
+  /* Calls that would reach the network, whatever they are handed. A literal-URL scan cannot see
+     `fetch(\`https://${host}/?u=${url}\`)`, which is the shape exfiltration actually takes. */
+  const networkSinks =
+    /\b(fetch|XMLHttpRequest|sendBeacon|WebSocket|EventSource|importScripts|sendNativeMessage|connectNative)\s*\(/;
+
+  for (const name of names) {
+    const text = readFileSync(join(extensionDir, name), 'utf8');
+    const flat = text.toLowerCase().replace(/\s+/g, ' ');
+
+    for (const match of text.matchAll(urlPattern)) {
+      if (match[0].includes('${')) continue;
+      let host;
+      try {
+        host = new URL(match[0]).hostname.toLowerCase();
+      } catch {
+        problems.push(`extension/${name}: unparseable URL ${match[0]}`);
+        continue;
+      }
+      /* The one loopback address allowed anywhere in the extension is the local dev server, in the manifest's
+         content-script matches. No module may reach it, which is why this stays a manifest-only rule. */
+      const devVault = name === 'manifest.json' && host === '127.0.0.1';
+      if (extensionHosts.has(host) || devVault) continue;
+      problems.push(`extension/${name}: external URL ${match[0]}`);
+      break;
+    }
+
+    if (protocolRelativePattern.test(text)) {
+      problems.push(`extension/${name}: protocol-relative URL`);
+    }
+
+    if (name.endsWith('.js')) {
+      const calls = text.match(networkSinks);
+      if (calls) problems.push(`extension/${name}: makes a ${calls[1]} call, and the extension talks to nobody`);
+    }
+
+    for (const banned of bannedHosts) {
+      if (flat.includes(banned)) problems.push(`extension/${name}: contains "${banned}"`);
+    }
+  }
+
+  /* A constant is read by shape: the version is a number and the two source tags are quoted strings. */
+  const constant = (file, name) => {
+    const text = readFileSync(join(root, file), 'utf8');
+    const quoted = text.match(new RegExp(`\\b${name}\\s*=\\s*'([^']*)'`));
+    if (quoted) return quoted[1];
+    const numeric = text.match(new RegExp(`\\b${name}\\s*=\\s*([0-9]+)`));
+    return numeric ? numeric[1] : null;
+  };
+
+  for (const [file, label] of [
+    ['extension/protocol.js', 'extension'],
+    ['extension/bridge.js', 'content script'],
+    ['public/collector.js', 'page']
+  ]) {
+    if (constant(file, 'BRIDGE_VERSION') === null) {
+      problems.push(`bridge: ${label} declares no BRIDGE_VERSION`);
+    }
+  }
+
+  /* The version is not the whole contract: the two source tags are how each side recognises the other, and a typo
+     in one of them makes every message unmatched with nothing to catch it. */
+  const sides = ['extension/protocol.js', 'extension/bridge.js', 'public/collector.js'];
+  for (const name of ['BRIDGE_SOURCE', 'PAGE_SOURCE', 'BRIDGE_VERSION']) {
+    const values = sides.map((file) => constant(file, name));
+    if (values.some((value) => value === null)) {
+      problems.push(`bridge: ${name} is missing in ${sides[values.indexOf(null)]}`);
+    } else if (new Set(values).size !== 1) {
+      problems.push(`bridge: ${name} differs across the three ends (${values.join(' / ')})`);
+    }
+  }
+} catch (error) {
+  problems.push(`extension: ${error.message}`);
+}
+
 
 if (problems.length) {
   console.error('check failed:');

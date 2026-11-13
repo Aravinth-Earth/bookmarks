@@ -164,6 +164,21 @@ export function addBookmark(document, input, now = Date.now) {
     throw fail('INVALID_CLICKS', 'a click count is a whole number, zero or more');
   }
 
+  /* Opens made in the browser are counted by the extension, on each device separately, and mirrored here: a
+     bookmark's uses are the sum of what every device saw. Each device writes only its own slot, so a merge can add
+     them up without ever adding the same visit twice. */
+  const uses = normaliseUses(input?.uses);
+
+  /* A document written before the slots existed carries one number and no device name; it becomes the slot called
+     `legacy`, which keeps the count and never grows. */
+  if (Object.keys(uses).length === 0 && input?.openCount !== undefined) {
+    const openCount = input.openCount;
+    if (!Number.isInteger(openCount) || openCount < 0) {
+      throw fail('INVALID_CLICKS', 'an open count is a whole number, zero or more');
+    }
+    if (openCount > 0) uses[LEGACY_DEVICE] = openCount;
+  }
+
   const at = iso(now);
   const bookmark = {
     id: nextId(),
@@ -176,6 +191,7 @@ export function addBookmark(document, input, now = Date.now) {
        site's real title still finds it. */
     search: typeof input?.search === 'string' ? input.search.trim() : '',
     clickCount,
+    uses,
     pinned: Boolean(input?.pinned),
     hideLabel: Boolean(input?.hideLabel),
     icon: input?.icon ?? null,
@@ -189,6 +205,86 @@ export function addBookmark(document, input, now = Date.now) {
     document: { ...document, bookmarks: [...document.bookmarks, bookmark] },
     bookmark
   };
+}
+
+/** The slot a count from a build that kept one number instead of one per device lands in. */
+export const LEGACY_DEVICE = 'legacy';
+
+/**
+ * Per-device counts, cleaned: a device name that is not a name and a count that is not a whole number are refused,
+ * a zero is not stored, and anything that is not an object is no counts at all.
+ */
+export function normaliseUses(input) {
+  const source = input && typeof input === 'object' ? input : {};
+  const uses = {};
+  for (const [device, count] of Object.entries(source)) {
+    if (typeof device !== 'string' || device === '') {
+      throw fail('INVALID_CLICKS', 'a device count is filed under a device name');
+    }
+    if (!Number.isInteger(count) || count < 0) {
+      throw fail('INVALID_CLICKS', 'a device count is a whole number, zero or more');
+    }
+    if (count > 0) uses[device] = count;
+  }
+  return uses;
+}
+
+/** Two devices' counts, slot by slot, keeping the larger of each: each slot only ever rises on its own device. */
+export function mergeUses(left, right) {
+  const merged = { ...normaliseUses(left) };
+  for (const [device, count] of Object.entries(normaliseUses(right))) {
+    if ((merged[device] ?? 0) < count) merged[device] = count;
+  }
+  return merged;
+}
+
+/** A bookmark's counts, including a number carried by a document written before the slots existed. */
+function usesOf(bookmark) {
+  const uses = normaliseUses(bookmark?.uses);
+  if (Object.keys(uses).length === 0 && Number.isInteger(bookmark?.openCount)) {
+    if (bookmark.openCount > 0) uses[LEGACY_DEVICE] = bookmark.openCount;
+  }
+  return uses;
+}
+
+/**
+ * Record what one device has seen.
+ *
+ * The extension's count is that device's running total, so this is a mirror and never an addition: the same total
+ * arriving twice leaves the bookmark where it was, and a lower total is ignored. Two devices never write each
+ * other's slot, which is what lets a merge add the slots up.
+ */
+export function recordUses(document, id, deviceId, count, now = Date.now) {
+  assertDocument(document, 'the document');
+  if (typeof deviceId !== 'string' || deviceId === '') {
+    throw fail('INVALID_CLICKS', 'a device count needs a device');
+  }
+  if (!Number.isInteger(count) || count < 0) {
+    throw fail('INVALID_CLICKS', 'a device count is a whole number, zero or more');
+  }
+
+  const at = findIndex(document, id);
+  const current = document.bookmarks[at];
+  const uses = usesOf(current);
+  if ((uses[deviceId] ?? 0) >= count) return document;
+
+  const bookmarks = [...document.bookmarks];
+  bookmarks[at] = { ...current, uses: { ...uses, [deviceId]: count }, updatedAt: iso(now) };
+  return { ...document, bookmarks };
+}
+
+/**
+ * Record how many times the browser has opened this bookmark, for a document from a build that had one number and
+ * no device names. Kept for that caller; nothing in the page uses it.
+ */
+export function setOpenCount(document, id, count, now = Date.now) {
+  return recordUses(document, id, LEGACY_DEVICE, count, now);
+}
+
+/** How many times a bookmark has been used: opened from this list, or opened in the browser. */
+export function useCount(bookmark) {
+  const opened = Object.values(usesOf(bookmark)).reduce((total, count) => total + count, 0);
+  return (bookmark.clickCount ?? 0) + opened;
 }
 
 /** Change one bookmark. A URL change is re-normalised and re-checked for duplicates. */
@@ -341,7 +437,7 @@ export function sortBookmarks(document, mode = 'clicks') {
 
   const order = {
     clicks: (left, right) =>
-      right.clickCount - left.clickCount || compareNames(left, right),
+      useCount(right) - useCount(left) || compareNames(left, right),
     recent: (left, right) => right.createdAt.localeCompare(left.createdAt),
     name: (left, right) => compareNames(left, right),
     lastClicked: (left, right) =>
@@ -452,7 +548,14 @@ export function newerPrefs(local, remote) {
 
   if (rightAt === null) return { ...left };
   if (leftAt === null) return { ...right };
-  return { ...(rightAt > leftAt ? right : left) };
+
+  /* The newer copy wins on every key it carries, and the older one fills the keys it does not. Replacing the whole
+     object lost settings whenever the newer copy had never carried them — a build that predates a preference, or an
+     import with none — and the loss is silent: the collection settings live here, so losing them switches collection
+     off without a word. */
+  const newer = rightAt > leftAt ? right : left;
+  const older = newer === right ? left : right;
+  return { ...older, ...newer };
 }
 
 function prefStamp(prefs) {
@@ -471,6 +574,10 @@ export function mergeBookmark(left, right) {
     createdAt: earlier(left.createdAt, right.createdAt),
     updatedAt: later(left.updatedAt, right.updatedAt),
     clickCount: Math.max(left.clickCount, right.clickCount),
+    /* Each device counts its own browser's opens in its own slot, so a merge takes the larger number inside each
+       slot and keeps both slots: the total is their sum. Adding the totals of two devices would grow the count
+       every time the same merge ran; adding the slots is what the slots are for. */
+    uses: mergeUses(usesOf(left), usesOf(right)),
     lastClickedAt: later(left.lastClickedAt, right.lastClickedAt)
   };
 }

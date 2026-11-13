@@ -13,6 +13,7 @@
  */
 
 import { digestHex, logEvent } from './events.js';
+import { hashCode } from './invites.js';
 
 /* One paid unit is about ten bookmarks; 10 units is about a hundred. The cap is bytes because
    the server cannot count entries in a sealed vault. */
@@ -206,6 +207,7 @@ export class Vault {
   async fetch(request) {
     const path = new URL(request.url).pathname;
 
+    if (path === '/admin-stats' && request.method === 'GET') return this.adminStats();
     if (path === '/account') return this.createAccount(request);
     if (path === '/challenge') return this.challenge(request);
     if (path === '/login') return this.login(request);
@@ -305,23 +307,53 @@ export class Vault {
        never reaches this point, so a full registry cannot lock out the person who already has
        one, and a retried first sync cannot consume a second slot. */
     const registry = this.env?.REGISTRY;
+    /* How the slot was granted: `owner` for the first account on a server, `invite` for a code, `direct` otherwise.
+       The operator view reads it back; nothing here decides anything. */
+    let via = 'direct';
     if (registry) {
       const stub = registry.get(registry.idFromName('registry'));
+      /* The code is turned into a digest here, so the registry never holds a code that could be used. An absent
+         code is an empty digest, which matches nothing. */
+      const inviteHash =
+        typeof body.value?.invite === 'string' && body.value.invite !== ''
+          ? await hashCode(body.value.invite)
+          : '';
+
       const reserved = await stub.fetch(
         new Request('https://registry/reserve', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ accountId })
+          body: JSON.stringify({ accountId, inviteHash })
         })
       );
+      if (reserved.ok) {
+        try {
+          const answer = await reserved.clone().json();
+          via = typeof answer.via === 'string' ? answer.via : via;
+        } catch {
+          /* An answer without a reason still reserves the slot; the reason stays unknown. */
+        }
+      }
+
       if (!reserved.ok) {
-        /* The cap is the Registry's answer, and the reason this creation wrote nothing. */
+        /* The Registry's answer is the reason this creation wrote nothing: a full server, a missing code, a spent
+           one or an expired one. They are told apart because each asks the person for something different. */
+        const answer = await reserved.json().catch(() => ({}));
+        const refusal =
+          answer.error === 'invite_required'
+            ? [403, 'invite_required', 'invite_required']
+            : answer.error === 'invite_used'
+              ? [422, 'invite_used', 'invite_used']
+              : answer.error === 'invite_expired'
+                ? [410, 'invite_expired', 'invite_expired']
+                : [429, 'cap_full', 'full'];
+
         await logEvent('create_refused', {
           route: 'signin',
-          reason: 'cap_full',
+          reason: refusal[1],
           account: accountId
         });
-        return json({ error: 'full' }, 429);
+        return json({ error: refusal[2] }, refusal[0]);
       }
     }
 
@@ -337,6 +369,7 @@ export class Vault {
       authSecret,
       plan,
       units,
+      via,
       createdAt: now,
       lastSeenAt: now,
       paidUntil: null
@@ -501,6 +534,7 @@ export class Vault {
       token,
       expiresAt,
       plan: account.plan ?? 'free',
+      via: account.via ?? 'direct',
       units: account.units ?? 0,
       paidUntil: account.paidUntil ?? null,
       /* The account's own dates, in milliseconds. They are only ever sent in this answer, which
@@ -712,6 +746,7 @@ export class Vault {
 
     return json({
       plan: account.plan ?? 'free',
+      via: account.via ?? 'direct',
       units: account.units ?? 0,
       createdAt: account.createdAt ?? null,
       lastSeenAt: account.lastSeenAt ?? null,

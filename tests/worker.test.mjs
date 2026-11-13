@@ -10,6 +10,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import worker from '../src/index.js';
 import { quiet } from './logs.mjs';
@@ -55,7 +58,7 @@ function harness({ doStatus = 201, doBody = { ok: true } } = {}) {
 }
 
 function api(path, options = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api${path}`, options);
+  return new Request(`https://bookmarks.332321.xyz/api${path}`, options);
 }
 
 test('health answers without any credential', async () => {
@@ -152,9 +155,9 @@ test('an unknown API path is a 404', async () => {
   assert.equal(response.status, 404);
 });
 
-test('the app is served through the assets binding with the security headers', async () => {
+test('the app is served at the root through the assets binding with the security headers', async () => {
   const response = await worker.fetch(
-    new Request('https://b.332321.xyz/w/bookmarks/'),
+    new Request('https://bookmarks.332321.xyz/'),
     harness().env
   );
 
@@ -164,27 +167,48 @@ test('the app is served through the assets binding with the security headers', a
   assert.match(await response.text(), /title>app/);
 });
 
-test('the bare path redirects to the slashed one', async () => {
-  const response = await worker.fetch(
-    new Request('https://b.332321.xyz/w/bookmarks'),
-    harness().env
-  );
+/* `/index.html` and `/` are the same document. Workers Assets would answer the first with a 307
+   to the second; asking for the root instead keeps the answer a 200 and keeps the offline
+   shell's copy from being a redirect. */
+test('/index.html is served as the root document, not redirected', async () => {
+  const asked = [];
+  const env = {
+    ASSETS: {
+      fetch: async (request) => {
+        asked.push(new URL(request.url).pathname);
+        return new Response('<!doctype html><title>app</title>', {
+          headers: { 'content-type': 'text/html' }
+        });
+      }
+    }
+  };
 
-  assert.equal(response.status, 301);
-  assert.equal(response.headers.get('location'), 'https://b.332321.xyz/w/bookmarks/');
+  const response = await worker.fetch(new Request('https://bookmarks.332321.xyz/index.html'), env);
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /title>app/);
+  assert.deepEqual(asked, ['/']);
 });
 
-/* A preview path on either host is now an unknown path: the asset tree has no such directory,
-   so the binding answers 404 and the Worker's own "Not found" page is returned. On www it is
-   not redirected either, because the redirect covers the canonical prefix only. */
-test('the preview path is an unknown path, on the app host and on www', async () => {
+/* The app is the whole of its origin, so there is no path to redirect: `/` is served, and every
+   other path is an asset or the Worker's own 404. Nothing stands in for an address the app used
+   to answer on — a redirect would keep the old one alive, which is the opposite of retiring it. */
+test('the app is routed on one host and one path set, and no other', async () => {
+  const config = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+  const patterns = [...config.matchAll(/^pattern = "([^"]+)"$/gm)].map((match) => match[1]);
+
+  assert.deepEqual(patterns, ['bookmarks.332321.xyz/*', 'bookmarks.332321.xyz']);
+});
+
+/* An unknown path is answered by the asset tree's 404, which the Worker turns into its own page:
+   there is no directory under `public/` for anything else, so nothing is served by accident. */
+test("an unknown path is the app's own 404 page, not redirected", async () => {
   const asked = [];
   const env = {
     ASSETS: {
       fetch: async (request) => {
         const { pathname } = new URL(request.url);
         asked.push(pathname);
-        if (pathname === '/w/bookmarks/' || pathname.startsWith('/w/bookmarks/')) {
+        if (pathname === '/') {
           return new Response('<!doctype html><title>app</title>', {
             headers: { 'content-type': 'text/html' }
           });
@@ -197,8 +221,8 @@ test('the preview path is an unknown path, on the app host and on www', async ()
     }
   };
 
-  for (const host of ['b.332321.xyz', 'www.332321.xyz']) {
-    for (const path of ['/w/bookmarks-preview', '/w/bookmarks-preview/']) {
+  for (const host of ['bookmarks.332321.xyz']) {
+    for (const path of ['/preview', '/preview/', '/w/preview']) {
       const response = await worker.fetch(new Request(`https://${host}${path}`), env);
 
       assert.equal(response.status, 404, `${host}${path}`);
@@ -212,13 +236,10 @@ test('the preview path is an unknown path, on the app host and on www', async ()
     }
   }
 
-  /* The sibling path the loop above must not be confused with. */
-  const canonical = await worker.fetch(
-    new Request('https://b.332321.xyz/w/bookmarks/'),
-    env
-  );
-  assert.equal(canonical.status, 200);
-  assert.match(await canonical.text(), /title>app/);
+  /* The path the loop above must not be confused with. */
+  const root = await worker.fetch(new Request('https://bookmarks.332321.xyz/'), env);
+  assert.equal(root.status, 200);
+  assert.match(await root.text(), /title>app/);
 });
 
 /* --------------------------------------------------------------- icon service */
@@ -227,7 +248,7 @@ const ICON_HOST = 'example.com';
 const ICON_HASH = createHash('sha256').update(ICON_HOST).digest('base64url');
 
 function iconRequest({ host = ICON_HOST, hash = ICON_HASH } = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api/icon?h=${hash}`, {
+  return new Request(`https://bookmarks.332321.xyz/api/icon?h=${hash}`, {
     headers: host ? { 'x-icon-host': host } : {}
   });
 }
@@ -248,7 +269,7 @@ test('the icon service refuses a missing hostname, a non-DNS host or a wrong has
   }
 
   const noHost = await worker.fetch(
-    new Request('https://b.332321.xyz/w/bookmarks/api/icon?h=x'),
+    new Request('https://bookmarks.332321.xyz/api/icon?h=x'),
     harness().env
   );
   assert.equal(noHost.status, 400);
@@ -469,95 +490,110 @@ test('a redirect that leaves https is not followed', async () => {
   assert.equal(response.status, 404);
 });
 
-test('the old www path redirects to the app host', async () => {
-  const response = await worker.fetch(
-    new Request('https://www.332321.xyz/w/bookmarks/'),
-    harness().env
-  );
+test('the app answers on its own host and nowhere else', async () => {
+  const onApp = await worker.fetch(new Request('https://bookmarks.332321.xyz/'), harness().env);
+  assert.equal(onApp.status, 200);
 
-  assert.equal(response.status, 301);
-  assert.equal(response.headers.get('location'), 'https://b.332321.xyz/w/bookmarks/');
+  /* The site's own host is not routed here any more, so this Worker is never asked about it; if it is, it refuses
+     rather than answering with the app. No redirect stands in for a retired address: one origin, one vault. */
+  for (const host of ['www.332321.xyz', '332321.xyz']) {
+    const elsewhere = await worker.fetch(new Request(`https://${host}/`), harness().env);
+    assert.equal(elsewhere.status, 421);
+    assert.deepEqual(await elsewhere.json(), { error: 'wrong_host' });
+  }
+
+  /* The dev server is loopback, which is the one other host allowed. */
+  const loopback = await worker.fetch(new Request('http://127.0.0.1/'), harness().env);
+  assert.equal(loopback.status, 200);
 });
 
-test('the site stylesheets are proxied with a cache header', async () => {
-  const asked = [];
+/* ------------------------------------------------- the app's own stylesheets */
 
-  const response = await withFetch(
-    async (url, init) => {
-      asked.push({ url, init });
-      return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
-    },
-    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
-  );
+/* The two stylesheets are in public/css now: the app draws with bytes it ships, so a request for
+   one is an asset request and no other origin is involved. The binding below answers from the files
+   on disk — what a deploy ships — so the bytes compared here are the vendored bytes. */
+const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get('content-type'), 'text/css; charset=utf-8');
-  assert.match(response.headers.get('cache-control'), /max-age=86400/);
-  assert.deepEqual(asked.map((one) => one.url), ['https://www.332321.xyz/css/tokens.css']);
-});
-
-test('the stylesheet proxy copies no upstream header and follows no redirect', async () => {
-  const asked = [];
-
-  const response = await withFetch(
-    async (url, init) => {
-      asked.push({ url, init });
-      return new Response(':root{}', {
-        headers: {
-          'content-type': 'text/css',
-          'set-cookie': 'session=leaked; Path=/; HttpOnly',
-          'x-upstream-private': 'yes',
-          'access-control-allow-origin': '*',
-          etag: '"abc"'
-        }
+function assetsFromDisk() {
+  return {
+    fetch: async (request) => {
+      const { pathname } = new URL(request.url);
+      if (pathname.startsWith('/css/')) {
+        return new Response(readFileSync(join(PUBLIC_DIR, pathname), 'utf8'), {
+          headers: { 'content-type': 'text/css; charset=utf-8' }
+        });
+      }
+      return new Response('<!doctype html><title>app</title>', {
+        headers: { 'content-type': 'text/html' }
       });
-    },
-    () => worker.fetch(new Request('https://b.332321.xyz/css/themes.css'), harness().env)
-  );
+    }
+  };
+}
 
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get('set-cookie'), null);
-  assert.equal(response.headers.get('x-upstream-private'), null);
-  assert.equal(response.headers.get('access-control-allow-origin'), null);
-  assert.equal(response.headers.get('etag'), '"abc"');
-  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
-  assert.equal(asked[0].init.redirect, 'manual');
-});
+/* A stub that records and refuses: a stylesheet that reaches the network would fail this test by
+   name rather than pass by coincidence. */
+function noOutbound(asked) {
+  return async (url) => {
+    asked.push(String(url));
+    throw new Error(`the worker fetched ${url}`);
+  };
+}
 
-test('the stylesheet proxy refuses a redirect, a non-CSS answer and a non-read method', async () => {
-  const redirected = await withFetch(
-    () =>
-      new Response(null, {
-        status: 302,
-        headers: { location: 'https://elsewhere.example/x.css', 'content-type': 'text/css' }
-      }),
-    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
-  );
-  assert.equal(redirected.status, 502);
-
-  const html = await withFetch(
-    () => new Response('<p>no</p>', { headers: { 'content-type': 'text/html' } }),
-    () => worker.fetch(new Request('https://b.332321.xyz/css/tokens.css'), harness().env)
-  );
-  assert.equal(html.status, 502);
-
+test('a stylesheet request is answered by this worker with the bytes it ships', async () => {
   const asked = [];
-  const written = await withFetch(
-    async (url) => {
-      asked.push(String(url));
-      return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
-    },
-    () =>
-      worker.fetch(new Request('https://b.332321.xyz/css/tokens.css', { method: 'POST' }), harness().env)
-  );
-  assert.equal(written.status, 405);
-  assert.equal(asked.length, 0);
+  const env = { ...harness().env, ASSETS: assetsFromDisk() };
+
+  for (const name of ['tokens.css', 'themes.css']) {
+    const response = await withFetch(noOutbound(asked), () =>
+      worker.fetch(new Request(`https://bookmarks.332321.xyz/css/${name}`), env)
+    );
+
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /^text\/css/);
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    /* The vendored file itself, not a copy of a copy: the page's tokens are the app's own. */
+    assert.equal(await response.text(), readFileSync(join(PUBLIC_DIR, 'css', name), 'utf8'));
+  }
+
+  assert.deepEqual(asked, [], 'nothing was fetched from another origin for a stylesheet');
 });
+
+test('no request under /css/ leaves this origin, whatever the path and the method', async () => {
+  const asked = [];
+  const seen = [];
+  const env = {
+    ...harness().env,
+    ASSETS: {
+      fetch: async (request) => {
+        seen.push(new URL(request.url).pathname);
+        return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
+      }
+    }
+  };
+
+  for (const [path, method] of [
+    ['/css/tokens.css', 'GET'],
+    ['/css/themes.css', 'HEAD'],
+    ['/css/tokens.css', 'POST'],
+    ['/css/not-shipped.css', 'GET']
+  ]) {
+    await withFetch(noOutbound(asked), () =>
+      worker.fetch(new Request(`https://bookmarks.332321.xyz${path}`, { method }), env)
+    );
+
+    /* There is no route of this Worker's own left to answer a /css/ path: it is an asset request,
+       handed to the binding unchanged, and a path the app does not ship is the binding's 404. */
+    assert.equal(seen.at(-1), path, `${method} ${path} reaches the assets unchanged`);
+  }
+
+  assert.deepEqual(asked, [], 'no fetch left the origin for anything under /css/');
+});
+
 
 /* -------------------------------------------------------------- title service */
 
 function titleRequest({ host = ICON_HOST, hash = ICON_HASH, method = 'GET' } = {}) {
-  return new Request(`https://b.332321.xyz/w/bookmarks/api/title?h=${hash}`, {
+  return new Request(`https://bookmarks.332321.xyz/api/title?h=${hash}`, {
     method,
     headers: host ? { 'x-page-host': host } : {}
   });
@@ -1043,4 +1079,33 @@ test('a verdict is resolved once for a burst of the same host', async () => {
     ['a', 'aaaa'],
     'one lookup pair for five requests'
   );
+});
+
+test('a vault answers its own size without opening anything', async () => {
+  const { Vault } = await import('../src/vault.js');
+  const map = new Map([
+    ['account', { accountId: 'x', authSecret: 'y', plan: 'free', createdAt: 10 }],
+    ['vault', { version: 3, updatedAt: 20, ct: 'a'.repeat(64) }],
+    ['session:one', { expiresAt: Date.now() + 60_000 }],
+    ['session:two', { expiresAt: Date.now() + 60_000 }],
+    ['session:gone', { expiresAt: Date.now() - 60_000 }]
+  ]);
+  const storage = {
+    async get(key) { return map.get(key); },
+    async put(key, value) { map.set(key, value); },
+    async delete(key) { return map.delete(key); },
+    async list({ prefix }) {
+      return [...map.entries()].filter(([key]) => key.startsWith(prefix));
+    }
+  };
+
+  const vault = new Vault({ storage, id: { name: 'x' } }, {});
+  const response = await vault.fetch(new Request('https://vault/admin-stats'));
+  const stats = await response.json();
+
+  assert.equal(stats.vaultVersion, 3);
+  assert.equal(stats.ctChars, 64, 'the length of the sealed copy, not the copy');
+  assert.equal(stats.sessions, 2, 'a session that has expired is not a place');
+  assert.equal(JSON.stringify(stats).includes('a'.repeat(64)), false, 'the sealed bytes are counted, not copied');
+  assert.equal(JSON.stringify(stats).includes('authSecret'), false, 'and no secret is in the answer');
 });

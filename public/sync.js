@@ -25,13 +25,20 @@ export function clientKind() {
 }
 
 export class SyncError extends Error {
-  constructor(code, message, { status = 0, current = null, currentVersion = 0 } = {}) {
+  constructor(
+    code,
+    message,
+    { status = 0, current = null, currentVersion = 0, retryAfter = 0 } = {}
+  ) {
     super(message);
     this.name = 'SyncError';
     this.code = code;
     this.status = status;
     this.current = current;
     this.currentVersion = currentVersion;
+    /* Seconds the server asked to be left alone for, when it said so. Zero means it did not, and
+       a caller that reads zero must not wait. */
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -50,6 +57,16 @@ export function describeSyncFailure(error) {
   switch (code) {
     case 'FULL':
       return { kind: 'cap', label: 'No new accounts' };
+    /* A limiter is not a closed server: the same 429 means "not this second" here and "never
+       again" under FULL. It keeps its own kind so the page does not paint the cap's persistent
+       notice, and its own sentence so the person knows a wait is the whole remedy. */
+    case 'THROTTLED':
+      return {
+        kind: 'throttled',
+        label: 'Not now',
+        message: throttledMessage(Number(error?.retryAfter) || 0),
+        retryAfter: Number(error?.retryAfter) || 0
+      };
     case 'LOGIN_FAILED':
       return status === 401
         ? {
@@ -95,6 +112,27 @@ export function describeSyncFailure(error) {
         label: 'Not synced',
         message: 'The server did not create the account.'
       };
+    /* The invite refusals share a kind because the page asks for a code in one place, but each
+       keeps its own sentence: "find a code", "that one is spent" and "that one is past its date"
+       ask the person to do three different things. */
+    case 'INVITE_REQUIRED':
+      return {
+        kind: 'invite',
+        label: 'Invite needed',
+        message: 'This server needs an invite code to create an account.'
+      };
+    case 'INVITE_USED':
+      return {
+        kind: 'invite',
+        label: 'Invite used',
+        message: 'That invite code has already been used.'
+      };
+    case 'INVITE_EXPIRED':
+      return {
+        kind: 'invite',
+        label: 'Invite expired',
+        message: 'That invite code has expired.'
+      };
     case 'CHALLENGE_FAILED':
       return { kind: 'server', label: 'Not synced', message: 'The server did not answer.' };
     case 'SESSIONS_FAILED':
@@ -112,8 +150,73 @@ export function describeSyncFailure(error) {
   }
 }
 
+/**
+ * The three ways a registry can turn a creation down when a code is in play. Each is its own
+ * failure rather than one "refused" bucket because the person holding the phone has to do a
+ * different thing about each: ask for a code, ask for a fresh one, or ask for a code that has
+ * not run out. `null` for any other status, which the caller handles on its own terms.
+ */
+function inviteFailure(status) {
+  switch (status) {
+    case 403:
+      return new SyncError(
+        'INVITE_REQUIRED',
+        'This server needs an invite code to create an account.',
+        { status }
+      );
+    case 422:
+      return new SyncError('INVITE_USED', 'That invite code has already been used.', { status });
+    case 410:
+      return new SyncError('INVITE_EXPIRED', 'That invite code has expired.', { status });
+    default:
+      return null;
+  }
+}
+
+/**
+ * What a person is owed when their own burst of attempts, and nothing about the server, is the
+ * reason for the refusal. The wait is named when the server named it, and rounded up to a plain
+ * "a minute" when it did not: a number invented by the client would be a guess about somebody
+ * else's clock.
+ */
+function throttledMessage(retryAfter) {
+  const wait = retryAfter > 0 ? `about ${retryAfter} seconds` : 'a minute';
+  return `Too many attempts came in a short time. Try again in ${wait}.`;
+}
+
+/**
+ * A 429 whose meaning is "wait": the limiter's answer, with the period it named when it named one.
+ *
+ * The limiter stands in front of more than creation — the sign-in challenge is counted from the
+ * same budget — so anything that meets one and would otherwise say "the server did not answer"
+ * says this instead.
+ */
+function throttle(response) {
+  const retryAfter = Number(response.retryAfter) || 0;
+  return new SyncError('THROTTLED', throttledMessage(retryAfter), { status: 429, retryAfter });
+}
+
+
+/**
+ * The two meanings of a 429 on a creation request, told apart by the body.
+ *
+ * The account cap answers `{error:"full"}` and stands until an operator raises it; the limiter
+ * answers `{error:"rate_limited"}` and is over in the period it names. Reading the second as the
+ * first tells a person their server is closed when it is only busy, and the only thing to do
+ * about it — wait, then try once more — is what the message has to say.
+ *
+ * `null` for anything that is not a 429, which the caller decides on its own terms.
+ */
+function creationRefusal(response) {
+  if (response.status !== 429) return null;
+  if (response.payload?.error === 'full') {
+    return new SyncError('FULL', 'This server is not accepting new vaults.', { status: 429 });
+  }
+  return throttle(response);
+}
+
 export class SyncClient {
-  constructor({ base = '/w/bookmarks/api', fetch: fetchImpl = globalThis.fetch.bind(globalThis) } = {}) {
+  constructor({ base = '/api', fetch: fetchImpl = globalThis.fetch.bind(globalThis) } = {}) {
     this.base = base.replace(/\/+$/, '');
     this.fetch = fetchImpl;
     this.token = null;
@@ -138,7 +241,18 @@ export class SyncClient {
     });
 
     const payload = await response.json().catch(() => ({}));
-    return { status: response.status, ok: response.ok, payload };
+
+    /* The limiter's own answer to "how long?": the header names the period the window is counted
+       over, so a caller can wait it out instead of retrying into the same refusal. Absent or
+       unreadable is zero, which every caller reads as "no wait was asked for". */
+    const wait = Number.parseInt(response.headers?.get?.('retry-after') ?? '', 10);
+
+    return {
+      status: response.status,
+      ok: response.ok,
+      payload,
+      retryAfter: Number.isFinite(wait) && wait > 0 ? wait : 0
+    };
   }
 
   async login(accountId, authSecret) {
@@ -146,6 +260,9 @@ export class SyncClient {
     if (challenge.status === 404) {
       throw new SyncError('NO_ACCOUNT', 'This vault is not registered on the server.');
     }
+    /* The sign-in challenge is counted from the same budget as a creation, so it meets the same
+       limiter. "The server did not answer" would be wrong about a server that answered clearly. */
+    if (challenge.status === 429) throw throttle(challenge);
     if (!challenge.ok || typeof challenge.payload.nonce !== 'string') {
       throw new SyncError('CHALLENGE_FAILED', 'The server did not answer.', {
         status: challenge.status
@@ -159,6 +276,9 @@ export class SyncClient {
     });
 
     if (session.status === 429) {
+      /* A limiter answers 429 and so does a lockout, and they ask for different things: one asks for a minute,
+         the other asks the person to stop guessing. The body says which. */
+      if (session.payload?.error === 'rate_limited') throw throttle(session);
       throw new SyncError('LOCKED', 'Too many attempts. Try again later.', { status: 429 });
     }
     if (!session.ok || typeof session.payload.token !== 'string') {
@@ -182,26 +302,31 @@ export class SyncClient {
    *
    * `created: false` means the account already existed and this caller proved the same secret,
    * so a retried creation is success and does not take a second slot.
+   *
+   * `invite` is the code an invite-only server asks for. It defaults to an empty string rather
+   * than being left off, because the account route reads an empty code as "none offered" and the
+   * second request must describe the same creation as the first one did.
    */
-  async register(accountId, authSecret) {
+  async register(accountId, authSecret, invite = '') {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await this.registerOnce(accountId, authSecret);
+      const result = await this.registerOnce(accountId, authSecret, invite);
       if (result) return result;
     }
     throw new SyncError('REGISTER_FAILED', 'Could not create the account.');
   }
 
   /** One creation round trip. `null` means the challenge was stale and is worth retrying. */
-  async registerOnce(accountId, authSecret) {
+  async registerOnce(accountId, authSecret, invite = '') {
     const challenge = await this.request(`/a/${accountId}/account`, {
       method: 'POST',
-      body: { accountId, authSecret }
+      body: { accountId, authSecret, invite }
     });
 
-    if (challenge.status === 429) {
-      throw new SyncError('FULL', 'This server is not accepting new vaults.');
-    }
+    const challengeRefused = creationRefusal(challenge);
+    if (challengeRefused) throw challengeRefused;
     if (challenge.status === 409) return { created: false };
+    const inviteRefused = inviteFailure(challenge.status);
+    if (inviteRefused) throw inviteRefused;
     if (challenge.status !== 428 || typeof challenge.payload.nonce !== 'string') {
       throw new SyncError('REGISTER_FAILED', 'Could not create the account.', {
         status: challenge.status
@@ -211,14 +336,20 @@ export class SyncClient {
     const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
     const response = await this.request(`/a/${accountId}/account`, {
       method: 'POST',
-      body: { accountId, authSecret, proof }
+      body: { accountId, authSecret, proof, invite }
     });
 
     if (response.status === 201) return { created: true };
     if (response.status === 200) return { created: false };
-    if (response.status === 429) {
-      throw new SyncError('FULL', 'This server is not accepting new vaults.');
-    }
+    /* The same body decides here: a proof sent into a closed server and a proof sent into a
+       limiter are both 429s, and only one of them is permanent. */
+    const proofThrottled = creationRefusal(response);
+    if (proofThrottled) throw proofThrottled;
+    /* The registry only decides about the code after the proof checks out, so the refusal
+       normally lands on this second request; the first check above is for a server that says
+       no earlier. */
+    const proofRefused = inviteFailure(response.status);
+    if (proofRefused) throw proofRefused;
     if (response.status === 401 || response.status === 428) return null;
     throw new SyncError('REGISTER_FAILED', 'Could not create the account.', {
       status: response.status
@@ -266,6 +397,8 @@ export class SyncClient {
     }
     if (response.status === 404) return null;
     if (!response.ok) {
+      /* The limiter and a broken read are both non-2xx, and only one of them is worth waiting out. */
+      if (response.status === 429) throw throttle(response);
       throw new SyncError('PULL_FAILED', 'Could not read the vault.', { status: response.status });
     }
     return response.payload;
@@ -294,6 +427,7 @@ export class SyncClient {
       };
     }
     if (!response.ok) {
+      if (response.status === 429) throw throttle(response);
       throw new SyncError('PUSH_FAILED', 'Could not save to the server.', {
         status: response.status
       });

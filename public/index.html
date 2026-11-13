@@ -6,10 +6,10 @@
     <meta name="color-scheme" content="dark light">
     <title>Bookmarks</title>
     <meta name="description" content="An end-to-end encrypted bookmark vault that keeps working offline. The vault is sealed in this browser and the server cannot read it.">
-    <script src="/w/bookmarks/theme.js"></script>
+    <script src="/theme.js"></script>
     <link rel="stylesheet" href="/css/tokens.css">
     <link rel="stylesheet" href="/css/themes.css">
-    <link rel="stylesheet" href="/w/bookmarks/bookmarks.css">
+    <link rel="stylesheet" href="/bookmarks.css">
 </head>
 <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -22,8 +22,8 @@
 
         <section id="lock-view" class="lock" hidden>
             <form id="lock-form" class="lock-form" novalidate>
-                <label class="field">
-                    <span class="field-label">Your 13-word phrase</span>
+                <div class="field">
+                    <label class="field-label" for="phrase">Your 13-word phrase</label>
                     <textarea
                         id="phrase"
                         class="phrase-input"
@@ -34,8 +34,8 @@
                         spellcheck="false"
                         aria-describedby="phrase-hint"
                         required></textarea>
-                    <span id="phrase-hint" class="field-hint">Thirteen words, separated by spaces. The phrase is never sent anywhere.</span>
-                </label>
+                </div>
+                <p id="phrase-hint" class="field-hint">Thirteen words, separated by spaces. The phrase is never sent anywhere.</p>
 
                 <label class="remember">
                     <input id="remember" type="checkbox" aria-describedby="remember-hint">
@@ -158,6 +158,31 @@
             <ul id="list" class="list" aria-label="Bookmarks"></ul>
 
             <p id="empty" class="empty" hidden></p>
+
+            <section id="collected" class="collected" aria-labelledby="collected-title" hidden>
+                <h2 id="collected-title" class="collected-title">
+                    Collected on this device
+                    <span id="collected-count" class="collected-count"></span>
+                </h2>
+                <p class="view-hint">Kept by the browser extension. Nothing here is in your vault until you add it.</p>
+
+                <div id="collected-bar" class="collected-bar" role="group" aria-label="Selected collected links" hidden>
+                    <span id="collected-bar-count" class="collected-bar-count"></span>
+                    <button id="collected-add" class="button button-primary" type="button">Add to vault</button>
+                    <button id="collected-dismiss" class="button button-quiet" type="button">Dismiss</button>
+                    <label class="collected-scope">
+                        <span class="visually-hidden">Exclude how</span>
+                        <select id="collected-scope">
+                            <option value="site">Site and subdomains</option>
+                            <option value="host">This hostname</option>
+                            <option value="path">This path</option>
+                        </select>
+                    </label>
+                    <button id="collected-exclude" class="button button-quiet" type="button">Exclude</button>
+                </div>
+
+                <ul id="collected-list" class="list collected-list" data-view="pills" aria-label="Collected links"></ul>
+            </section>
         </section>
     </main>
 
@@ -165,6 +190,6 @@
 
     <p id="status" class="status" role="status" aria-live="polite"></p>
 
-    <script type="module" src="/w/bookmarks/app.js"></script>
+    <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -17,8 +17,10 @@ import {
   recordClick,
   searchNarrowsList,
   sortBookmarks,
+  recordUses,
   togglePin,
-  updateBookmark
+  updateBookmark,
+  useCount
 } from './bookmarks.js';
 import {
   deriveAccount,
@@ -34,6 +36,7 @@ import {
   SIZE_KEY,
   VIEW_KEY,
   clearDeviceStorage,
+  deviceId,
   hostKey,
   pruneIconTries
 } from './device-store.js';
@@ -52,6 +55,8 @@ import { fetchIcon, fetchPageTitle } from './icons.js';
 import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
 import { formatStamp } from './stamps.js';
+import { createBridge, isSnapshot } from './collector.js';
+import { DEFAULT_LEVEL, DEFAULT_ORDER, LEVELS, ORDERS, addressLabel, fold, openCounts, summarise } from './collected.js';
 
 const store = createVault(indexedDbAdapter());
 
@@ -65,6 +70,11 @@ const state = {
      which is dropped as soon as the account exists. */
   authKey: null,
   authSecret: null,
+  /* The code an invite-only server asks for before it will create an account, and whether one is
+     owed. Both live in memory for one attempt: a code is spent when it is used, so a copy kept
+     anywhere would be a copy left behind. */
+  invite: '',
+  inviteNeeded: false,
   key: null,
   version: 0,
   remoteVersion: 0,
@@ -131,6 +141,15 @@ const addName = $('add-name');
 const list = $('list');
 const empty = $('empty');
 const viewHint = $('view-hint');
+const collected = $('collected');
+const collectedList = $('collected-list');
+const collectedCount = $('collected-count');
+const collectedBar = $('collected-bar');
+const collectedBarCount = $('collected-bar-count');
+const collectedScope = $('collected-scope');
+const collectedAddButton = $('collected-add');
+const collectedDismissButton = $('collected-dismiss');
+const collectedExcludeButton = $('collected-exclude');
 const vaultStatus = $('vault-status');
 const status = $('status');
 const syncRefusal = $('sync-refusal');
@@ -166,11 +185,19 @@ let currentSize = readPref(SIZE_KEY, SIZES, 'medium');
 
 function applyAppearance() {
   list.dataset.view = currentView;
+  /* The collected section is the same rows in the same two views, so it moves with the toggle instead of waiting
+     for the next render. */
+  collectedList.dataset.view = currentView;
+  applyListRoles();
   document.documentElement.dataset.size = currentSize;
   renderViewToggle();
   /* Pills are for opening pages; editing and deleting live in the list, so say where they are. */
   viewHint.hidden =
     currentView !== 'pills' || (state.document?.bookmarks.length ?? 0) === 0;
+
+  /* The collected section is the same rows in the same two views, and the bar belongs to the list: toggling has to
+     repaint it now rather than waiting for the next render. */
+  if (state.document) renderCollected();
 }
 
 /**
@@ -311,6 +338,8 @@ function openModal({ title, body = [], actions = [], onClose = null }) {
 
   function onKeydown(event) {
     if (event.key === 'Escape') {
+      /* The page has its own Escape handlers; one keypress must not close the dialog and the form behind it. */
+      event.stopPropagation();
       event.preventDefault();
       close();
       return;
@@ -355,7 +384,8 @@ function openModal({ title, body = [], actions = [], onClose = null }) {
     const body = dialog.querySelector('.modal-body');
     const actions = dialog.querySelector('.modal-actions');
     const target =
-      body?.querySelector('input, textarea, select, .button-primary, button') ??
+      /* The chip row is a map of the sheet, not the first control: it is skipped when the keyboard is placed. */
+      body?.querySelector('input, textarea, select, .button-primary, button:not(.settings-chip)') ??
       actions?.querySelector('.button-primary, button') ??
       closeButton;
     target?.focus();
@@ -409,6 +439,7 @@ let statusTimer = 0;
 
 function announce(text, { action, onAction, duration = 3200 } = {}) {
   clearTimeout(statusTimer);
+  status.hidden = false;
   status.replaceChildren(document.createTextNode(text));
 
   if (action) {
@@ -426,7 +457,21 @@ function announce(text, { action, onAction, duration = 3200 } = {}) {
   }
 
   status.classList.add('visible');
-  statusTimer = setTimeout(() => status.classList.remove('visible'), duration);
+  statusTimer = setTimeout(() => clearStatus(), duration);
+}
+
+/**
+ * Take the last message off the screen, button and all.
+ *
+ * The pill fades after its time; the Undo button inside it used to stay in the tab order and stay in the tree, so
+ * focus could vanish into something invisible. A locked vault also used to keep the last "Added …" sentence, which
+ * is a bookmark's name on a screen that is supposed to show nothing.
+ */
+function clearStatus() {
+  clearTimeout(statusTimer);
+  status.classList.remove('visible');
+  status.replaceChildren();
+  status.hidden = true;
 }
 
 function setVaultStatus(text) {
@@ -450,7 +495,7 @@ let runningVersion = '';
 
 async function loadVersion() {
   try {
-    const response = await fetch('/w/bookmarks/api/health', {
+    const response = await fetch('/api/health', {
       headers: { accept: 'application/json' }
     });
     if (!response.ok) return;
@@ -537,7 +582,10 @@ function applyPrefs() {
   if (VIEWS.has(prefs.view)) currentView = prefs.view;
   writePref(VIEW_KEY, currentView);
   applyAppearance();
-  if (prefs.sync !== true) clearSyncRefusal({ reset: true });
+  if (prefs.sync !== true) {
+    clearSyncRefusal({ reset: true });
+    forgetInvite();
+  }
 }
 
 /* ---------------------------------------------------------------------- sync */
@@ -561,6 +609,35 @@ function showSyncRefusal() {
 function clearSyncRefusal({ reset = false } = {}) {
   syncRefusal.hidden = true;
   if (reset) syncRefusalDismissed = false;
+}
+
+/**
+ * Drop the invite question. A code opens one account and is spent doing it, so nothing about it
+ * outlives the attempt it was typed for: turning Sync off or locking the vault ends the question.
+ */
+function forgetInvite() {
+  state.invite = '';
+  state.inviteNeeded = false;
+}
+
+/**
+ * Give the code in the field to the creation route.
+ *
+ * `syncNow` reports its own failures and returns nothing, so the answer to "did this code open
+ * the server" is the session it left behind: a refused code leaves the client signed out and the
+ * refusal on the page, while an accepted one signs in before anything else can fail.
+ */
+async function submitInvite(code) {
+  state.invite = code;
+  await syncNow();
+  /* A reconcile already in flight queued this one rather than running it, and the answer belongs
+     to the attempt that actually ran. */
+  while (syncBusy || syncQueued) {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 40);
+    });
+  }
+  return sync.signedIn;
 }
 
 /* The vault syncs after every change; the same unreachable server must not re-announce itself
@@ -591,8 +668,18 @@ function scheduleSync() {
   }, 500);
 }
 
-function setSyncStatus(label) {
+/**
+ * The one line that says what sync is doing.
+ *
+ * `retryAfter` is the server's own number when it asked to be left alone. It is kept on the
+ * element rather than in the sentence because the person reading it does not need the count and
+ * the next attempt does: anything that repaints this line without one has no wait to honour and
+ * clears it.
+ */
+function setSyncStatus(label, { retryAfter = 0 } = {}) {
   syncLabel = label;
+  if (retryAfter > 0) vaultStatus.dataset.retryAfter = String(retryAfter);
+  else delete vaultStatus.dataset.retryAfter;
   updateStatusLine();
 }
 
@@ -713,6 +800,26 @@ function handleSyncError(error) {
     setSyncStatus('Phrase needed to create the account');
     return;
   }
+  /* A server that will not create an account without a code is asking a question, and the sheet
+     has the field for it: `describeSyncFailure` maps INVITE_REQUIRED, INVITE_USED and
+     INVITE_EXPIRED to this kind. The code that was just refused is dropped — it is spent or
+     wrong, and the next sync would otherwise send it again. */
+  if (failure.kind === 'invite') {
+    const first = !state.inviteNeeded;
+    state.inviteNeeded = true;
+    state.invite = '';
+    setSyncStatus(failure.label);
+    announce(failure.message, { duration: 8000 });
+    /* The question is asked on the page, not left as a sentence pointing at a control the person
+       cannot see: the sheet opens at the section that answers it, with the keyboard on the field.
+       A refusal of a code already typed needs no redraw and keeps the field it was typed in. */
+    if (first) {
+      if (settingsOpen()) repaintSettings();
+      else openSettings();
+      requestAnimationFrame(() => activeModal?.dialog.querySelector('#invite-code')?.focus());
+    }
+    return;
+  }
   if (failure.kind === 'unauthorized') {
     sync.token = null;
     setSyncStatus(failure.label);
@@ -723,7 +830,7 @@ function handleSyncError(error) {
     return;
   }
 
-  setSyncStatus(failure.label);
+  setSyncStatus(failure.label, { retryAfter: failure.retryAfter ?? 0 });
 
   /* A local-first vault retries on its own, so the same quiet failure is announced once. */
   if (failure.message !== lastSyncNotice) {
@@ -781,6 +888,10 @@ async function sealedForPush(baseVersion) {
  */
 async function syncNow() {
   if (!syncEnabled() || !state.key || !authMaterial()) return;
+  /* Creation was refused for want of a code, and the field that answers it is on the page. A
+     background sync would ask the same question and be refused the same way, so it waits for the
+     code instead of spending the server's attempts on it. */
+  if (state.inviteNeeded && state.invite === '') return;
   if (syncBusy) {
     syncQueued = true;
     return;
@@ -801,15 +912,18 @@ async function syncNow() {
         /* First sync on a new phrase: the account is created from the same secrets the login
            would have used, so there is nothing to provision and no token to hold. A remembered
            device holds the signing key, not the secret the server is given, so it cannot create
-           the account without the phrase once. */
+           the account without the phrase once. The code, when the server wants one, is the third
+           argument and is empty until a refusal asks for it. */
         setSyncStatus('Creating the account…');
         if (typeof state.authSecret !== 'string') {
           throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
         }
-        await sync.register(state.accountId, state.authSecret);
+        await sync.register(state.accountId, state.authSecret, state.invite);
         /* The server now holds the secret, so this page does not: from here the session signs
            with the non-extractable key and nothing else. */
         state.authSecret = null;
+        /* The creation is done, so the code has no further use: it was spent on this account. */
+        forgetInvite();
         session = await sync.login(state.accountId, authMaterial());
       }
 
@@ -946,11 +1060,149 @@ function enter({ accountId, authSecret, authKey = null, key, version, sealed, do
     searchInput.focus();
   }
 
+  /* The vault is the only writer of the capture policy, so it states it on every unlock: an extension that was
+     reinstalled, reloaded or updated starts from the defaults and has to be told what this vault decided. */
+  pushCollectorPolicy();
+  void loadCollected();
+  maybeCollectorSetup();
+
   if (syncEnabled()) syncNow();
   /* A top-up that cannot read its own index is not an error worth showing: the next launch
      simply asks again. */
   scheduleIconTopUp().catch(() => {});
   if (runningVersion === '') loadVersion();
+}
+
+
+/* ------------------------------------------------------- setting up collection */
+
+/**
+ * The extension opens this page the first time it is installed, and the page asks here, once.
+ *
+ * That question is worth asking because the extension holds addresses for a vault it cannot see: "which vault, and
+ * does anything leave this device" is the whole of the consent, and the answer is the one thing a person should be
+ * told before a counter starts. Nothing is collected until the first button is pressed — the extension's own default
+ * is off, and the vault is the only thing that ever turns it on.
+ */
+let collectorSetupPending = false;
+
+/** Take `?collector=installed` off the address bar at once: a reload is a page load, and must not ask twice. */
+function takeCollectorSetupLink() {
+  const url = new URL(location.href);
+  if (!url.searchParams.has('collector')) return;
+
+  collectorSetupPending = true;
+  url.searchParams.delete('collector');
+  history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
+/** Called once a vault is open, because there is no point asking about a vault that is not there yet. */
+function maybeCollectorSetup() {
+  if (!collectorSetupPending || !state.document) return;
+  collectorSetupPending = false;
+  askAboutCollection();
+}
+
+function askAboutCollection() {
+  const modal = openModal({
+    title: 'Set up collected links',
+    body: [
+      el('p', {
+        text: '“Bookmarks — collected links” is installed. It can keep the address of every page this browser opens, ' +
+          'and how often you opened it, so the pages you really use are here to keep.'
+      }),
+      el('ul', {}, [
+        el('li', { text: 'Only the address and a count: no titles, no page contents, no referrer.' }),
+        el('li', {
+          text: 'It stays on this device. Nothing reaches this vault until you add it, and nothing leaves the device ' +
+            'at all.'
+        }),
+        el('li', { text: 'All of it can be changed or cleared later, in Settings.' })
+      ])
+    ],
+    actions: [
+      el('button', {
+        class: 'button button-quiet',
+        type: 'button',
+        text: 'Keep it off',
+        onclick: () => modal.close()
+      }),
+      el('button', {
+        class: 'button button-primary',
+        type: 'button',
+        text: 'Collect on this device',
+        onclick: () => {
+          modal.close();
+          askAboutDefaults();
+        }
+      })
+    ]
+  });
+}
+
+/** The three answers that make the difference between "it records everything forever" and "it does what I want". */
+function askAboutDefaults() {
+  setCollectorPrefs({ enabled: true });
+
+  const level = el('select', {}, [
+    el('option', { value: 'addresses', text: 'Every page' }),
+    el('option', { value: 'hosts', text: 'One row per hostname' }),
+    el('option', { value: 'domains', text: 'One row for the whole site' })
+  ]);
+  level.value = collectorPrefs().level;
+  level.addEventListener('change', () => setCollectorPrefs({ level: level.value }));
+
+  const retention = el(
+    'select',
+    {},
+    [
+      [7, 'A week'],
+      [30, 'A month'],
+      [60, 'Two months'],
+      [365, 'A year'],
+      [0, 'Until I clear them']
+    ].map(([value, text]) => el('option', { value: String(value), text }))
+  );
+  retention.value = String(collectorPrefs().retentionDays);
+  retention.addEventListener('change', () => setCollectorPrefs({ retentionDays: Number(retention.value) }));
+
+  const privateBox = el('input', { type: 'checkbox' });
+  privateBox.checked = collectorPrefs().includeIncognito;
+  privateBox.addEventListener('change', () => setCollectorPrefs({ includeIncognito: privateBox.checked }));
+
+  const modal = openModal({
+    title: 'How much should it keep?',
+    body: [
+      el('p', {
+        text: 'These are the defaults for every site. In Settings a site can be given a rule of its own, and a site, a ' +
+          'hostname or a single path can be left out entirely.'
+      }),
+      el('label', { class: 'settings-item settings-control' }, [
+        el('strong', { text: 'Record each site as' }),
+        level
+      ]),
+      el('label', { class: 'settings-item settings-control' }, [
+        el('strong', { text: 'Keep collected links for' }),
+        retention
+      ]),
+      el('label', { class: 'settings-item settings-control' }, [
+        el('strong', { text: 'Include private windows' }),
+        el('span', { text: 'The browser also has to allow this extension in private windows.' }),
+        privateBox
+      ])
+    ],
+    actions: [
+      el('button', {
+        class: 'button button-primary',
+        type: 'button',
+        text: 'Done',
+        onclick: () => {
+          modal.close();
+          announce('Collection is on. Open a page and it appears below.');
+        }
+      })
+    ]
+  });
 }
 
 async function tryRemembered() {
@@ -1348,7 +1600,7 @@ function findBookmark(id) {
   return state.document.bookmarks.find((bookmark) => bookmark.id === id) ?? null;
 }
 
-function actionButton(action, label, iconName, { pressed = false } = {}) {
+function actionButton(action, label, iconName, { pressed = null } = {}) {
   const button = el('button', {
     class: `icon-button${pressed ? ' pinned' : ''}`,
     type: 'button',
@@ -1356,9 +1608,59 @@ function actionButton(action, label, iconName, { pressed = false } = {}) {
     title: label
   });
   button.dataset.action = action;
-  if (pressed) button.setAttribute('aria-pressed', 'true');
+  /* A toggle owes a state in both positions; the name alone would describe the action and not the state. */
+  if (pressed !== null) button.setAttribute('aria-pressed', pressed ? 'true' : 'false');
   button.append(icon(iconName));
   return button;
+}
+
+/**
+ * The list view is a table and the pills view is a list of links, and the same nodes are drawn for both — so the
+ * roles are stamped on what is already there instead of being written into two row builders.
+ *
+ * The name cell is left alone on purpose: it is the anchor, and a `cell` role on it would take the link away. A
+ * screen reader then hears the row, the link, and the cells beside it, with the drawn header as the column names.
+ */
+function applyListRoles() {
+  const asTable = currentView === 'list';
+
+  for (const [container, label] of [
+    [list, 'Bookmarks'],
+    [collectedList, 'Collected links']
+  ]) {
+    if (!container) continue;
+
+    if (asTable) {
+      container.setAttribute('role', 'table');
+      container.setAttribute('aria-label', label);
+    } else {
+      container.removeAttribute('role');
+      container.removeAttribute('aria-label');
+    }
+
+    for (const row of container.children) {
+      if (!row.classList.contains('row')) continue;
+      const head = row.classList.contains('row-head');
+
+      if (!asTable) row.removeAttribute('role');
+      else row.setAttribute('role', 'row');
+
+      for (const cell of row.children) {
+        if (!asTable) {
+          cell.removeAttribute('role');
+          continue;
+        }
+        if (cell.tagName === 'A') continue;
+        if (cell.getAttribute('aria-hidden') === 'true') {
+          cell.setAttribute('role', 'presentation');
+          continue;
+        }
+        cell.setAttribute('role', head ? 'columnheader' : 'cell');
+        /* A selection column still needs a name of its own. */
+        if (cell.classList.contains('row-pick')) cell.setAttribute('aria-label', 'Select');
+      }
+    }
+  }
 }
 
 /**
@@ -1398,12 +1700,14 @@ function rowFor(bookmark) {
   row.style.setProperty('--tile-seed', background);
   row.style.setProperty('--tile-fg', foreground);
 
-  const host = el('span', { class: 'row-host', text: bookmark.hostname });
+  /* The address column carries the address the browser shows. It used to carry the hostname, so three bookmarks on
+     one host read as three identical rows. */
+  const host = el('span', { class: 'row-host', text: addressLabel(bookmark.url) });
 
   const clicks = el('span', {
     class: 'clicks',
-    text: String(bookmark.clickCount),
-    'aria-label': `${bookmark.clickCount} clicks`
+    text: String(useCount(bookmark)),
+    'aria-label': `${useCount(bookmark)} uses`
   });
 
   const when = el('span', { class: 'row-when', text: lastUsedLabel(bookmark) });
@@ -1442,9 +1746,11 @@ function render() {
     el('span', { 'aria-hidden': 'true' }),
     el('span', { text: 'Name' }),
     el('span', { text: 'Address' }),
-    el('span', { class: 'clicks', text: 'Clicks' }),
+    /* The number counts uses, not clicks: a bookmark opened from the browser's own list rises too. */
+    el('span', { class: 'clicks', text: 'Uses' }),
     el('span', { class: 'row-when', text: 'Last used' }),
-    el('span')
+    /* The last cell holds the row's buttons; it is not a column with a name. */
+    el('span', { 'aria-hidden': 'true' })
   ]);
 
   list.replaceChildren(head, ...sorted.map(rowFor));
@@ -1455,9 +1761,545 @@ function render() {
       ? 'No bookmarks yet. Add one above, or import a file from Settings.'
       : `No bookmark matches “${query.trim()}”.`;
 
+  renderCollected();
+  applyListRoles();
   updateStatusLine();
   viewHint.hidden = currentView !== 'pills' || sorted.length === 0;
 }
+
+/* --------------------------------------------------------- collected (the extension) */
+
+/* The extension is optional, so every answer can be nothing at all: a request that resolves to null means no
+   extension, or one that is disabled, and the section stays hidden rather than announcing an absence. */
+const collectorBridge = createBridge();
+let collectedSnapshot = null;
+let collectedTimer = null;
+
+/** What the section would draw, in one string: the same answer must not repaint the list. */
+function collectedKey(snapshot) {
+  if (snapshot === null) return 'none';
+
+  /* The settings are part of the shape of what is drawn, not only of what is counted: switching collection on or off
+     changes whether the section appears at all, and the section used to stay as it was until the page was reloaded. */
+  return `${snapshot.policy?.enabled === true ? 'on' : 'off'}|${snapshot.items.length}|${snapshot.items
+    .map((item) => `${item.url}:${item.visits}`)
+    .join(',')}`;
+}
+
+let collectedFingerprint = null;
+
+/**
+ * Move the extension's totals onto the bookmarks the vault already holds.
+ *
+ * A saved bookmark keeps counting when it is opened from the browser's own bookmarks or history, because the
+ * extension counts the address and not the route. Returns whether anything moved, which is what tells the page to
+ * repaint the vault as well as the section.
+ */
+function applyOpenCounts(snapshot) {
+  if (!snapshot || !state.document) return false;
+
+  const changes = openCounts(snapshot.items, state.document.bookmarks, deviceId());
+  if (changes.length === 0) return false;
+
+  let next = state.document;
+  for (const change of changes) next = recordUses(next, change.id, deviceId(), change.openCount, Date.now);
+  state.document = next;
+  return true;
+}
+
+async function loadCollected() {
+  const reply = await collectorBridge.request();
+  const next = isSnapshot(reply) ? reply : null;
+  const key = collectedKey(next);
+  const countsMoved = applyOpenCounts(next);
+
+  if (key === collectedFingerprint && !countsMoved) return;
+
+  collectedFingerprint = key;
+  collectedSnapshot = next;
+
+  if (countsMoved) {
+    render();
+    saveNow();
+    return;
+  }
+  renderCollected();
+}
+
+/* A worker that was just switched on has announced nothing, so a page that was already open would never hear about
+   it. Reading on a slow tick while the tab is visible is what makes "turn it on and watch the section fill" work
+   without a reload; the fingerprint above means an unchanged answer costs nothing on screen. */
+const COLLECTED_POLL_MS = 5000;
+
+setInterval(() => {
+  if (!state.document || document.visibilityState !== 'visible') return;
+  void loadCollected();
+}, COLLECTED_POLL_MS);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.document) void loadCollected();
+});
+
+/* A tab opening in another window, an approval or an exclusion all arrive as one hint. The section re-reads
+   rather than patching a copy it cannot trust. */
+collectorBridge.onChange(() => {
+  clearTimeout(collectedTimer);
+  collectedTimer = setTimeout(() => {
+    if (state.document) void loadCollected();
+  }, 200);
+});
+
+/* Everything about collection is a vault preference: whether it runs, what a site is recorded as, whether the list
+   is grouped, and what is excluded. It is sealed with the vault, travels with the phrase, and is pushed to the
+   extension whenever it changes — the page is the only writer of that policy. */
+/* The bounds are the same defaults the extension ships with: a list that keeps itself in check unless the person
+   says otherwise, and a zero that means "no limit" for anyone who wants that. */
+const COLLECTOR_DEFAULTS = { retentionDays: 60, maxEntries: 2000, dailyCap: 0, minVisits: 1 };
+
+function collectorPrefs() {
+  const prefs = state.document?.prefs?.collector ?? {};
+  const bounded = (value, fallback) => (Number.isInteger(value) && value >= 0 ? value : fallback);
+
+  return {
+    enabled: prefs.enabled === true,
+    includeIncognito: prefs.includeIncognito === true,
+    level: LEVELS.includes(prefs.level) ? prefs.level : DEFAULT_LEVEL,
+    grouped: prefs.grouped === true,
+    sites: Array.isArray(prefs.sites) ? prefs.sites : [],
+    exclude: Array.isArray(prefs.exclude) ? prefs.exclude : [],
+    retentionDays: bounded(prefs.retentionDays, COLLECTOR_DEFAULTS.retentionDays),
+    maxEntries: bounded(prefs.maxEntries, COLLECTOR_DEFAULTS.maxEntries),
+    dailyCap: bounded(prefs.dailyCap, COLLECTOR_DEFAULTS.dailyCap),
+    minVisits: Number.isInteger(prefs.minVisits) && prefs.minVisits >= 1 ? prefs.minVisits : COLLECTOR_DEFAULTS.minVisits
+  };
+}
+
+/** The site rules in the extension's words. Settings reads the vault's three levels; the policy names them. */
+function policyLevels() {
+  return collectorPrefs().sites.map((rule) => ({
+    site: rule.site,
+    level: LEVEL_TO_POLICY[rule.level] ?? 'address'
+  }));
+}
+
+function setCollectorPrefs(patch) {
+  if (!state.document) return;
+
+  state.document = {
+    ...state.document,
+    prefs: { ...state.document.prefs, collector: { ...collectorPrefs(), ...patch } }
+  };
+  saveNow();
+  pushCollectorPolicy();
+  render();
+}
+
+/** Tell the extension what to count, how, and what to leave out. */
+function pushCollectorPolicy(attempt = 0) {
+  const prefs = collectorPrefs();
+  void collectorBridge.setPolicy({
+    enabled: prefs.enabled,
+    includeIncognito: prefs.includeIncognito,
+    levels: policyLevels(),
+    exclude: prefs.exclude,
+    retentionDays: prefs.retentionDays,
+    maxEntries: prefs.maxEntries,
+    dailyCap: prefs.dailyCap,
+    minVisits: prefs.minVisits
+  }).then((reply) => {
+    /* No reply is what an absent extension looks like, and also what a missed message looks like. One retry costs
+       nothing and turns the second case into a second chance rather than a silently switched-off collection. */
+    if (reply === null && attempt < 2) {
+      setTimeout(() => pushCollectorPolicy(attempt + 1), 900);
+      return;
+    }
+    /* The extension has just been told what to collect, so ask it again: switching collection on used to leave the
+       section empty until the page was reloaded. */
+    void loadCollected();
+  });
+}
+
+/* The section follows the toolbar it shares: the same search box narrows both lists, and the same sort control orders
+   both. "Group by domain" is the one choice the toolbar has no room for, so it lives in Settings. */
+const SORT_TO_ORDER = { clicks: 'visits', lastClicked: 'recent', recent: 'recent', name: 'name' };
+
+/* The vault's words for the three levels and the three exclusion scopes, used by Settings. */
+const RECORD_LABELS = {
+  hosts: 'one row per hostname',
+  domains: 'one row for the whole site',
+  addresses: 'every page'
+};
+const EXCLUDE_LABELS = { site: 'the site and its subdomains', host: 'this hostname', path: 'this path and below' };
+
+/* The policy's field names are the fold's level names; Settings reads and writes those same three words. */
+const LEVEL_TO_POLICY = { domains: 'site', hosts: 'host', addresses: 'address' };
+const POLICY_TO_LEVEL = { site: 'domains', host: 'hosts', address: 'addresses' };
+
+function collectedOrder() {
+  return collectorPrefs().grouped ? 'domain' : SORT_TO_ORDER[sortInput.value] ?? 'visits';
+}
+
+function collectedMatches(item, query) {
+  const needle = query.trim().toLowerCase();
+  if (needle === '') return true;
+  return `${item.url} ${item.host ?? ''}`.toLowerCase().includes(needle);
+}
+
+function collectedHeld() {
+  return (state.document?.bookmarks ?? []).map((bookmark) => bookmark.url);
+}
+
+/** The extension's rows the vault does not already hold, folded into the level and order this build shows. */
+function collectedRows() {
+  if (collectedSnapshot?.policy?.enabled !== true) return [];
+
+  const prefs = collectorPrefs();
+  const items = collectedSnapshot.items.filter((item) => collectedMatches(item, searchInput.value));
+
+  return fold(items, {
+    level: prefs.level,
+    order: collectedOrder(),
+    held: collectedHeld(),
+    levels: policyLevels()
+  });
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+/* Icons for the collected rows come from the same server endpoint the vault's own icons use, and are kept in this
+   device's `localStorage` rather than inside the sealed vault: they describe a page the vault does not hold, so
+   sealing them would mean the vault grows every time an address is merely looked at. */
+const COLLECTED_ICON_KEY = 'collected-icons';
+const collectedIconTries = new Set();
+
+function collectedIconCache() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(COLLECTED_ICON_KEY) ?? '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function collectedIcon(host) {
+  return collectedIconCache()[host] ?? null;
+}
+
+async function loadCollectedIcon(host) {
+  if (host === '' || collectedIconTries.has(host)) return;
+  collectedIconTries.add(host);
+
+  const icon = await fetchIcon(host).catch(() => null);
+  if (!icon) return;
+
+  try {
+    const cache = collectedIconCache();
+    cache[host] = icon;
+    localStorage.setItem(COLLECTED_ICON_KEY, JSON.stringify(cache));
+  } catch {
+    /* A cache that cannot be written still leaves the lettered tile. */
+    return;
+  }
+
+  for (const row of collectedList.querySelectorAll(`[data-host="${CSS.escape(host)}"] .tile`)) {
+    row.replaceChildren(el('img', { src: icon, alt: '' }));
+  }
+}
+
+/** The day a visit was last seen, short enough for a column. */
+function seenLabel(stamp) {
+  if (typeof stamp !== 'string' || stamp === '') return '—';
+  const when = new Date(stamp);
+  if (Number.isNaN(when.getTime())) return '—';
+  return when.toLocaleDateString([], { day: 'numeric', month: 'short' });
+}
+
+/**
+ * One collected row. It reuses the vault's own row markup so both views come for free: pills show the tile, the
+ * label and the count, and everything that acts lives in the list, where a table already has a column for it.
+ */
+function collectedRowFor(item) {
+  const host = hostOf(item.url);
+  const { initial, background, foreground } = tileFor({ hostname: host, color: null });
+
+  const tile = el('span', { class: 'tile', 'aria-hidden': 'true' });
+  const icon = collectedIcon(host);
+  if (icon) {
+    tile.append(el('img', { src: icon, alt: '' }));
+  } else {
+    tile.textContent = initial;
+    void loadCollectedIcon(host);
+  }
+
+  /* A single address is named by its site and addressed by its whole address, which is the pair the vault's own
+     table uses. A grouped row is named by what it groups. */
+  const isAddress = item.kind === 'address';
+  const name = el('span', { class: 'row-name', text: isAddress ? host : item.label });
+  const link = el('a', { class: 'row-link', href: item.url, target: '_blank', rel: 'noopener noreferrer' }, [
+    tile,
+    name
+  ]);
+  link.setAttribute('aria-label', `${item.label} — ${item.visits} ${item.visits === 1 ? 'visit' : 'visits'}`);
+
+  const row = el('li', { class: 'row collected-row' });
+  row.dataset.url = item.url;
+  row.dataset.host = host;
+  row.dataset.kind = item.kind;
+  row.dataset.depth = String(item.depth);
+  row.dataset.visits = String(item.visits);
+  row.dataset.label = item.label;
+  row.style.setProperty('--tile-seed', background);
+  row.style.setProperty('--tile-fg', foreground);
+
+  const address = el('span', { class: 'row-host', text: isAddress ? item.label : host });
+  const visits = el('span', {
+    class: 'clicks',
+    text: String(item.visits),
+    'aria-label': `${item.visits} ${item.visits === 1 ? 'visit' : 'visits'}`
+  });
+  const when = el('span', { class: 'row-when', text: seenLabel(item.lastSeenAt) });
+
+  const add = el('button', { class: 'button button-quiet collected-add', type: 'button', text: 'Add' });
+  add.dataset.action = 'collect';
+  const actions = el('span', { class: 'row-actions' }, [add]);
+
+  const pick = el('input', { type: 'checkbox' });
+  pick.dataset.pick = item.url;
+  pick.checked = collectedPicked.has(item.url);
+  pick.setAttribute('aria-label', `Select ${item.label}`);
+  const pickCell = el('span', { class: 'row-pick' }, [pick]);
+
+  row.append(pickCell, link, address, visits, when, actions);
+  return row;
+}
+
+/* Selection belongs to the list view only: in pills there is nothing to tick and nothing to press. */
+const collectedPicked = new Set();
+
+function updateCollectedBar(rows = collectedRows()) {
+  const showing = currentView === 'list' && rows.length > 0;
+  collectedBar.hidden = !showing;
+  if (!showing) return;
+
+  const picked = [...collectedPicked].filter((url) => rows.some((row) => row.url === url));
+  collectedBarCount.textContent =
+    picked.length === 0 ? `${rows.length} collected` : `${picked.length} of ${rows.length} selected`;
+
+  for (const button of [collectedAddButton, collectedDismissButton, collectedExcludeButton]) {
+    button.disabled = picked.length === 0;
+  }
+}
+
+/** Add every selected row, in one save rather than one per row. */
+function approveMany(rows) {
+  let next = state.document;
+  let added = 0;
+  let skipped = 0;
+
+  for (const row of rows) {
+    try {
+      const result = addBookmark(
+        next,
+        { url: row.url, name: nameForCollected(row), uses: { [deviceId()]: Number(row.visits) || 0 } },
+        Date.now
+      );
+      next = result.document;
+      added += 1;
+    } catch (error) {
+      if (error.code === 'DUPLICATE') {
+        skipped += 1;
+        continue;
+      }
+      announce(clean(error.message));
+      return;
+    }
+  }
+
+  if (added > 0) {
+    state.document = next;
+    render();
+    saveNow();
+  }
+
+  collectedPicked.clear();
+  announce(
+    added === 0
+      ? 'Nothing new to add — those are already in the vault.'
+      : `Added ${added} ${added === 1 ? 'link' : 'links'}${skipped > 0 ? `, ${skipped} already saved` : ''}.`
+  );
+  void loadCollected();
+}
+
+function pickedRows() {
+  const rows = collectedRows();
+  return rows.filter((row) => collectedPicked.has(row.url));
+}
+
+/* One exclusion per selected row, at the scope the bar names. A path exclusion keeps the host and the path; the
+   other two keep the host alone, because that is what those scopes match. */
+function excludeMany(rows, scope) {
+  const entries = new Map();
+  for (const row of rows) {
+    const host = hostOf(row.url);
+    let value = host;
+    if (scope === 'path') {
+      try {
+        value = `${host}${new URL(row.url).pathname}`;
+      } catch {
+        value = host;
+      }
+    }
+    entries.set(`${scope}|${value}`, { scope, value });
+  }
+
+  collectedPicked.clear();
+  void collectorBridge.exclude([...entries.values()]).then(() => loadCollected());
+  announce(`Excluding ${entries.size} ${entries.size === 1 ? 'site' : 'sites'}.`);
+}
+
+collectedBar.addEventListener('click', (event) => {
+  const picked = pickedRows();
+  if (picked.length === 0) return;
+
+  if (event.target === collectedAddButton) {
+    approveMany(picked);
+    return;
+  }
+
+  if (event.target === collectedDismissButton) {
+    const urls = picked.map((row) => row.url);
+    collectedPicked.clear();
+    void collectorBridge.dismiss(urls).then(() => loadCollected());
+    announce(`Dismissed ${urls.length}.`);
+    return;
+  }
+
+  if (event.target === collectedExcludeButton) {
+    excludeMany(picked, collectedScope.value);
+  }
+});
+
+collectedList.addEventListener('change', (event) => {
+  const all = event.target.closest?.('#collected-all');
+  if (all) {
+    const rows = collectedRows();
+    collectedPicked.clear();
+    if (all.checked) for (const row of rows) collectedPicked.add(row.url);
+    for (const box of collectedList.querySelectorAll('[data-pick]')) box.checked = all.checked;
+    updateCollectedBar();
+    return;
+  }
+
+  const box = event.target.closest?.('[data-pick]');
+  if (!box) return;
+
+  if (box.checked) collectedPicked.add(box.dataset.pick);
+  else collectedPicked.delete(box.dataset.pick);
+  updateCollectedBar();
+});
+
+function renderCollected() {
+  const rows = collectedRows();
+  const prefs = collectorPrefs();
+  const totals = summarise(
+    (collectedSnapshot?.items ?? []).filter((item) => collectedMatches(item, searchInput.value)),
+    collectedHeld(),
+    policyLevels()
+  );
+
+  collectedList.dataset.view = currentView;
+  collected.hidden = rows.length === 0;
+
+  if (rows.length === 0) {
+    collectedList.replaceChildren();
+    collectedCount.textContent = '';
+    collectedPicked.clear();
+    updateCollectedBar(rows);
+    return;
+  }
+
+  const all = el('input', { type: 'checkbox' });
+  all.id = 'collected-all';
+  all.checked = rows.length > 0 && rows.every((row) => collectedPicked.has(row.url));
+  all.setAttribute('aria-label', 'Select every collected row');
+
+  /* The list is a table, so it gets a header; the pills view hides it with the rest of the furniture. */
+  const head = el('li', { class: 'row row-head' }, [
+    el('span', { class: 'row-pick' }, [all]),
+    el('span', { 'aria-hidden': 'true' }),
+    el('span', { text: 'Name' }),
+    el('span', { text: 'Address' }),
+    el('span', { class: 'clicks', text: 'Visits' }),
+    el('span', { class: 'row-when', text: 'Last seen' }),
+    el('span', { 'aria-hidden': 'true' })
+  ]);
+
+  collectedList.replaceChildren(head, ...rows.map(collectedRowFor));
+  collectedCount.textContent = `${totals.addresses} ${totals.addresses === 1 ? 'address' : 'addresses'} · ${
+    totals.visits
+  } ${totals.visits === 1 ? 'visit' : 'visits'}`;
+  updateCollectedBar(rows);
+  applyListRoles();
+}
+
+/**
+ * Add a collected row to the vault, then let the extension forget it.
+ *
+ * The order matters: the bookmark is written first, so a lost reply leaves a duplicate the person can dismiss
+ * rather than a link that was never saved. A row that is already in the vault is promoted away and said so.
+ */
+/* A collected row is named by its path when it has one: three pages of one host would otherwise all be called the
+   host, and the name is the only column that tells them apart at a glance. */
+function nameForCollected(row) {
+  try {
+    const path = new URL(row.url).pathname.replace(/^\/+|\/+$/g, '');
+    return path;
+  } catch {
+    return '';
+  }
+}
+
+function approveCollected(url, visits, label = '') {
+  try {
+    /* The count crosses with the row: the visits were made to this address, and starting the bookmark at zero
+       would throw away the only thing the extension was counting. */
+    const { document: next, bookmark } = addBookmark(
+      state.document,
+      { url, name: nameForCollected({ url }), uses: { [deviceId()]: Number.isInteger(visits) ? visits : 0 } },
+      Date.now
+    );
+    state.document = next;
+    render();
+    saveNow();
+    announce(`Added ${labelOf(bookmark)}`);
+    fetchAndStoreIcon(bookmark.id, bookmark.hostname);
+    /* The row is not deleted: the extension keeps counting this address, and the count keeps arriving here, which
+       is what makes a bookmark opened from the browser's own list count too. The section hides it because the vault
+       holds it, so it can never appear in both places. */
+    void loadCollected();
+  } catch (error) {
+    if (error.code === 'DUPLICATE') {
+      void collectorBridge.promote([url]);
+      void loadCollected();
+      announce('That address is already in your vault.');
+      return;
+    }
+    announce(clean(error.message));
+  }
+}
+
+collectedList.addEventListener('click', (event) => {
+  const button = event.target.closest?.('[data-action="collect"]');
+  if (!button) return;
+  const row = button.closest('.row');
+  if (row?.dataset.url) approveCollected(row.dataset.url, Number(row.dataset.visits), row.dataset.label);
+});
 
 /* ------------------------------------------------------------------- actions */
 
@@ -1523,7 +2365,8 @@ async function handleAdd(event) {
   const url = addUrl.value.trim();
   const name = addName.value.trim();
   if (url === '') {
-    addUrl.focus();
+    /* Silence reads as a broken button. */
+    refuseAdd('Type the address you want to keep, then Add.');
     return;
   }
 
@@ -1560,15 +2403,43 @@ async function handleAdd(event) {
       searchInput.value = '';
       render();
       const row = list.querySelector(`[data-id="${CSS.escape(error.existingId)}"]`);
+      const label = row ? labelOf(findBookmark(error.existingId)) : 'That address';
       row?.scrollIntoView({ block: 'center' });
       row?.classList.add('flash');
       setTimeout(() => row?.classList.remove('flash'), 1400);
-      announce('That address is already bookmarked.');
+      /* Clear the field so the next Add is not the same refusal again, and put the person on the row that has it. */
+      addUrl.value = '';
+      addUrl.removeAttribute('aria-invalid');
+      announce(`“${label}” is already saved.`);
+      row?.querySelector('.row-link')?.focus();
       return;
     }
-    announce(clean(error.message));
-    addUrl.focus();
+    refuseAdd(refusalFor(url, error));
   }
+}
+
+/**
+ * Say what is wrong with the address, mark the field, and put the cursor back in it — the message used to be a
+ * lowercase fragment in a corner while the field looked untouched.
+ */
+function refuseAdd(message) {
+  addUrl.setAttribute('aria-invalid', 'true');
+  addUrl.classList.add('invalid');
+  announce(message);
+  addUrl.focus();
+  addUrl.select();
+}
+
+/** A refusal in a sentence, naming what was typed instead of restating the parser's own words. */
+function refusalFor(url, error) {
+  const typed = url.length > 60 ? `${url.slice(0, 60)}…` : url;
+  const said = clean(error?.message ?? '');
+  if (/not a bookmark scheme/.test(said)) {
+    return `“${typed}” is not a page address. Only http and https links can be kept.`;
+  }
+  if (/has no host|not a URL/.test(said)) return `“${typed}” is not a page address — it has no site in it.`;
+  if (/at most/.test(said)) return 'That address is too long to keep.';
+  return said || 'That address could not be added.';
 }
 
 function removeBookmark(bookmark) {
@@ -1808,7 +2679,9 @@ function openEditModal(bookmark) {
         name
       ]),
       el('label', { class: 'field' }, [
-        el('span', { class: 'field-label', text: 'Clicks' }),
+        /* Only the clicks made from this list are editable; the browser's own opens are counted and mirrored, so
+           they cannot be typed over. */
+        el('span', { class: 'field-label', text: 'Clicks from this list' }),
         clicks
       ]),
       el('label', { class: 'confirm-saved' }, [pinned, el('span', { text: 'Pin to the top' })]),
@@ -2211,12 +3084,15 @@ function openSettings() {
 
   /* On its own origin the app can no longer inherit the site's saved theme, so it carries the
      same ten names and the same key. */
+  /* No "light": a bookmark list is read in the dark, and the picker does not offer what this page will not go back to. */
   const THEMES = [
-    'current', 'light', 'amber', 'teal', 'charcoal',
+    'current', 'amber', 'teal', 'charcoal',
     'greenish', 'colorful', 'sunset', 'nord', 'cyberpunk'
   ];
   const themeSelect = el('select', {}, THEMES.map((name) => el('option', { value: name, text: name })));
-  themeSelect.value = document.documentElement.dataset.theme || 'current';
+  themeSelect.value = THEMES.includes(document.documentElement.dataset.theme)
+    ? document.documentElement.dataset.theme
+    : 'current';
   themeSelect.addEventListener('change', () => {
     const value = THEMES.includes(themeSelect.value) ? themeSelect.value : 'current';
     try {
@@ -2235,6 +3111,195 @@ function openSettings() {
     button.addEventListener('click', onClick);
     return button;
   };
+
+  /* A change says so in its own row instead of closing the sheet and opening it again: the sheet used to jump back to
+     the top on every switch, which is what made it feel like a form. */
+  const savedTick = (row) => {
+    if (!row) return;
+    row.classList.add('just-saved');
+    const tick = el('span', { class: 'settings-saved', text: 'Saved' });
+    row.append(tick);
+    setTimeout(() => {
+      tick.remove();
+      row.classList.remove('just-saved');
+    }, 1600);
+  };
+
+  /* A place to jump to. The chips are drawn after the sheet is built, from the headings it made. */
+  const chipsHost = el('div', { class: 'settings-chips', 'aria-label': 'Settings sections' });
+  const sections = [];
+  const heading = (text) => {
+    const node = el('h3', { class: 'settings-heading', text });
+    sections.push({ text, node });
+    return node;
+  };
+
+  /* ---- the invite field ---- */
+
+  /**
+   * The one question an invite-only server asks. It is drawn only while a creation has been
+   * refused for want of a code, and the value is read from the field into `state.invite` when it
+   * is pressed: the code is never stored, and the field holds it no longer than the attempt.
+   */
+  const inviteRow = () => {
+    const field = el('input', {
+      type: 'text',
+      id: 'invite-code',
+      class: 'settings-invite-field',
+      autocomplete: 'off',
+      spellcheck: false,
+      inputmode: 'text',
+      'aria-label': 'Invite code',
+      'aria-describedby': 'invite-code-hint',
+      value: state.invite
+    });
+
+    const button = el('button', {
+      class: 'button button-primary settings-invite-use',
+      type: 'button',
+      text: 'Use this code'
+    });
+
+    const use = async () => {
+      const code = field.value.trim();
+      if (code === '') {
+        field.focus();
+        return;
+      }
+
+      button.disabled = true;
+      const accepted = await submitInvite(code);
+      button.disabled = false;
+
+      if (!accepted) {
+        /* The refusal sentence is on the page and the next attempt starts where this one was
+           typed, so a mistyped code can be corrected in place. */
+        field.focus();
+        return;
+      }
+
+      forgetInvite();
+      field.value = '';
+      if (settingsOpen()) repaintSettings();
+      announce('Sync is on for this vault.');
+    };
+
+    button.addEventListener('click', use);
+    /* One field, one action: the key that people press after typing a code should run it. */
+    field.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      button.click();
+    });
+
+    return el(
+      'div',
+      { class: 'settings-item settings-control settings-invite', 'data-setting': 'sync-invite' },
+      [
+        el('strong', { text: 'Invite code' }),
+        field,
+        button,
+        el('span', {
+          class: 'settings-invite-hint',
+          id: 'invite-code-hint',
+          text: 'This is a code, not the phrase, and it is spent once used.'
+        })
+      ]
+    );
+  };
+
+  /* ---- the collected-links controls ---- */
+
+  const collector = collectorPrefs();
+
+  const collectorChoice = (label, options, value, onPick) => {
+    const select = el('select', {}, options.map(([option, text]) => el('option', { value: option, text })));
+    select.value = value;
+    const row = el('label', { class: 'settings-item settings-control' }, [el('strong', { text: label }), select]);
+    select.addEventListener('change', () => {
+      onPick(select.value);
+      savedTick(row);
+    });
+    return row;
+  };
+
+  const collectorToggle = (label, detail, checked, onToggle) => {
+    const box = el('input', { type: 'checkbox' });
+    box.checked = checked;
+    const row = el('label', { class: 'settings-item settings-control' }, [
+      el('strong', { text: label }),
+      el('span', { text: detail }),
+      box
+    ]);
+    box.addEventListener('change', () => {
+      onToggle(box.checked);
+      savedTick(row);
+    });
+    return row;
+  };
+
+  const collectorRemove = (label, onRemove) => {
+    const button = el('button', { class: 'icon-button', type: 'button', 'aria-label': label, title: label });
+    button.append(icon('remove'));
+    button.addEventListener('click', () => {
+      onRemove();
+      repaintSettings();
+    });
+    return button;
+  };
+
+  const askForRule = async ({ title, fieldLabel, placeholder, options, confirmLabel }) => {
+    const field = el('input', { type: 'text', placeholder, 'aria-label': fieldLabel });
+    const select = el('select', {}, options.map(([value, text]) => el('option', { value, text })));
+    const sure = await askModal({ title, body: [field, select], confirmLabel });
+    if (!sure) return null;
+
+    const value = field.value.trim().toLowerCase();
+    if (value === '') return null;
+    return { value, choice: select.value };
+  };
+
+  async function addSiteRule() {
+    modal.close();
+    const answer = await askForRule({
+      title: 'Record a site differently',
+      fieldLabel: 'Site',
+      placeholder: 'youtube.com',
+      options: [
+        ['hosts', 'One row per hostname'],
+        ['domains', 'One row for the whole site'],
+        ['addresses', 'Every page']
+      ],
+      confirmLabel: 'Save'
+    });
+    if (answer === null) return;
+
+    setCollectorPrefs({
+      sites: [...collector.sites.filter((rule) => rule.site !== answer.value), { site: answer.value, level: answer.choice }]
+    });
+    repaintSettings();
+  }
+
+  async function addExclusion() {
+    modal.close();
+    const answer = await askForRule({
+      title: 'Never collect this',
+      fieldLabel: 'Site, hostname or path',
+      placeholder: 'bank.example/statements',
+      options: [
+        ['site', 'The site and every subdomain'],
+        ['host', 'Exactly this hostname'],
+        ['path', 'This hostname and this path']
+      ],
+      confirmLabel: 'Exclude'
+    });
+    if (answer === null) return;
+
+    setCollectorPrefs({
+      exclude: [...collector.exclude, { scope: answer.choice, value: answer.value }]
+    });
+    repaintSettings();
+  }
 
   /* A fact about the account, not an action: no press, and a dash where the vault has no such
      moment. Both are read on this device's clock, so the hour is the hour the owner sees. The
@@ -2262,23 +3327,22 @@ function openSettings() {
     }
   };
 
-  const modal = openModal({
-    title: 'Settings',
-    body: [
+  const bodyNodes = [
+      chipsHost,
       el('p', {
         class: 'modal-note',
-        text: `${count} bookmarks in this vault · version ${state.version} · ${planLabel()}.`
+        text: `${count} ${count === 1 ? 'bookmark' : 'bookmarks'} in this vault · version ${state.version} · ${planLabel()}.`
       }),
       el('p', {
         class: 'modal-note',
         text: 'Sync keeps a sealed copy on the server. Your local vault never expires.'
       }),
-      el('h3', { class: 'settings-heading', text: 'Account' }),
+      heading('Account'),
       el('div', { class: 'settings-list' }, [
         stampRow('Vault created', () => vaultCreatedAt),
         stampRow('Last activity', () => lastActivityAt)
       ]),
-      el('h3', { class: 'settings-heading', text: 'Appearance' }),
+      heading('Appearance'),
       el('label', { class: 'field' }, [
         el('span', { class: 'field-label', text: 'Text size' }),
         sizeSelect
@@ -2287,7 +3351,7 @@ function openSettings() {
         el('span', { class: 'field-label', text: 'Theme' }),
         themeSelect
       ]),
-      el('h3', { class: 'settings-heading', text: 'Export' }),
+      heading('Export'),
       el('div', { class: 'settings-list' }, [
         item('Sealed backup', 'Encrypted. Restores with the same 13 words.', async () => {
           await exportSealedBackup();
@@ -2302,14 +3366,146 @@ function openSettings() {
           modal.close();
         })
       ]),
-      el('h3', { class: 'settings-heading', text: 'Import' }),
+      heading('Import'),
       el('div', { class: 'settings-list' }, [
         item('A JSON or HTML file', 'Your old sites.json, a plain export, or a browser file.', () => {
           modal.close();
           handleImport();
         })
       ]),
-      el('h3', { class: 'settings-heading', text: 'Icons' }),
+      heading('Collected links'),
+      el('div', { class: 'settings-list' }, [
+        (() => {
+          const strong = el('strong', {
+            text: collector.enabled ? 'Collection: on' : 'Collect links on this device'
+          });
+          const detail = el('span', {
+            text: collector.enabled
+              ? 'Counting addresses on this device. Add one to keep it in the vault.'
+              : 'Off by default. Nothing leaves this browser.'
+          });
+          const box = el('input', { type: 'checkbox' });
+          box.checked = collector.enabled;
+          const row = el('label', { class: 'settings-item settings-control', 'data-setting': 'collector-enabled' }, [
+            strong,
+            detail,
+            box
+          ]);
+
+          box.addEventListener('change', () => {
+            setCollectorPrefs({ enabled: box.checked });
+            strong.textContent = box.checked ? 'Collection: on' : 'Collect links on this device';
+            detail.textContent = box.checked
+              ? 'Counting addresses on this device. Add one to keep it in the vault.'
+              : 'Off by default. Nothing leaves this browser.';
+            savedTick(row);
+          });
+          return row;
+        })(),
+        collectorChoice(
+          'Record each site as',
+          [
+            ['addresses', 'Every page'],
+            ['hosts', 'One row per hostname'],
+            ['domains', 'One row for the whole site']
+          ],
+          collector.level,
+          (value) => setCollectorPrefs({ level: value })
+        ),
+        collectorToggle('Group by domain', 'Show a site and its hostnames as a nested list instead of one ranking.', collector.grouped, (checked) =>
+          setCollectorPrefs({ grouped: checked })
+        ),
+        ...collector.sites.map((rule) =>
+          el('div', { class: 'settings-item settings-rule' }, [
+            el('strong', { text: rule.site }),
+            el('span', { text: RECORD_LABELS[rule.level] ?? rule.level }),
+            collectorRemove(`Stop recording ${rule.site} differently`, () =>
+              setCollectorPrefs({ sites: collector.sites.filter((entry) => entry.site !== rule.site) })
+            )
+          ])
+        ),
+        ...collector.exclude.map((rule) =>
+          el('div', { class: 'settings-item settings-rule' }, [
+            el('strong', { text: rule.value }),
+            el('span', { text: `never collect — ${EXCLUDE_LABELS[rule.scope] ?? rule.scope}` }),
+            collectorRemove(`Stop excluding ${rule.value}`, () =>
+              setCollectorPrefs({ exclude: collector.exclude.filter((entry) => entry !== rule) })
+            )
+          ])
+        ),
+        collectorToggle(
+          'Include private windows',
+          'Off by default. The browser also has to allow this extension in private windows, at the extensions page.',
+          collector.includeIncognito,
+          (checked) => setCollectorPrefs({ includeIncognito: checked })
+        ),
+        collectorChoice(
+          'Keep collected links for',
+          [
+            ['7', 'A week'],
+            ['30', 'A month'],
+            ['60', 'Two months'],
+            ['365', 'A year'],
+            ['0', 'Until I clear them']
+          ],
+          String(collector.retentionDays),
+          (value) => setCollectorPrefs({ retentionDays: Number(value) })
+        ),
+        collectorChoice(
+          'Keep at most',
+          [
+            ['500', '500 addresses'],
+            ['2000', '2,000 addresses'],
+            ['5000', '5,000 addresses'],
+            ['0', 'No limit']
+          ],
+          String(collector.maxEntries),
+          (value) => setCollectorPrefs({ maxEntries: Number(value) })
+        ),
+        collectorChoice(
+          'New addresses a day',
+          [
+            ['0', 'No limit'],
+            ['50', '50 a day'],
+            ['100', '100 a day'],
+            ['250', '250 a day']
+          ],
+          String(collector.dailyCap),
+          (value) => setCollectorPrefs({ dailyCap: Number(value) })
+        ),
+        collectorChoice(
+          'Show rows seen at least',
+          [
+            ['1', 'Once'],
+            ['2', 'Twice'],
+            ['3', 'Three times']
+          ],
+          String(collector.minVisits),
+          (value) => setCollectorPrefs({ minVisits: Number(value) })
+        ),
+        item('Add a site rule', 'Record one site at a level of its own — a video site as hostnames, everything else page by page.', addSiteRule),
+        item('Exclude a site or a page', 'Never collect a site, a hostname, or one path.', addExclusion),
+        item('Clear collected links', 'Delete every address the extension counted on this device. Bookmarks are untouched.', async () => {
+          const sure = await askModal({
+            title: 'Clear what was collected?',
+            body: [
+              el('p', {
+                class: 'modal-note',
+                text: 'Every address the extension counted on this device is deleted, along with the day’s counter. Your bookmarks are untouched, and collection keeps running with the settings above.'
+              })
+            ],
+            confirmLabel: 'Clear',
+            danger: true
+          });
+          if (!sure) return;
+
+          await collectorBridge.clear();
+          modal.close();
+          await loadCollected();
+          announce('Collected links cleared.');
+        })
+      ]),
+      heading('Icons'),
       el('div', { class: 'settings-list' }, [
         item(
           'Fetch missing icons',
@@ -2335,7 +3531,7 @@ function openSettings() {
           if (sure) await removeAllIcons();
         })
       ]),
-      el('h3', { class: 'settings-heading', text: 'Server' }),
+      heading('Server'),
       el('div', { class: 'settings-list' }, [
         item(
           `Sync: ${syncEnabled() ? 'on' : 'off'}`,
@@ -2366,12 +3562,17 @@ function openSettings() {
               await sync.logout();
               setSyncStatus('');
               clearSyncRefusal({ reset: true });
+              /* Off is not the same vault: the code was for a server this vault no longer talks to. */
+              forgetInvite();
               return;
             }
             clearSyncRefusal({ reset: true });
             await syncNow();
           }
         ),
+        /* The field that answers an invite-only server, in the section whose switch asked it: a
+           question about creating the account has to be on the page, not behind a chip. */
+        ...(state.inviteNeeded ? [inviteRow()] : []),
         item('Sync now', 'Reconcile with the server immediately.', async () => {
           modal.close();
           if (!syncEnabled()) {
@@ -2399,7 +3600,7 @@ function openSettings() {
           }
         )
       ]),
-      el('h3', { class: 'settings-heading', text: 'This device' }),
+      heading('This device'),
       el('div', { class: 'settings-list' }, [
         item('Lock the vault', 'Forget the key on this device until the phrase is entered again.', async () => {
           modal.close();
@@ -2430,13 +3631,85 @@ function openSettings() {
         class: 'modal-note',
         text: 'The vault is sealed in this browser with AES-256-GCM. The server holds the sealed copy, an account record with dates, plan and size, and the list of signed-in devices.'
       }),
-      ...(runningVersion === ''
-        ? []
-        : [el('p', { class: 'modal-note settings-version', text: `Version ${runningVersion}` })])
-    ]
+  ];
+
+  /* One section at a time. The sheet had grown into thirty rows in one column, and a map that shows every street at
+     once is a wall: the chips became doors, and each door opens onto the handful of controls that belong together. */
+  const BY_HEADING = {
+    Account: 'vault',
+    Appearance: 'vault',
+    Export: 'vault',
+    Import: 'vault',
+    Icons: 'vault',
+    'Collected links': 'collected',
+    Server: 'sync',
+    'This device': 'device'
+  };
+  const PLAN = [
+    ['vault', 'Vault'],
+    ['collected', 'Collected links'],
+    ['sync', 'Sync'],
+    ['device', 'This device']
+  ];
+
+  const groups = new Map(PLAN.map(([key, label]) => [key, { label, nodes: [] }]));
+  const headerNodes = [];
+  let bucket = null;
+
+  for (const node of bodyNodes) {
+    if (node.classList?.contains('settings-heading')) bucket = BY_HEADING[node.textContent] ?? bucket;
+    if (bucket === null) headerNodes.push(node);
+    else groups.get(bucket).nodes.push(node);
+  }
+
+  /* The chips are a map, not a door: every section stays on the page, open, always. Nothing in this sheet hides
+     another part of it — a jump moves the reader to a place, it never closes the rest. */
+  const goToSection = (key) => {
+    groups.get(key)?.node.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    for (const chip of chipsHost.querySelectorAll('.settings-chip')) {
+      chip.classList.toggle('is-current', chip.dataset.section === key);
+    }
+  };
+
+  for (const [key, { label, nodes }] of groups) {
+    const node = el('section', { class: 'settings-section', 'data-section': key }, nodes);
+    groups.get(key).node = node;
+    const chip = el('button', { class: 'settings-chip', type: 'button', text: label });
+    chip.dataset.section = key;
+    chip.addEventListener('click', () => goToSection(key));
+    chipsHost.append(chip);
+  }
+
+  const modal = openModal({
+    title: 'Settings',
+    body: [chipsHost, ...headerNodes, ...[...groups.values()].map((group) => group.node)]
   });
 
+  /* The first chip is marked as a starting point; it hides nothing. */
+  chipsHost.firstChild?.classList.add('is-current');
+
+  /* Two columns where the sheet has the room, and the keyboard lands on the first control of the open section. */
+  modal.dialog.classList.add('settings-modal');
+  modal.dialog.querySelector('.settings-section select, .settings-section input, .settings-section button')?.focus();
+
   fillStamps();
+}
+
+/** Whether the sheet is the dialog currently on the page. */
+function settingsOpen() {
+  return activeModal?.dialog?.classList.contains('settings-modal') === true;
+}
+
+/**
+ * Draw the sheet again where it stands, for a change that alters which rows it holds. The sheet
+ * is built once and left alone, so a row that becomes needed is drawn by building the sheet
+ * again — at the same scroll position, which is where the person is reading.
+ */
+function repaintSettings() {
+  const scroll = activeModal?.dialog?.querySelector('.modal-body')?.scrollTop ?? 0;
+  const next = openSettings();
+  const body = next.dialog.querySelector('.modal-body');
+  if (body) body.scrollTop = scroll;
 }
 
 /**
@@ -2452,6 +3725,8 @@ async function lockVault({ broadcast = true } = {}) {
   state.accountId = null;
   state.authKey = null;
   state.authSecret = null;
+  /* A code is a secret like the phrase, so a lock drops it with everything else the page held. */
+  forgetInvite();
   state.key = null;
   state.version = 0;
   state.remoteVersion = 0;
@@ -2466,6 +3741,7 @@ async function lockVault({ broadcast = true } = {}) {
   vaultCreatedAt = null;
   lastActivityAt = null;
   list.replaceChildren();
+  clearStatus();
   showLock('Locked. Enter your phrase to reopen the vault.', { hasVault: true });
 
   if (broadcast) lockSignal.broadcast();
@@ -2481,7 +3757,7 @@ function registerServiceWorker() {
   const { protocol, hostname } = location;
   if (protocol !== 'https:' && hostname !== 'localhost' && hostname !== '127.0.0.1') return;
 
-  navigator.serviceWorker.register('/w/bookmarks/sw.js', { scope: '/w/bookmarks/' }).catch(() => {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {
     /* Offline caching is an enhancement; the app works without it. */
   });
 }
@@ -2490,18 +3766,29 @@ function bindEvents() {
   lockForm.addEventListener('submit', handleUnlock);
   newVaultButton.addEventListener('click', openCreateModal);
   restoreButton.addEventListener('click', handleRestore);
+
+  /* The toolbar has carried a lock button with no handler bound to it: drawn, named, and inert. */
+  lockButton.addEventListener('click', () => void lockVault());
   syncRefusalDismiss.addEventListener('click', () => {
     syncRefusalDismissed = true;
     syncRefusal.hidden = true;
   });
 
   addForm.addEventListener('submit', handleAdd);
-  addToggle.addEventListener('click', () => setAddForm(addForm.hidden));
+  /* Open, it means "type here" — pressing it used to close the form being typed in and lose the words. */
+  addToggle.addEventListener('click', () => {
+    if (addForm.hidden) setAddForm(true);
+    else addUrl.focus();
+  });
   addCancel.addEventListener('click', () => setAddForm(false));
 
   /* Suggest the site's own name once the address is settled, and stand out of the way the moment
      a name is typed. */
   addUrl.addEventListener('blur', suggestName);
+  addUrl.addEventListener('input', () => {
+    addUrl.removeAttribute('aria-invalid');
+    addUrl.classList.remove('invalid');
+  });
   addName.addEventListener('input', () => {
     nameTouched = true;
     delete addName.dataset.suggesting;
@@ -2574,6 +3861,7 @@ function boot() {
   bindEvents();
   applyAppearance();
   registerServiceWorker();
+  takeCollectorSetupLink();
   tryRemembered();
 }
 
