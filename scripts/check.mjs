@@ -157,6 +157,36 @@ for (const file of assets) {
   }
 }
 
+/* 2b. The two stylesheets the page draws with are the app's own files now, not the site's. A page
+   that links a path nobody ships renders unstyled and says so only in a console nobody reads, and
+   these two paths used to be proxied from the site host — so the links, the files they name, and
+   the absence of that host are all checked here. Nothing in public/ may name www.332321.xyz again:
+   the app answers with the bytes in its own repository or it does not draw at all. */
+try {
+  const page = readFileSync(join(publicDir, 'index.html'), 'utf8');
+
+  for (const name of ['tokens.css', 'themes.css']) {
+    if (!page.includes(`href="/css/${name}"`)) {
+      problems.push(`stylesheets: index.html does not link /css/${name}`);
+    }
+
+    const file = join(publicDir, 'css', name);
+    if (!existsSync(file)) problems.push(`stylesheets: public/css/${name} is missing`);
+    else if (statSync(file).size < 1000) problems.push(`stylesheets: public/css/${name} looks truncated`);
+  }
+
+  for (const file of assets) {
+    if (readFileSync(file, 'utf8').includes('www.332321.xyz')) {
+      problems.push(
+        `${relative(root, file)}: names www.332321.xyz, which this app no longer reads a stylesheet from`
+      );
+      break;
+    }
+  }
+} catch (error) {
+  problems.push(`stylesheets: ${error.message}`);
+}
+
 /* 3. README.md makes the same promises to a reader who never opens the page, so it is held to
    the same list. It is read directly: a repository with no README fails here rather than
    passing the way an empty scan would. */
@@ -275,6 +305,12 @@ try {
 
   for (const name of imported) {
     if (!shell.has(name)) problems.push(`shell: app.js imports ${name}, which sw.js does not cache`);
+  }
+
+  /* The two stylesheets are same-origin files now, so they belong in the same atomic install as the
+     modules: a page that loads offline without them renders as unstyled markup. */
+  for (const path of ['/css/tokens.css', '/css/themes.css']) {
+    if (!worker.includes(`'${path}'`)) problems.push(`shell: sw.js does not cache ${path}`);
   }
 } catch (error) {
   problems.push(`shell: ${error.message}`);

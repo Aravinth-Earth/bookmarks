@@ -19,11 +19,6 @@ const APP_HOST = 'bookmarks.332321.xyz';
 const API_PREFIX = '/api';
 const VERSION = '0.1.0';
 
-/* The two site stylesheets the app uses. They live on www; on the app's own host they are
-   proxied from there, so the browser still sees a same-origin request and the CSP needs no
-   exception. The allowlist is the guard: only these two paths are ever fetched. */
-const SITE_STYLESHEETS = new Set(['/css/tokens.css', '/css/themes.css']);
-
 /* The same policy the rest of the site's Worker-served apps carry, and the reason no inline
    script exists in this app: `script-src 'self'` would refuse one. `img-src` allows data: so a
    stored icon is a data URI inside the sealed blob, never a request to a bookmarked site. */
@@ -52,65 +47,6 @@ function json(body, status = 200) {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
   });
-}
-
-/* The site's two stylesheets live on the site host and are served from the app host, which is
-   the one that holds the sealed vault. The request names one fixed origin and one of two fixed
-   paths, follows no redirect, and answers with a header set written here rather than copied from
-   the site: a header the site sets — a cookie in particular — would otherwise be stored against
-   the vault's own origin. */
-const STYLESHEET_TIMEOUT_MS = 5000;
-
-function stylesheetUnavailable() {
-  return new Response(null, {
-    status: 502,
-    headers: { 'cache-control': 'no-store' }
-  });
-}
-
-async function proxyStylesheet(pathname, request) {
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    return new Response(null, {
-      status: 405,
-      headers: { allow: 'GET, HEAD', 'cache-control': 'no-store' }
-    });
-  }
-
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), STYLESHEET_TIMEOUT_MS);
-
-  try {
-    const upstream = await fetch(`https://www.332321.xyz${pathname}`, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: abort.signal,
-      headers: { accept: 'text/css' }
-    });
-
-    /* Only a direct 200 that says it is CSS is passed on. A redirect is refused rather than
-       followed, so the destination is never a host this file did not name. */
-    const type = upstream.headers.get('content-type') ?? '';
-    if (upstream.status !== 200 || !/^text\/css\b/i.test(type)) {
-      if (upstream.body) await upstream.body.cancel().catch(() => {});
-      return stylesheetUnavailable();
-    }
-
-    const headers = {
-      'content-type': 'text/css; charset=utf-8',
-      'cache-control': 'public, max-age=86400',
-      'x-content-type-options': 'nosniff'
-    };
-    const etag = upstream.headers.get('etag');
-    const lastModified = upstream.headers.get('last-modified');
-    if (etag) headers.etag = etag;
-    if (lastModified) headers['last-modified'] = lastModified;
-
-    return new Response(request.method === 'HEAD' ? null : upstream.body, { status: 200, headers });
-  } catch {
-    return stylesheetUnavailable();
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**
@@ -1187,10 +1123,6 @@ export default {
 
     /* No path redirect: `/` is the app, and any other path is either an asset or a 404. The path
        this app was first served under has no route and no handler, so it cannot come back. */
-    if (SITE_STYLESHEETS.has(url.pathname)) {
-      return limited(env, 'fetch', request, () => proxyStylesheet(url.pathname, request));
-    }
-
     if (url.pathname === API_PREFIX || url.pathname.startsWith(`${API_PREFIX}/`)) {
       try {
         return await handleApi(request, env, url);

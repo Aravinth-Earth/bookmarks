@@ -11,6 +11,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import worker from '../src/index.js';
 import { quiet } from './logs.mjs';
@@ -505,80 +507,88 @@ test('the app answers on its own host and nowhere else', async () => {
   assert.equal(loopback.status, 200);
 });
 
-test('the site stylesheets are proxied with a cache header', async () => {
-  const asked = [];
+/* ------------------------------------------------- the app's own stylesheets */
 
-  const response = await withFetch(
-    async (url, init) => {
-      asked.push({ url, init });
-      return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
-    },
-    () => worker.fetch(new Request('https://bookmarks.332321.xyz/css/tokens.css'), harness().env)
-  );
+/* The two stylesheets are in public/css now: the app draws with bytes it ships, so a request for
+   one is an asset request and no other origin is involved. The binding below answers from the files
+   on disk — what a deploy ships — so the bytes compared here are the vendored bytes. */
+const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get('content-type'), 'text/css; charset=utf-8');
-  assert.match(response.headers.get('cache-control'), /max-age=86400/);
-  assert.deepEqual(asked.map((one) => one.url), ['https://www.332321.xyz/css/tokens.css']);
-});
-
-test('the stylesheet proxy copies no upstream header and follows no redirect', async () => {
-  const asked = [];
-
-  const response = await withFetch(
-    async (url, init) => {
-      asked.push({ url, init });
-      return new Response(':root{}', {
-        headers: {
-          'content-type': 'text/css',
-          'set-cookie': 'session=leaked; Path=/; HttpOnly',
-          'x-upstream-private': 'yes',
-          'access-control-allow-origin': '*',
-          etag: '"abc"'
-        }
+function assetsFromDisk() {
+  return {
+    fetch: async (request) => {
+      const { pathname } = new URL(request.url);
+      if (pathname.startsWith('/css/')) {
+        return new Response(readFileSync(join(PUBLIC_DIR, pathname), 'utf8'), {
+          headers: { 'content-type': 'text/css; charset=utf-8' }
+        });
+      }
+      return new Response('<!doctype html><title>app</title>', {
+        headers: { 'content-type': 'text/html' }
       });
-    },
-    () => worker.fetch(new Request('https://bookmarks.332321.xyz/css/themes.css'), harness().env)
-  );
+    }
+  };
+}
 
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get('set-cookie'), null);
-  assert.equal(response.headers.get('x-upstream-private'), null);
-  assert.equal(response.headers.get('access-control-allow-origin'), null);
-  assert.equal(response.headers.get('etag'), '"abc"');
-  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
-  assert.equal(asked[0].init.redirect, 'manual');
-});
+/* A stub that records and refuses: a stylesheet that reaches the network would fail this test by
+   name rather than pass by coincidence. */
+function noOutbound(asked) {
+  return async (url) => {
+    asked.push(String(url));
+    throw new Error(`the worker fetched ${url}`);
+  };
+}
 
-test('the stylesheet proxy refuses a redirect, a non-CSS answer and a non-read method', async () => {
-  const redirected = await withFetch(
-    () =>
-      new Response(null, {
-        status: 302,
-        headers: { location: 'https://elsewhere.example/x.css', 'content-type': 'text/css' }
-      }),
-    () => worker.fetch(new Request('https://bookmarks.332321.xyz/css/tokens.css'), harness().env)
-  );
-  assert.equal(redirected.status, 502);
-
-  const html = await withFetch(
-    () => new Response('<p>no</p>', { headers: { 'content-type': 'text/html' } }),
-    () => worker.fetch(new Request('https://bookmarks.332321.xyz/css/tokens.css'), harness().env)
-  );
-  assert.equal(html.status, 502);
-
+test('a stylesheet request is answered by this worker with the bytes it ships', async () => {
   const asked = [];
-  const written = await withFetch(
-    async (url) => {
-      asked.push(String(url));
-      return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
-    },
-    () =>
-      worker.fetch(new Request('https://bookmarks.332321.xyz/css/tokens.css', { method: 'POST' }), harness().env)
-  );
-  assert.equal(written.status, 405);
-  assert.equal(asked.length, 0);
+  const env = { ...harness().env, ASSETS: assetsFromDisk() };
+
+  for (const name of ['tokens.css', 'themes.css']) {
+    const response = await withFetch(noOutbound(asked), () =>
+      worker.fetch(new Request(`https://bookmarks.332321.xyz/css/${name}`), env)
+    );
+
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /^text\/css/);
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    /* The vendored file itself, not a copy of a copy: the page's tokens are the app's own. */
+    assert.equal(await response.text(), readFileSync(join(PUBLIC_DIR, 'css', name), 'utf8'));
+  }
+
+  assert.deepEqual(asked, [], 'nothing was fetched from another origin for a stylesheet');
 });
+
+test('no request under /css/ leaves this origin, whatever the path and the method', async () => {
+  const asked = [];
+  const seen = [];
+  const env = {
+    ...harness().env,
+    ASSETS: {
+      fetch: async (request) => {
+        seen.push(new URL(request.url).pathname);
+        return new Response(':root{}', { headers: { 'content-type': 'text/css' } });
+      }
+    }
+  };
+
+  for (const [path, method] of [
+    ['/css/tokens.css', 'GET'],
+    ['/css/themes.css', 'HEAD'],
+    ['/css/tokens.css', 'POST'],
+    ['/css/not-shipped.css', 'GET']
+  ]) {
+    await withFetch(noOutbound(asked), () =>
+      worker.fetch(new Request(`https://bookmarks.332321.xyz${path}`, { method }), env)
+    );
+
+    /* There is no route of this Worker's own left to answer a /css/ path: it is an asset request,
+       handed to the binding unchanged, and a path the app does not ship is the binding's 404. */
+    assert.equal(seen.at(-1), path, `${method} ${path} reaches the assets unchanged`);
+  }
+
+  assert.deepEqual(asked, [], 'no fetch left the origin for anything under /css/');
+});
+
 
 /* -------------------------------------------------------------- title service */
 
