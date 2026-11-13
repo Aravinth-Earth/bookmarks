@@ -95,6 +95,27 @@ export function describeSyncFailure(error) {
         label: 'Not synced',
         message: 'The server did not create the account.'
       };
+    /* The invite refusals share a kind because the page asks for a code in one place, but each
+       keeps its own sentence: "find a code", "that one is spent" and "that one is past its date"
+       ask the person to do three different things. */
+    case 'INVITE_REQUIRED':
+      return {
+        kind: 'invite',
+        label: 'Invite needed',
+        message: 'This server needs an invite code to create an account.'
+      };
+    case 'INVITE_USED':
+      return {
+        kind: 'invite',
+        label: 'Invite used',
+        message: 'That invite code has already been used.'
+      };
+    case 'INVITE_EXPIRED':
+      return {
+        kind: 'invite',
+        label: 'Invite expired',
+        message: 'That invite code has expired.'
+      };
     case 'CHALLENGE_FAILED':
       return { kind: 'server', label: 'Not synced', message: 'The server did not answer.' };
     case 'SESSIONS_FAILED':
@@ -109,6 +130,29 @@ export function describeSyncFailure(error) {
         label: 'Offline',
         message: 'No connection to the server. The vault still works on this device.'
       };
+  }
+}
+
+/**
+ * The three ways a registry can turn a creation down when a code is in play. Each is its own
+ * failure rather than one "refused" bucket because the person holding the phone has to do a
+ * different thing about each: ask for a code, ask for a fresh one, or ask for a code that has
+ * not run out. `null` for any other status, which the caller handles on its own terms.
+ */
+function inviteFailure(status) {
+  switch (status) {
+    case 403:
+      return new SyncError(
+        'INVITE_REQUIRED',
+        'This server needs an invite code to create an account.',
+        { status }
+      );
+    case 422:
+      return new SyncError('INVITE_USED', 'That invite code has already been used.', { status });
+    case 410:
+      return new SyncError('INVITE_EXPIRED', 'That invite code has expired.', { status });
+    default:
+      return null;
   }
 }
 
@@ -182,26 +226,32 @@ export class SyncClient {
    *
    * `created: false` means the account already existed and this caller proved the same secret,
    * so a retried creation is success and does not take a second slot.
+   *
+   * `invite` is the code an invite-only server asks for. It defaults to an empty string rather
+   * than being left off, because the account route reads an empty code as "none offered" and the
+   * second request must describe the same creation as the first one did.
    */
-  async register(accountId, authSecret) {
+  async register(accountId, authSecret, invite = '') {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await this.registerOnce(accountId, authSecret);
+      const result = await this.registerOnce(accountId, authSecret, invite);
       if (result) return result;
     }
     throw new SyncError('REGISTER_FAILED', 'Could not create the account.');
   }
 
   /** One creation round trip. `null` means the challenge was stale and is worth retrying. */
-  async registerOnce(accountId, authSecret) {
+  async registerOnce(accountId, authSecret, invite = '') {
     const challenge = await this.request(`/a/${accountId}/account`, {
       method: 'POST',
-      body: { accountId, authSecret }
+      body: { accountId, authSecret, invite }
     });
 
     if (challenge.status === 429) {
       throw new SyncError('FULL', 'This server is not accepting new vaults.');
     }
     if (challenge.status === 409) return { created: false };
+    const inviteRefused = inviteFailure(challenge.status);
+    if (inviteRefused) throw inviteRefused;
     if (challenge.status !== 428 || typeof challenge.payload.nonce !== 'string') {
       throw new SyncError('REGISTER_FAILED', 'Could not create the account.', {
         status: challenge.status
@@ -211,7 +261,7 @@ export class SyncClient {
     const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
     const response = await this.request(`/a/${accountId}/account`, {
       method: 'POST',
-      body: { accountId, authSecret, proof }
+      body: { accountId, authSecret, proof, invite }
     });
 
     if (response.status === 201) return { created: true };
@@ -219,6 +269,11 @@ export class SyncClient {
     if (response.status === 429) {
       throw new SyncError('FULL', 'This server is not accepting new vaults.');
     }
+    /* The registry only decides about the code after the proof checks out, so the refusal
+       normally lands on this second request; the first check above is for a server that says
+       no earlier. */
+    const proofRefused = inviteFailure(response.status);
+    if (proofRefused) throw proofRefused;
     if (response.status === 401 || response.status === 428) return null;
     throw new SyncError('REGISTER_FAILED', 'Could not create the account.', {
       status: response.status
