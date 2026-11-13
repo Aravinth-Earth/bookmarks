@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { SyncClient, SyncError, describeSyncFailure } from '../public/w/bookmarks/sync.js';
+import { SyncClient, SyncError, describeSyncFailure } from '../public/sync.js';
 
 test('a refused account is not the same failure as a wrong phrase, a lost connection or a missing account', () => {
   const failures = [

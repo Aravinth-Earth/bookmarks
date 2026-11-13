@@ -10,6 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import worker from '../src/index.js';
 import { quiet } from './logs.mjs';
@@ -55,7 +56,7 @@ function harness({ doStatus = 201, doBody = { ok: true } } = {}) {
 }
 
 function api(path, options = {}) {
-  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api${path}`, options);
+  return new Request(`https://bookmarks.332321.xyz/api${path}`, options);
 }
 
 test('health answers without any credential', async () => {
@@ -152,9 +153,9 @@ test('an unknown API path is a 404', async () => {
   assert.equal(response.status, 404);
 });
 
-test('the app is served through the assets binding with the security headers', async () => {
+test('the app is served at the root through the assets binding with the security headers', async () => {
   const response = await worker.fetch(
-    new Request('https://bookmarks.332321.xyz/w/bookmarks/'),
+    new Request('https://bookmarks.332321.xyz/'),
     harness().env
   );
 
@@ -164,27 +165,48 @@ test('the app is served through the assets binding with the security headers', a
   assert.match(await response.text(), /title>app/);
 });
 
-test('the bare path redirects to the slashed one', async () => {
-  const response = await worker.fetch(
-    new Request('https://bookmarks.332321.xyz/w/bookmarks'),
-    harness().env
-  );
+/* `/index.html` and `/` are the same document. Workers Assets would answer the first with a 307
+   to the second; asking for the root instead keeps the answer a 200 and keeps the offline
+   shell's copy from being a redirect. */
+test('/index.html is served as the root document, not redirected', async () => {
+  const asked = [];
+  const env = {
+    ASSETS: {
+      fetch: async (request) => {
+        asked.push(new URL(request.url).pathname);
+        return new Response('<!doctype html><title>app</title>', {
+          headers: { 'content-type': 'text/html' }
+        });
+      }
+    }
+  };
 
-  assert.equal(response.status, 301);
-  assert.equal(response.headers.get('location'), 'https://bookmarks.332321.xyz/w/bookmarks/');
+  const response = await worker.fetch(new Request('https://bookmarks.332321.xyz/index.html'), env);
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /title>app/);
+  assert.deepEqual(asked, ['/']);
 });
 
-/* A preview path on either host is now an unknown path: the asset tree has no such directory,
-   so the binding answers 404 and the Worker's own "Not found" page is returned. On www it is
-   not redirected either, because the redirect covers the canonical prefix only. */
-test('the preview path is an unknown path, on the app host and on www', async () => {
+/* The app is the whole of its origin, so there is no path to redirect: `/` is served, and every
+   other path is an asset or the Worker's own 404. Nothing stands in for an address the app used
+   to answer on — a redirect would keep the old one alive, which is the opposite of retiring it. */
+test('the app is routed on one host and one path set, and no other', async () => {
+  const config = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+  const patterns = [...config.matchAll(/^pattern = "([^"]+)"$/gm)].map((match) => match[1]);
+
+  assert.deepEqual(patterns, ['bookmarks.332321.xyz/*', 'bookmarks.332321.xyz']);
+});
+
+/* An unknown path is answered by the asset tree's 404, which the Worker turns into its own page:
+   there is no directory under `public/` for anything else, so nothing is served by accident. */
+test("an unknown path is the app's own 404 page, not redirected", async () => {
   const asked = [];
   const env = {
     ASSETS: {
       fetch: async (request) => {
         const { pathname } = new URL(request.url);
         asked.push(pathname);
-        if (pathname === '/w/bookmarks/' || pathname.startsWith('/w/bookmarks/')) {
+        if (pathname === '/') {
           return new Response('<!doctype html><title>app</title>', {
             headers: { 'content-type': 'text/html' }
           });
@@ -198,7 +220,7 @@ test('the preview path is an unknown path, on the app host and on www', async ()
   };
 
   for (const host of ['bookmarks.332321.xyz']) {
-    for (const path of ['/w/bookmarks-preview', '/w/bookmarks-preview/']) {
+    for (const path of ['/preview', '/preview/', '/w/preview']) {
       const response = await worker.fetch(new Request(`https://${host}${path}`), env);
 
       assert.equal(response.status, 404, `${host}${path}`);
@@ -212,13 +234,10 @@ test('the preview path is an unknown path, on the app host and on www', async ()
     }
   }
 
-  /* The sibling path the loop above must not be confused with. */
-  const canonical = await worker.fetch(
-    new Request('https://bookmarks.332321.xyz/w/bookmarks/'),
-    env
-  );
-  assert.equal(canonical.status, 200);
-  assert.match(await canonical.text(), /title>app/);
+  /* The path the loop above must not be confused with. */
+  const root = await worker.fetch(new Request('https://bookmarks.332321.xyz/'), env);
+  assert.equal(root.status, 200);
+  assert.match(await root.text(), /title>app/);
 });
 
 /* --------------------------------------------------------------- icon service */
@@ -227,7 +246,7 @@ const ICON_HOST = 'example.com';
 const ICON_HASH = createHash('sha256').update(ICON_HOST).digest('base64url');
 
 function iconRequest({ host = ICON_HOST, hash = ICON_HASH } = {}) {
-  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api/icon?h=${hash}`, {
+  return new Request(`https://bookmarks.332321.xyz/api/icon?h=${hash}`, {
     headers: host ? { 'x-icon-host': host } : {}
   });
 }
@@ -248,7 +267,7 @@ test('the icon service refuses a missing hostname, a non-DNS host or a wrong has
   }
 
   const noHost = await worker.fetch(
-    new Request('https://bookmarks.332321.xyz/w/bookmarks/api/icon?h=x'),
+    new Request('https://bookmarks.332321.xyz/api/icon?h=x'),
     harness().env
   );
   assert.equal(noHost.status, 400);
@@ -470,13 +489,20 @@ test('a redirect that leaves https is not followed', async () => {
 });
 
 test('the app answers on its own host and nowhere else', async () => {
-  const onApp = await worker.fetch(new Request('https://bookmarks.332321.xyz/w/bookmarks/'), harness().env);
+  const onApp = await worker.fetch(new Request('https://bookmarks.332321.xyz/'), harness().env);
   assert.equal(onApp.status, 200);
 
-  /* The site's own path is not routed here any more, so this Worker is never asked about it; if it is, it must not
-     answer with the app. No redirect stands in for the old address: one origin, one vault. */
-  const onSite = await worker.fetch(new Request('https://www.332321.xyz/w/bookmarks/'), harness().env);
-  assert.notEqual(onSite.status, 200);
+  /* The site's own host is not routed here any more, so this Worker is never asked about it; if it is, it refuses
+     rather than answering with the app. No redirect stands in for a retired address: one origin, one vault. */
+  for (const host of ['www.332321.xyz', '332321.xyz']) {
+    const elsewhere = await worker.fetch(new Request(`https://${host}/`), harness().env);
+    assert.equal(elsewhere.status, 421);
+    assert.deepEqual(await elsewhere.json(), { error: 'wrong_host' });
+  }
+
+  /* The dev server is loopback, which is the one other host allowed. */
+  const loopback = await worker.fetch(new Request('http://127.0.0.1/'), harness().env);
+  assert.equal(loopback.status, 200);
 });
 
 test('the site stylesheets are proxied with a cache header', async () => {
@@ -557,7 +583,7 @@ test('the stylesheet proxy refuses a redirect, a non-CSS answer and a non-read m
 /* -------------------------------------------------------------- title service */
 
 function titleRequest({ host = ICON_HOST, hash = ICON_HASH, method = 'GET' } = {}) {
-  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api/title?h=${hash}`, {
+  return new Request(`https://bookmarks.332321.xyz/api/title?h=${hash}`, {
     method,
     headers: host ? { 'x-page-host': host } : {}
   });

@@ -1,7 +1,8 @@
-# Bookmarks — a sealed vault served on the public site's own origin.
+# Bookmarks — a sealed vault served on its own origin, at the root.
 #
-# The page and the API share one prefix, and the Worker answers both, so the security headers
-# cannot be bypassed by fetching a static file directly. Same shape as /w/expense-splitter/.
+# The page and the API are both served by this Worker on bookmarks.332321.xyz, so the security
+# headers cannot be bypassed by fetching a static file directly. There is no `/w/` prefix: this
+# host serves nothing else, so the app owns `/` and the API owns `/api`.
 name = "bookmarks"
 main = "src/index.js"
 compatibility_date = "2026-10-30"
@@ -19,7 +20,7 @@ INVITES_REQUIRED = "false"
 directory = "./public"
 binding = "ASSETS"
 html_handling = "auto-trailing-slash"
-# A missing page has to link back to whichever prefix served it.
+# A missing page is answered by the Worker's own 404, which links back to `/`.
 not_found_handling = "none"
 # Assets would otherwise be served before the Worker, and the page would lose the CSP/HSTS
 # headers the rest of the site sets.
@@ -78,13 +79,13 @@ new_sqlite_classes = ["Vault"]
 tag = "v2"
 new_sqlite_classes = ["Registry"]
 
-# The app's own origin. IndexedDB belongs to a host, not a path, so serving the app here keeps
-# its remembered key out of reach of every other page on www.
+# The app's own origin, and the only two routes it has. IndexedDB belongs to a host, not a path,
+# so serving the app on this host keeps its remembered key out of reach of every other page on
+# www. A wildcard route does not match the slash-less path, so the bare host needs its own entry.
 [[routes]]
 pattern = "bookmarks.332321.xyz/*"
 zone_name = "332321.xyz"
 
-# A wildcard route does not match the slash-less path, so the bare canonical path needs its own.
 [[routes]]
 pattern = "bookmarks.332321.xyz"
 zone_name = "332321.xyz"

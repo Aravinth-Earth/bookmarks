@@ -23,8 +23,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://bookmarks.332321.xyz/w/bookmarks/*",
-        "http://127.0.0.1/w/bookmarks/*"
+        "https://bookmarks.332321.xyz/*",
+        "http://127.0.0.1/*"
       ],
       "js": [
         "bridge.js"

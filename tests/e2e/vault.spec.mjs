@@ -88,7 +88,7 @@ test('the settings screen opens, and closes with Escape', async ({ page }) => {
 
 test('a vault that was never created shows the lock screen on a fresh visit', async ({ context }) => {
   const page = await context.newPage();
-  await page.goto(`${BASE_URL}/w/bookmarks/`);
+  await page.goto(`${BASE_URL}/`);
   await expect(page.locator('#lock-view')).toBeVisible();
   await expect(page.locator('#app-view')).toBeHidden();
   await page.close();

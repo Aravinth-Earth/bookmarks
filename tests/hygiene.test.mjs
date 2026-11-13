@@ -5,7 +5,7 @@ import {
   CLIPBOARD_CLEAR_MS,
   clearPhraseField,
   overwriteClipboard
-} from '../public/w/bookmarks/hygiene.js';
+} from '../public/hygiene.js';
 
 const PHRASE = 'abandon ability able about above absent absorb abstract absurd abuse access accident';
 

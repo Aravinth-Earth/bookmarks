@@ -47,10 +47,91 @@ export async function turnOnSync(page, phrase) {
   }
 }
 
-/** Ask the server for the other device's copy now, rather than waiting for the next change. */
+/* ------------------------------------------------------------- the limiter, waited out */
+
+/** The reading the status line carries when the server's limiter, not the account cap, said no. */
+export const THROTTLED_LABEL = 'Not now';
+
+/**
+ * The longest a test will wait for one limiter window. The sign-in limiter counts a minute
+ * (`SIGNIN_LIMIT` in wrangler.toml), so a wait past this is not a window closing — it is a stuck
+ * page, and the test should fail rather than hang.
+ */
+const MAX_THROTTLE_WAIT_MS = 65_000;
+
+/**
+ * The status line's settled reading, or '' if it never settles.
+ *
+ * Two readings are in flight rather than answers — "Signing in…" and "Creating the account…" —
+ * and both end in an ellipsis; every reading the page comes to rest on is plain text. Waiting for
+ * *a* plain reading rather than for a particular one is what lets this serve a success, an invite
+ * question and a refusal alike, instead of sitting out its timeout on the two that are not
+ * "Synced".
+ */
+async function settledStatus(page, timeout = 25_000) {
+  const status = page.locator('#vault-status');
+  const deadline = Date.now() + timeout;
+
+  for (;;) {
+    const reading = ((await status.textContent().catch(() => '')) ?? '').trim();
+    if (reading !== '' && !reading.endsWith('…')) return reading;
+    if (Date.now() >= deadline) return '';
+    await page.waitForTimeout(250);
+  }
+}
+
+/**
+ * Turn sync on, and wait out a limiter instead of failing on it.
+ *
+ * A test file creates several vaults inside one minute, which is exactly what the sign-in limiter
+ * is for: the third creation can be answered 429 with `{error:"rate_limited"}`. That refusal wrote
+ * nothing, so the only correct response is the one a person would give — wait the period the
+ * server named, then press once more. Anything else marks a legitimate sequence as a broken build.
+ *
+ * Only the throttle is waited out. A full server, a wrong phrase and a server that wants a code
+ * are answers rather than delays, and retrying them would be the suite arguing with the page.
+ */
+export async function turnOnSyncPatiently(page, phrase) {
+  await turnOnSync(page, phrase);
+  await settleThrottle(page, 'Sync now');
+}
+
+/**
+ * Press a sync control and wait out a limiter, if one answers.
+ *
+ * The suite runs from one address, so every test shares the server's per-source sign-in budget: a
+ * run of legitimate creations inside a minute spends it. That is the limiter working, not the app
+ * failing, so the suite waits the period the server named and presses once more. A third refusal is
+ * something other than a limiter, and a test that swallowed it would be hiding a real fault.
+ */
+async function settleThrottle(page, label) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const reading = await settledStatus(page);
+    if (!reading.startsWith(THROTTLED_LABEL)) return;
+
+    /* The page keeps the server's own number from the `retry-after` header, so the wait is the
+       server's and not a guess. A refusal that named no period gets the limiter's own minute. */
+    const named = Number(await page.locator('#vault-status').getAttribute('data-retry-after'));
+    const wait = Math.min(Number.isFinite(named) && named > 0 ? named * 1000 : 60_000, MAX_THROTTLE_WAIT_MS);
+
+    /* A second of slack: the window is counted from the refused request, which was sent a moment
+       before this line ran, and arriving one millisecond early spends an attempt for nothing. */
+    await page.waitForTimeout(wait + 1_000);
+    const modal = await openSettings(page);
+    const item = await settingsItem(modal, new RegExp(`^${label}`));
+    if (!(await item.count())) {
+      /* The switch itself is gone (sync was turned off): nothing to press, so stop waiting. */
+      return;
+    }
+    await item.click();
+  }
+}
+
+/** Ask the server for the other device's copy now, waiting out a limiter rather than failing on it. */
 export async function syncNow(page) {
   const modal = await openSettings(page);
   await (await settingsItem(modal, /^Sync now/)).click();
+  await settleThrottle(page, 'Sync now');
 }
 
 /**
@@ -114,7 +195,7 @@ export async function extensionId(context) {
 /* ------------------------------------------------------------------ the vault */
 
 export async function openVault(page) {
-  await page.goto(`${BASE_URL}/w/bookmarks/`);
+  await page.goto(`${BASE_URL}/`);
   await expect(page.locator('#lock-view')).toBeVisible();
   return page;
 }

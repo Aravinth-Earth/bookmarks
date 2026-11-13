@@ -18,8 +18,8 @@ import { createHash } from 'node:crypto';
 import worker, { LIMITS } from '../src/index.js';
 import { ACCOUNT_REF_HEX, accountRef, digestHex, logEvent } from '../src/events.js';
 import { Vault } from '../src/vault.js';
-import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
-import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
+import { deriveAccount, proveAuth } from '../public/crypto.js';
+import { WORDLIST } from '../public/wordlist.js';
 import { parsed, withEvents } from './logs.mjs';
 import { withFetch } from './dns.mjs';
 
@@ -433,7 +433,7 @@ function workerHarness({ refuse = [], throwOnObject = false } = {}) {
 }
 
 function api(path, { method = 'GET', body, headers = {}, source = SOURCE } = {}) {
-  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api${path}`, {
+  return new Request(`https://bookmarks.332321.xyz/api${path}`, {
     method,
     headers: {
       'cf-connecting-ip': source,

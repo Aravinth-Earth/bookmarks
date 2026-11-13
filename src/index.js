@@ -12,11 +12,11 @@
 
 import { digestHex, logEvent } from './events.js';
 
-const CANONICAL = '/w/bookmarks';
-/* The app's own host. Anything under the old www path is sent here, so the app is never used
-   on an origin that other site pages can read storage from. */
+/* The app is the whole of its own origin: the page sits at `/`, so there is no prefix to strip and
+   no path to redirect. The path it was first served under is an unknown path here now, and the
+   site's host does not reach this Worker at all — retired, not redirected. */
 const APP_HOST = 'bookmarks.332321.xyz';
-const API_PREFIX = `${CANONICAL}/api`;
+const API_PREFIX = '/api';
 const VERSION = '0.1.0';
 
 /* The two site stylesheets the app uses. They live on www; on the app's own host they are
@@ -51,15 +51,6 @@ function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
-  });
-}
-
-function redirect(url, pathname) {
-  const target = new URL(url);
-  target.pathname = pathname;
-  return new Response(null, {
-    status: 301,
-    headers: { location: target.toString(), 'cache-control': 'no-store' }
   });
 }
 
@@ -133,6 +124,12 @@ async function overLimit(env, className, request) {
   const rule = LIMITS[className];
   const binding = env?.[rule.binding];
   if (!binding) return false;
+
+  /* A laptop is not a source to defend against. The dev server rewrites the request to the route's
+     own host, so there is no loopback address left to test; the dev machine instead says so in its
+     own `.dev.vars`, which is not committed. Nothing in `[vars]` may carry the switch — check.mjs
+     refuses a deploy that does — so the deployed Worker cannot be put in this state. */
+  if (String(env?.RATE_LIMIT_DISABLED ?? '').toLowerCase() === 'true') return false;
 
   const address = request.headers.get('cf-connecting-ip') ?? '';
   const digest = await crypto.subtle.digest(
@@ -224,7 +221,7 @@ function notFound() {
 <main>
   <h1>Not found</h1>
   <p>That page does not exist.</p>
-  <p><a href="${CANONICAL}/">Back to Bookmarks</a></p>
+  <p><a href="/">Back to Bookmarks</a></p>
 </main>
 </body>
 </html>
@@ -312,7 +309,7 @@ function accountOf(pathname) {
   return match && ACCOUNT_ID.test(match[1]) ? match[1] : undefined;
 }
 
-const USER_AGENT = 'Bookmarks/0.1 (+https://www.332321.xyz/w/bookmarks/)';
+const USER_AGENT = 'Bookmarks/0.1 (+https://bookmarks.332321.xyz/)';
 
 /* A hostname, not a URL: no scheme, no port, no path, no IP literal, no single label. */
 const HOSTNAME = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
@@ -1188,8 +1185,8 @@ export default {
 
     if (!onItsOwnHost(url.hostname)) return json({ error: 'wrong_host' }, 421);
 
-    if (url.pathname === CANONICAL) return redirect(url, `${CANONICAL}/`);
-
+    /* No path redirect: `/` is the app, and any other path is either an asset or a 404. The path
+       this app was first served under has no route and no handler, so it cannot come back. */
     if (SITE_STYLESHEETS.has(url.pathname)) {
       return limited(env, 'fetch', request, () => proxyStylesheet(url.pathname, request));
     }
@@ -1210,7 +1207,11 @@ export default {
       }
     }
 
-    const assetUrl = new URL(url.pathname + url.search, url.origin);
+    /* `html_handling = "auto-trailing-slash"` answers `/index.html` with a 307 to `/`, which is a
+       redirect for a file that is already the page. Serving the root document under both names
+       keeps it one answer, and keeps the offline shell's copy from being a redirect. */
+    const pathname = url.pathname === '/index.html' ? '/' : url.pathname;
+    const assetUrl = new URL(pathname + url.search, url.origin);
     const response = await env.ASSETS.fetch(new Request(assetUrl, request));
     const headers = new Headers(response.headers);
 

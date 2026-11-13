@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { PALETTE, foregroundFor, luminance, tileFor } from '../public/w/bookmarks/tiles.js';
+import { PALETTE, foregroundFor, luminance, tileFor } from '../public/tiles.js';
 
 const HOSTS = [
   'example.com',

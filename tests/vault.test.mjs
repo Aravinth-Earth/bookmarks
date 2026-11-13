@@ -17,8 +17,8 @@ import {
   REMEMBER_LIFETIME_MS,
   createVault,
   indexedDbAdapter
-} from '../public/w/bookmarks/vault.js';
-import { keyFromBytes, open, proveAuth, seal } from '../public/w/bookmarks/crypto.js';
+} from '../public/vault.js';
+import { keyFromBytes, open, proveAuth, seal } from '../public/crypto.js';
 
 const ACCOUNT_A = 'accountAaccountAaccoun';
 const ACCOUNT_B = 'accountBaccountBaccoun';

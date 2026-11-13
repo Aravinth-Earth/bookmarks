@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 test('a bookmark takes the browser count for its address, and never a smaller one', async () => {
-  const { openCounts } = await import('../public/w/bookmarks/collected.js');
+  const { openCounts } = await import('../public/collected.js');
   const bookmarks = [
     { id: 'a', url: 'https://a.example/', uses: {} },
     { id: 'b', url: 'https://b.example/' },

@@ -39,12 +39,15 @@ const VAULT_HOSTS = new Set(
 /**
  * Where the vault lives, taken from the one place that names it — the content script's own matches — so no origin is
  * written down twice and a review of the manifest covers this too.
+ *
+ * The vault owns the root of its origin, so the match's path (`/*`) names no address of its own: the origin is the
+ * whole of it, and the query is the setup question.
  */
 const VAULT_SETUP_URL = (() => {
   const pattern = VAULT_PATTERNS.find((entry) => entry.startsWith('https://')) ?? VAULT_PATTERNS[0] ?? '';
   if (pattern === '') return null;
-  const url = new URL(pattern.split('*')[0]);
-  return `${url.origin}/w/bookmarks/?collector=installed`;
+  const origin = new URL(pattern.replace('*', 'x')).origin;
+  return `${origin}/?collector=installed`;
 })();
 
 /** Before the vault has answered, the toolbar says so; afterwards it says nothing. */

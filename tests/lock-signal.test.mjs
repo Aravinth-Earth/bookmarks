@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { LOCK_CHANNEL, createLockSignal } from '../public/w/bookmarks/lock-signal.js';
+import { LOCK_CHANNEL, createLockSignal } from '../public/lock-signal.js';
 
 /** A channel that records what it was asked to send and lets a test deliver a message. */
 function fakeChannel() {

@@ -24,8 +24,8 @@ import {
   Vault
 } from '../src/vault.js';
 import { Registry } from '../src/registry.js';
-import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
-import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
+import { deriveAccount, proveAuth } from '../public/crypto.js';
+import { WORDLIST } from '../public/wordlist.js';
 import { quiet } from './logs.mjs';
 
 /* These tests are about what the object answers and stores; the lines its refusals write are

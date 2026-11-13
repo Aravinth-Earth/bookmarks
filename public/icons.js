@@ -10,8 +10,8 @@
  * the request names; the query string carries only its SHA-256.
  */
 
-const API = '/w/bookmarks/api/icon';
-const TITLE_API = '/w/bookmarks/api/title';
+const API = '/api/icon';
+const TITLE_API = '/api/title';
 const MAX_BYTES = 64 * 1024;
 const RAW_FALLBACK_BYTES = 8 * 1024;
 const TILE_PX = 32;

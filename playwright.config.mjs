@@ -18,7 +18,9 @@ const external = Boolean(process.env.E2E_BASE_URL);
 
 export default defineConfig({
   testDir: 'tests/e2e',
-  timeout: 90_000,
+  /* Three minutes, because a test may have to sit out one sign-in limiter window: the helper
+     waits the `retry-after` the server named (a minute) and then presses once more. */
+  timeout: 180_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,
   workers: Number(process.env.E2E_WORKERS ?? 4),
@@ -40,7 +42,7 @@ export default defineConfig({
                reason: the deployed server takes one account, and more than one test needs a server that will take one. Removed before wrangler opens it, never
                after — a state directory deleted while workerd holds it answers SQLITE_CANTOPEN. */
           command: `rm -rf .wrangler/e2e-state-${PORT} && npx wrangler dev --port ${PORT} --ip 127.0.0.1 --local --persist-to .wrangler/e2e-state-${PORT} --var MAX_ACCOUNTS:8`,
-          url: `${BASE}/w/bookmarks/api/health`,
+          url: `${BASE}/api/health`,
           reuseExistingServer: false,
           timeout: 180_000,
           stdout: 'ignore',

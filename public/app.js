@@ -495,7 +495,7 @@ let runningVersion = '';
 
 async function loadVersion() {
   try {
-    const response = await fetch('/w/bookmarks/api/health', {
+    const response = await fetch('/api/health', {
       headers: { accept: 'application/json' }
     });
     if (!response.ok) return;
@@ -668,8 +668,18 @@ function scheduleSync() {
   }, 500);
 }
 
-function setSyncStatus(label) {
+/**
+ * The one line that says what sync is doing.
+ *
+ * `retryAfter` is the server's own number when it asked to be left alone. It is kept on the
+ * element rather than in the sentence because the person reading it does not need the count and
+ * the next attempt does: anything that repaints this line without one has no wait to honour and
+ * clears it.
+ */
+function setSyncStatus(label, { retryAfter = 0 } = {}) {
   syncLabel = label;
+  if (retryAfter > 0) vaultStatus.dataset.retryAfter = String(retryAfter);
+  else delete vaultStatus.dataset.retryAfter;
   updateStatusLine();
 }
 
@@ -820,7 +830,7 @@ function handleSyncError(error) {
     return;
   }
 
-  setSyncStatus(failure.label);
+  setSyncStatus(failure.label, { retryAfter: failure.retryAfter ?? 0 });
 
   /* A local-first vault retries on its own, so the same quiet failure is announced once. */
   if (failure.message !== lastSyncNotice) {
@@ -3747,7 +3757,7 @@ function registerServiceWorker() {
   const { protocol, hostname } = location;
   if (protocol !== 'https:' && hostname !== 'localhost' && hostname !== '127.0.0.1') return;
 
-  navigator.serviceWorker.register('/w/bookmarks/sw.js', { scope: '/w/bookmarks/' }).catch(() => {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {
     /* Offline caching is an enhancement; the app works without it. */
   });
 }

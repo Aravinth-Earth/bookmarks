@@ -57,8 +57,7 @@ for (const file of [...assets, ...extensionFiles].filter((path) => path.endsWith
    `332321.xyz.attacker.example` and a `localhost` that only appears in a path cannot pass. */
 /* The SVG namespace is an identifier, never a request, but the scan cannot tell the difference. */
 const allowedHosts = new Set([
-  '332321.xyz',
-  'www.332321.xyz',
+  'bookmarks.332321.xyz',
   'localhost',
   '127.0.0.1',
   'www.w3.org'
@@ -173,7 +172,7 @@ try {
 /* 4. The word list is the entropy of every vault: a truncated one silently weakens every phrase
    made after the truncation, and nothing else would notice. */
 try {
-  const { WORDLIST } = await import(join(publicDir, 'w/bookmarks/wordlist.js'));
+  const { WORDLIST } = await import(join(publicDir, 'wordlist.js'));
   if (WORDLIST.length !== 1296) {
     problems.push(`wordlist: expected 1296 words, got ${WORDLIST.length}`);
   }
@@ -222,6 +221,19 @@ try {
   problems.push(`limits: ${error.message}`);
 }
 
+/* 5b. The throttle cannot be switched off by anything a deploy reads. The dev machine turns it
+   off in its own `.dev.vars` so a test suite can exercise the product instead of the limiter; a
+   `[vars]` entry with the same name would ship that state to everyone. */
+try {
+  const config = readFileSync(join(root, 'wrangler.toml'), 'utf8');
+  const vars = config.split(/^\[vars\]$/m)[1]?.split(/^\[[^\]]+\]$/m)[0] ?? '';
+  if (/^\s*RATE_LIMIT_DISABLED\s*=/m.test(vars)) {
+    problems.push('limits: [vars] carries RATE_LIMIT_DISABLED — the deployed throttle would be off');
+  }
+} catch (error) {
+  problems.push(`limits: ${error.message}`);
+}
+
 /* 6. Invocation logging must stay off. Every account route carries `/a/<accountId>/`, and the
    invocation line is written from the request path, so a config edit that turns it back on
    publishes the id that `src/events.js` digests on purpose. The event stream is the intended
@@ -253,10 +265,11 @@ try {
    SHELL works on the first visit and then fails once the page is offline, which is the one state
    the page cannot report. Both lists are read from the files rather than written down again. */
 try {
-  const page = readFileSync(join(publicDir, 'w/bookmarks/app.js'), 'utf8');
-  const worker = readFileSync(join(publicDir, 'w/bookmarks/sw.js'), 'utf8');
+  const page = readFileSync(join(publicDir, 'app.js'), 'utf8');
+  const worker = readFileSync(join(publicDir, 'sw.js'), 'utf8');
   const imported = [...page.matchAll(/from '\.\/([\w-]+\.js)'/g)].map((match) => match[1]);
-  const shell = new Set([...worker.matchAll(/'\/w\/bookmarks\/([\w-]+\.js)'/g)].map((match) => match[1]));
+  /* The shell's entries are root-absolute now, so the prefix is one slash: `'/app.js'`. */
+  const shell = new Set([...worker.matchAll(/'\/([\w-]+\.js)'/g)].map((match) => match[1]));
 
   if (imported.length === 0) problems.push('shell: no module imports found in app.js');
 
@@ -320,7 +333,7 @@ try {
   }
 
   /* A content script may only be injected into the vault, and only if the file it names is actually present. */
-  const vault = new URL('https://bookmarks.332321.xyz/w/bookmarks/');
+  const vault = new URL('https://bookmarks.332321.xyz/');
   const names = extensionNames;
   if (names.length === 0) problems.push('extension: no files found');
 
@@ -334,10 +347,11 @@ try {
         parsed = null;
       }
       /* The vault itself, plus the local dev server it is worked on against — the bridge has to be provable
-         before it is deployed, and a loopback origin is not another site. */
+         before it is deployed, and a loopback origin is not another site. The app owns the root of its origin,
+         so the origin is the whole test: there is no prefix for the pattern to have to match. */
       const isLoopback = parsed !== null && parsed.hostname === '127.0.0.1';
       const onVault = parsed !== null && parsed.origin === vault.origin;
-      if (parsed === null || !(isLoopback || onVault) || !parsed.pathname.startsWith(vault.pathname)) {
+      if (parsed === null || !(isLoopback || onVault)) {
         problems.push(`extension: content script matches ${match}, which is not the vault`);
       }
     }
@@ -350,7 +364,7 @@ try {
 
   /* This host set is deliberately smaller than the page's: the page may talk to its own Worker, the extension
      may talk to nothing. Loopback is not an exception — a local port is still somewhere a URL can be sent. */
-  const extensionHosts = new Set(['bookmarks.332321.xyz', '332321.xyz', 'www.332321.xyz']);
+  const extensionHosts = new Set(['bookmarks.332321.xyz']);
 
   /* Calls that would reach the network, whatever they are handed. A literal-URL scan cannot see
      `fetch(\`https://${host}/?u=${url}\`)`, which is the shape exfiltration actually takes. */
@@ -370,10 +384,9 @@ try {
         problems.push(`extension/${name}: unparseable URL ${match[0]}`);
         continue;
       }
-      /* The one loopback address allowed anywhere in the extension is the local dev server's vault path, in the
-         manifest's content-script matches. No module may reach it, which is why this stays a manifest-only rule. */
-      const devVault =
-        name === 'manifest.json' && host === '127.0.0.1' && new URL(match[0]).pathname.startsWith(vault.pathname);
+      /* The one loopback address allowed anywhere in the extension is the local dev server, in the manifest's
+         content-script matches. No module may reach it, which is why this stays a manifest-only rule. */
+      const devVault = name === 'manifest.json' && host === '127.0.0.1';
       if (extensionHosts.has(host) || devVault) continue;
       problems.push(`extension/${name}: external URL ${match[0]}`);
       break;
@@ -405,7 +418,7 @@ try {
   for (const [file, label] of [
     ['extension/protocol.js', 'extension'],
     ['extension/bridge.js', 'content script'],
-    ['public/w/bookmarks/collector.js', 'page']
+    ['public/collector.js', 'page']
   ]) {
     if (constant(file, 'BRIDGE_VERSION') === null) {
       problems.push(`bridge: ${label} declares no BRIDGE_VERSION`);
@@ -414,7 +427,7 @@ try {
 
   /* The version is not the whole contract: the two source tags are how each side recognises the other, and a typo
      in one of them makes every message unmatched with nothing to catch it. */
-  const sides = ['extension/protocol.js', 'extension/bridge.js', 'public/w/bookmarks/collector.js'];
+  const sides = ['extension/protocol.js', 'extension/bridge.js', 'public/collector.js'];
   for (const name of ['BRIDGE_SOURCE', 'PAGE_SOURCE', 'BRIDGE_VERSION']) {
     const values = sides.map((file) => constant(file, name));
     if (values.some((value) => value === null)) {

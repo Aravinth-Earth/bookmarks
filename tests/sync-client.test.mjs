@@ -10,9 +10,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { describeSyncFailure, SyncClient, SyncError, clientKind } from '../public/w/bookmarks/sync.js';
-import { deriveAccount, proveAuth } from '../public/w/bookmarks/crypto.js';
-import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
+import { describeSyncFailure, SyncClient, SyncError, clientKind } from '../public/sync.js';
+import { deriveAccount, proveAuth } from '../public/crypto.js';
+import { WORDLIST } from '../public/wordlist.js';
 
 const ACCOUNT = await deriveAccount(WORDLIST.slice(0, 13).join(' '));
 
@@ -49,7 +49,12 @@ async function withFetch(fetch, run) {
  * nonce, the proof-carrying second one is answered by whatever the test wants. Bodies are kept
  * so a test can read what the invite field actually looked like on the wire.
  */
-function creationServer({ proofStatus = 201, proofBody = { ok: true, created: true }, nonce = 'nonce-value' } = {}) {
+function creationServer({
+  proofStatus = 201,
+  proofBody = { ok: true, created: true },
+  proofHeaders = {},
+  nonce = 'nonce-value'
+} = {}) {
   const bodies = [];
   const fetch = async (_url, options = {}) => {
     const body = JSON.parse(options.body);
@@ -58,7 +63,10 @@ function creationServer({ proofStatus = 201, proofBody = { ok: true, created: tr
     if (body.proof === undefined) {
       return new Response(JSON.stringify({ error: 'proof_required', nonce }), { status: 428, headers });
     }
-    return new Response(JSON.stringify(proofBody), { status: proofStatus, headers });
+    return new Response(JSON.stringify(proofBody), {
+      status: proofStatus,
+      headers: { ...headers, ...proofHeaders }
+    });
   };
   return { fetch, bodies };
 }
@@ -75,13 +83,13 @@ test('an account that was never created answers false, not an error', async () =
   assert.equal(await client.accountExists(ACCOUNT.accountId), false);
 
   const existing = stub({
-    [`/w/bookmarks/api/a/${ACCOUNT.accountId}/challenge`]: [200, { nonce: 'n' }]
+    [`/api/a/${ACCOUNT.accountId}/challenge`]: [200, { nonce: 'n' }]
   });
   assert.equal(await new SyncClient({ fetch: existing.fetch }).accountExists(ACCOUNT.accountId), true);
 });
 
 test('a server that cannot answer is an error, not "no vault"', async () => {
-  const broken = stub({ [`/w/bookmarks/api/a/${ACCOUNT.accountId}/challenge`]: [500, { error: 'x' }] });
+  const broken = stub({ [`/api/a/${ACCOUNT.accountId}/challenge`]: [500, { error: 'x' }] });
   await assert.rejects(
     () => new SyncClient({ fetch: broken.fetch }).accountExists(ACCOUNT.accountId),
     (error) => error instanceof SyncError && error.code === 'CHALLENGE_FAILED'
@@ -165,7 +173,7 @@ test('a proof that arrived after its nonce was replaced is retried once', async 
 });
 
 test('signing in says which kind of device this is', async () => {
-  const base = '/w/bookmarks/api/a/';
+  const base = '/api/a/';
   const { fetch, calls } = stub({
     [`${base}${ACCOUNT.accountId}/challenge`]: [200, { nonce: 'nonce-value' }],
     [`${base}${ACCOUNT.accountId}/login`]: [200, { token: 't'.repeat(43), plan: 'owner', units: 100, places: 2 }]
@@ -181,7 +189,7 @@ test('signing in says which kind of device this is', async () => {
 });
 
 test('the place list needs a session and is read with the token', async () => {
-  const base = '/w/bookmarks/api/a/';
+  const base = '/api/a/';
   const payload = { count: 1, sessions: [{ client: 'desktop', current: true, createdAt: 1, lastSeenAt: 2, expiresAt: 3 }] };
   const { fetch, calls } = stub({ [`${base}${ACCOUNT.accountId}/sessions`]: [200, payload] });
 
@@ -200,7 +208,7 @@ test('the place list needs a session and is read with the token', async () => {
 });
 
 test('an expired session drops the token instead of retrying with it', async () => {
-  const base = '/w/bookmarks/api/a/';
+  const base = '/api/a/';
   const { fetch } = stub({ [`${base}${ACCOUNT.accountId}/sessions`]: [401, { error: 'unauthorized' }] });
 
   const client = new SyncClient({ fetch });
@@ -301,6 +309,143 @@ test('a full server still reads as FULL, whichever request says so', async () =>
         error.code === 'FULL' &&
         error.message === 'This server is not accepting new vaults.'
     );
+  });
+});
+
+/* ------------------------------------------------ the limiter's 429, not the cap's */
+
+/**
+ * A creation route that answers 429 in the limiter's shape: `{error:"rate_limited"}` and, when the
+ * server names one, a `retry-after` period. This is the body `tooMany()` in src/index.js writes.
+ */
+function throttledFetch({ retryAfter = null, at = 'challenge', nonce = 'nonce-value' } = {}) {
+  const headers = { 'content-type': 'application/json' };
+  if (retryAfter !== null) headers['retry-after'] = String(retryAfter);
+  const refusal = () =>
+    new Response(JSON.stringify({ error: 'rate_limited' }), { status: 429, headers });
+
+  if (at === 'challenge') return async () => refusal();
+
+  return async (_url, options = {}) => {
+    const body = JSON.parse(options.body);
+    if (body.proof === undefined) {
+      return new Response(JSON.stringify({ error: 'proof_required', nonce }), {
+        status: 428,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    return refusal();
+  };
+}
+
+/** The properties every throttle must have, whichever request met it. */
+function assertThrottled(error, { retryAfter = 0 } = {}) {
+  assert.ok(error instanceof SyncError, 'the refusal is a SyncError');
+  assert.equal(error.code, 'THROTTLED');
+  assert.notEqual(error.code, 'FULL', 'a busy server is not a closed one');
+  assert.equal(error.status, 429);
+  assert.equal(error.retryAfter, retryAfter);
+  /* One word a person can act on: wait. The cap's sentence would be a lie here. */
+  assert.match(error.message, /^Too many attempts came in a short time\. Try again in /);
+  assert.doesNotMatch(error.message, /not accepting new vaults/i);
+  return true;
+}
+
+test('a 429 that says rate_limited reads as THROTTLED, on the challenge', async () => {
+  await withFetch(throttledFetch({ retryAfter: '60' }), async () => {
+    await assert.rejects(
+      () => new SyncClient().register(ACCOUNT.accountId, ACCOUNT.authSecret, 'a-friend-code'),
+      (error) => assertThrottled(error, { retryAfter: 60 })
+    );
+  });
+});
+
+test('a 429 that says rate_limited reads as THROTTLED, on the proof', async () => {
+  await withFetch(throttledFetch({ retryAfter: '60', at: 'proof' }), async () => {
+    await assert.rejects(
+      () => new SyncClient().register(ACCOUNT.accountId, ACCOUNT.authSecret, 'a-friend-code'),
+      (error) => assertThrottled(error, { retryAfter: 60 })
+    );
+  });
+});
+
+test('the retry-after the server named is the wait the message names', async () => {
+  await withFetch(throttledFetch({ retryAfter: '45' }), async () => {
+    await assert.rejects(
+      () => new SyncClient().register(ACCOUNT.accountId, ACCOUNT.authSecret),
+      (error) => {
+        assertThrottled(error, { retryAfter: 45 });
+        assert.match(error.message, /about 45 seconds/);
+        return true;
+      }
+    );
+  });
+});
+
+test('a 429 with no retry-after still reads as a wait, and asks for none', async () => {
+  await withFetch(throttledFetch(), async () => {
+    await assert.rejects(
+      () => new SyncClient().register(ACCOUNT.accountId, ACCOUNT.authSecret),
+      (error) => {
+        assertThrottled(error, { retryAfter: 0 });
+        assert.match(error.message, /in a minute\.$/);
+        return true;
+      }
+    );
+  });
+});
+
+test('a 429 with a body the client does not know is a throttle, not a full server', async () => {
+  /* The safe reading of an unknown 429 is "wait": a limiter that changed its word must not be
+     reported as an operator's decision to close the server. */
+  const headers = { 'content-type': 'application/json' };
+  const unexpected = async () =>
+    new Response(JSON.stringify({ error: 'slow_down' }), { status: 429, headers });
+
+  await withFetch(unexpected, async () => {
+    await assert.rejects(
+      () => new SyncClient().register(ACCOUNT.accountId, ACCOUNT.authSecret),
+      (error) => error.code === 'THROTTLED'
+    );
+  });
+});
+
+test('a repeated 429 still reads as FULL, and carries no wait', async () => {
+  /* The cap path is unchanged by the throttle work: same code, same sentence, no retryAfter. */
+  const headers = { 'content-type': 'application/json' };
+  const alwaysFull = async () =>
+    new Response(JSON.stringify({ error: 'full' }), {
+      status: 429,
+      headers: { ...headers, 'retry-after': '60' }
+    });
+
+  await withFetch(alwaysFull, async () => {
+    await assert.rejects(
+      () => new SyncClient().register(ACCOUNT.accountId, ACCOUNT.authSecret),
+      (error) => {
+        assert.equal(error.code, 'FULL');
+        assert.equal(error.message, 'This server is not accepting new vaults.');
+        assert.equal(error.retryAfter, 0, 'a closed server has no window to wait out');
+        return true;
+      }
+    );
+  });
+});
+
+test('a throttle has its own sentence, and its own kind', () => {
+  const described = describeSyncFailure(new SyncError('THROTTLED', 'ignored', { status: 429, retryAfter: 60 }));
+  assert.deepEqual(described, {
+    kind: 'throttled',
+    label: 'Not now',
+    message: 'Too many attempts came in a short time. Try again in about 60 seconds.',
+    retryAfter: 60
+  });
+  /* Not the cap's kind and not the cap's words: the page paints a persistent notice for `cap`,
+     and a wait is not a notice. */
+  assert.notEqual(described.kind, 'cap');
+  assert.notDeepEqual(describeSyncFailure(new SyncError('THROTTLED', 'ignored')), {
+    kind: 'cap',
+    label: 'No new accounts'
   });
 });
 

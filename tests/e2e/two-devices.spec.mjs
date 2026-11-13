@@ -24,7 +24,7 @@ import {
   settingsItem,
   syncNow,
   test,
-  turnOnSync,
+  turnOnSyncPatiently,
   vaultRows,
   visit
 } from './fixtures.mjs';
@@ -47,6 +47,10 @@ async function expectUses(page, name, expected) {
 }
 
 test('what each browser counted is added up, and nothing is counted twice', async ({ page, context }, testInfo) => {
+  /* Two devices reconcile in both directions, and the server's per-source sign-in budget can make
+     one of those presses wait out a window. The work is the same; the clock is not. */
+  test.setTimeout(420_000);
+
   /* ---- the first browser: a vault, a bookmark, two visits, sync on ---- */
   const phrase = await createVault(page);
 
@@ -57,7 +61,7 @@ test('what each browser counted is added up, and nothing is counted twice', asyn
   await visit(context, '/shared');
   await expectUses(page, 'Shared', 2);
 
-  await turnOnSync(page, phrase);
+  await turnOnSyncPatiently(page, phrase);
   await expect(page.locator('#vault-status')).toContainText(/Synced \d/i, { timeout: 30_000 });
   await closeSettings(page);
   await expectUses(page, 'Shared', 2);

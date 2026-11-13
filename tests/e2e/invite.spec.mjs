@@ -17,7 +17,7 @@ import {
   openSettings,
   settingsItem,
   test,
-  turnOnSync
+  turnOnSyncPatiently
 } from './fixtures.mjs';
 
 /** Everything a page could keep a string in, as one string. */
@@ -66,7 +66,7 @@ test('a server that needs a code asks for one, and three refusals read as three 
     });
   });
 
-  await turnOnSync(page, phrase);
+  await turnOnSyncPatiently(page, phrase);
 
   /* The question appears on the page, in the section whose switch asked it, with the keyboard on it. */
   const row = page.locator('#modal-root [data-setting="sync-invite"]');
@@ -98,14 +98,16 @@ test('a server that needs a code asks for one, and three refusals read as three 
   const stored = await everythingStored(page);
   expect(stored, 'the spent code is nowhere on the device').not.toContain('SPENT-CODE-1234');
   expect(stored, 'the expired code is nowhere on the device').not.toContain('OLD-CODE-5678');
-  await expect(page).toHaveURL(/\/w\/bookmarks\/$/);
+  /* The vault is the root of its own origin: the code never ends up in the address bar, and neither does a page. */
+  const { pathname, search } = new URL(page.url());
+  expect(`${pathname}${search}`, 'the code is not in the address bar').toBe('/');
 });
 
 test('an open server never asks for a code, and sync turns on', async ({ page }) => {
   const phrase = await createVault(page);
   await addBookmark(page, { url: 'https://e2e.local/keeper', name: 'Keeper' });
 
-  await turnOnSync(page, phrase);
+  await turnOnSyncPatiently(page, phrase);
 
   /* The local server takes no codes: the account is created and the question is never asked. */
   await expect(page.locator('#vault-status')).toContainText(/sync/i, { timeout: 30_000 });
@@ -127,7 +129,7 @@ test('the code field fits a phone and a monitor, and says what it is to a screen
     })
   );
 
-  await turnOnSync(page, phrase);
+  await turnOnSyncPatiently(page, phrase);
   await expect(page.locator('#modal-root [data-setting="sync-invite"]')).toBeVisible({ timeout: 15_000 });
 
   for (const [width, height, name] of [

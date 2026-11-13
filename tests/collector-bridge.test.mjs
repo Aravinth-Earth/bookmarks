@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { BRIDGE_SOURCE, BRIDGE_VERSION, PAGE_SOURCE, createBridge, isSnapshot } from '../public/w/bookmarks/collector.js';
+import { BRIDGE_SOURCE, BRIDGE_VERSION, PAGE_SOURCE, createBridge, isSnapshot } from '../public/collector.js';
 
 function fakeWindow() {
   const listeners = new Set();

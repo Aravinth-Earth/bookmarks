@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import {
   MAX_BOOKMARKS,
   createDocument
-} from '../public/w/bookmarks/bookmarks.js';
+} from '../public/bookmarks.js';
 import {
   PLAIN_FORMAT,
   SEALED_FORMAT,
@@ -23,7 +23,7 @@ import {
   importPlain,
   mergeInto,
   parseSealed
-} from '../public/w/bookmarks/import-export.js';
+} from '../public/import-export.js';
 
 const T1 = Date.UTC(2025, 11, 26, 10, 30, 0);
 const T2 = Date.UTC(2025, 11, 27, 15, 45, 0);

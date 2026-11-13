@@ -20,7 +20,7 @@ import {
   clearDeviceStorage,
   hostKey,
   pruneIconTries
-} from '../public/w/bookmarks/device-store.js';
+} from '../public/device-store.js';
 
 function fakeStorage(seed = {}) {
   const kept = new Map(Object.entries(seed));
@@ -87,7 +87,7 @@ test('the page lists the keys it writes, and the icon index is one of them', () 
 });
 
 test('a device names itself once, keeps the name, and is cleared with the rest', async () => {
-  const { deviceId } = await import('../public/w/bookmarks/device-store.js');
+  const { deviceId } = await import('../public/device-store.js');
   const map = new Map();
   const storage = {
     getItem: (key) => (map.has(key) ? map.get(key) : null),
@@ -102,7 +102,7 @@ test('a device names itself once, keeps the name, and is cleared with the rest',
 });
 
 test('a device with no storage still counts, under a name that lasts as long as the page', async () => {
-  const { deviceId } = await import('../public/w/bookmarks/device-store.js');
+  const { deviceId } = await import('../public/device-store.js');
   const broken = {
     getItem() {
       throw new Error('denied');

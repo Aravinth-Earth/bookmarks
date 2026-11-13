@@ -63,7 +63,7 @@ test('without the extension the vault works and no section appears', async () =>
   const browser = await launch({ withExtension: false });
   try {
     const page = await browser.context.newPage();
-    await page.goto(`${BASE_URL}/w/bookmarks/`);
+    await page.goto(`${BASE_URL}/`);
     await createVault(page);
 
     await addBookmark(page, { url: 'https://e2e.local/alone', name: 'Alone' });

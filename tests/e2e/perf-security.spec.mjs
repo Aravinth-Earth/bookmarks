@@ -89,7 +89,7 @@ test('a cold load asks only this origin, answers every request, and is usable in
     failedRequests.push(`${request.method()} ${request.url()} (${request.failure()?.errorText ?? 'unknown'})`)
   );
 
-  await page.goto(`${BASE_URL}/w/bookmarks/`, { waitUntil: 'load' });
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'load' });
   await expect(page.locator('#lock-view')).toBeVisible();
   await expect(page.locator('#unlock-button')).toBeEnabled();
 
@@ -141,7 +141,7 @@ test('a cold load asks only this origin, answers every request, and is usable in
     console.log(`the site's stylesheets were refused here: ${refused.map((r) => `${r.status} ${r.url}`).join(', ')}`);
   }
 
-  const ownStylesheet = responses.find((response) => response.url.endsWith('/w/bookmarks/bookmarks.css'));
+  const ownStylesheet = responses.find((response) => response.url.endsWith('/bookmarks.css'));
   expect(ownStylesheet?.status, "the app's own stylesheet").toBe(200);
 
   const failedOwn = failedRequests.filter((entry) => !proxiedStylesheet(entry));
@@ -160,7 +160,7 @@ test('a cold load asks only this origin, answers every request, and is usable in
 });
 
 test('the page and its scripts carry the security headers the Worker sets', async ({ page, context }) => {
-  const pageResponse = await context.request.get(`${BASE_URL}/w/bookmarks/`);
+  const pageResponse = await context.request.get(`${BASE_URL}/`);
   expect(pageResponse.status()).toBe(200);
 
   const headers = pageResponse.headers();
@@ -191,7 +191,7 @@ test('the page and its scripts carry the security headers the Worker sets', asyn
   expect(headers['strict-transport-security']).toContain('includeSubDomains');
 
   /* A static module is served through the Worker too, so the policy cannot be dodged by asking for the file. */
-  const scriptResponse = await context.request.get(`${BASE_URL}/w/bookmarks/app.js`);
+  const scriptResponse = await context.request.get(`${BASE_URL}/app.js`);
   expect(scriptResponse.status()).toBe(200);
   expect(scriptResponse.headers()['content-security-policy']).toBe(csp);
   expect(scriptResponse.headers()['x-content-type-options']).toBe('nosniff');
@@ -199,7 +199,7 @@ test('the page and its scripts carry the security headers the Worker sets', asyn
 
   /* The policy is enforced, not just announced. A same-origin fetch succeeds first, so the refusal below is the
      policy talking and not a dead network. */
-  const sameOrigin = await page.evaluate(async () => (await fetch('/w/bookmarks/api/health')).ok);
+  const sameOrigin = await page.evaluate(async () => (await fetch('/api/health')).ok);
   expect(sameOrigin, 'a same-origin request works, so the probes below mean something').toBe(true);
 
   const inlineRan = await page.evaluate(() => {

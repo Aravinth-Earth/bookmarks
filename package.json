@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Bookmarks \u2014 end-to-end encrypted, local-first bookmark vault at 332321.xyz/w/bookmarks/",
+  "description": "Bookmarks \u2014 end-to-end encrypted, local-first bookmark vault at bookmarks.332321.xyz",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "dev": "wrangler dev",

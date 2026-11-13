@@ -17,7 +17,7 @@ import {
   visit
 } from './fixtures.mjs';
 
-const SETUP = `${BASE_URL}/w/bookmarks/?collector=installed`;
+const SETUP = `${BASE_URL}/?collector=installed`;
 
 /** The extension's own idea of what it should be doing, read where it keeps it. */
 async function extensionPolicy(context) {

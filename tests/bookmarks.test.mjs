@@ -27,7 +27,7 @@ import {
   sortBookmarks,
   togglePin,
   updateBookmark
-} from '../public/w/bookmarks/bookmarks.js';
+} from '../public/bookmarks.js';
 
 const T1 = Date.UTC(2026, 0, 1, 10, 0, 0);
 const T2 = Date.UTC(2026, 0, 2, 10, 0, 0);
@@ -410,7 +410,7 @@ test('no operation mutates the document it was given', () => {
 
 
 test('a bookmark counts every use: the ones opened here and the ones opened in the browser', async () => {
-  const { addBookmark, recordUses, useCount } = await import('../public/w/bookmarks/bookmarks.js');
+  const { addBookmark, recordUses, useCount } = await import('../public/bookmarks.js');
 
   const document = { schema: 1, bookmarks: [], tombstones: [], prefs: { iconOnly: false } };
   const { document: added, bookmark } = addBookmark(document, { url: 'https://a.example/x', name: 'A' });
@@ -430,7 +430,7 @@ test('a bookmark counts every use: the ones opened here and the ones opened in t
 });
 
 test('a merge adds two devices\' slots and keeps the larger number inside one slot', async () => {
-  const { mergeBookmark, useCount } = await import('../public/w/bookmarks/bookmarks.js');
+  const { mergeBookmark, useCount } = await import('../public/bookmarks.js');
 
   const base = {
     id: 'a',
@@ -456,7 +456,7 @@ test('a merge adds two devices\' slots and keeps the larger number inside one sl
 });
 
 test('two devices that counted the same bookmark add up, and merging again adds nothing', async () => {
-  const { mergeDocuments, useCount } = await import('../public/w/bookmarks/bookmarks.js');
+  const { mergeDocuments, useCount } = await import('../public/bookmarks.js');
 
   const device = (deviceId, count, updatedAt) => ({
     schema: 1,

@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_LEVEL, DEFAULT_ORDER, LEVELS, ORDERS, addressLabel, fold, siteOf, summarise } from '../public/w/bookmarks/collected.js';
+import { DEFAULT_LEVEL, DEFAULT_ORDER, LEVELS, ORDERS, addressLabel, fold, siteOf, summarise } from '../public/collected.js';
 
 /* 10 sites × their hosts × their pages, with the counts the design pages used. */
 const items = [
@@ -216,7 +216,7 @@ test('an empty or malformed list draws nothing rather than throwing', () => {
 
 
 test('a host whose only page is its own root is drawn once, not twice', async () => {
-  const { fold } = await import('../public/w/bookmarks/collected.js');
+  const { fold } = await import('../public/collected.js');
   const rows = fold(
     [{ url: 'http://127.0.0.1:8788/', host: '127.0.0.1', visits: 3, lastSeenAt: '2026-11-09T10:00:00.000Z' }],
     { level: 'addresses', order: 'domain' }

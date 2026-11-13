@@ -73,7 +73,7 @@ function harness(limiters = {}) {
 }
 
 function api(path, { method = 'GET', source = SOURCE, body, headers = {} } = {}) {
-  return new Request(`https://bookmarks.332321.xyz/w/bookmarks/api${path}`, {
+  return new Request(`https://bookmarks.332321.xyz/api${path}`, {
     method,
     headers: {
       'cf-connecting-ip': source,

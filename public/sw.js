@@ -1,5 +1,5 @@
 /**
- * The app's own offline cache, scoped to /w/bookmarks/.
+ * The app's own offline cache, scoped to the root of its own origin.
  *
  * It is separate from the site's worker on purpose: this app ships from a different repository
  * and a different deploy, so its cache has to be bumped by its own changes rather than by a
@@ -10,28 +10,28 @@
  * The API is never cached: a stale vault read would be worse than no answer at all.
  */
 
-const CACHE_NAME = 'bookmarks-v82';
+const CACHE_NAME = 'bookmarks-v83';
 const SHELL = [
-  '/w/bookmarks/',
-  '/w/bookmarks/index.html',
-  '/w/bookmarks/bookmarks.css',
-  '/w/bookmarks/theme.js',
-  '/w/bookmarks/app.js',
-  '/w/bookmarks/crypto.js',
-  '/w/bookmarks/device-store.js',
-  '/w/bookmarks/hygiene.js',
-  '/w/bookmarks/lock-signal.js',
-  '/w/bookmarks/views.js',
-  '/w/bookmarks/vault.js',
-  '/w/bookmarks/bookmarks.js',
-  '/w/bookmarks/import-export.js',
-  '/w/bookmarks/tiles.js',
-  '/w/bookmarks/stamps.js',
-  '/w/bookmarks/sync.js',
-  '/w/bookmarks/icons.js',
-  '/w/bookmarks/wordlist.js',
-  '/w/bookmarks/collected.js',
-  '/w/bookmarks/collector.js',
+  '/',
+  '/index.html',
+  '/bookmarks.css',
+  '/theme.js',
+  '/app.js',
+  '/crypto.js',
+  '/device-store.js',
+  '/hygiene.js',
+  '/lock-signal.js',
+  '/views.js',
+  '/vault.js',
+  '/bookmarks.js',
+  '/import-export.js',
+  '/tiles.js',
+  '/stamps.js',
+  '/sync.js',
+  '/icons.js',
+  '/wordlist.js',
+  '/collected.js',
+  '/collector.js',
   '/css/tokens.css',
   '/css/themes.css'
 ];
@@ -66,17 +66,17 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname === '/w/bookmarks/api' || url.pathname.startsWith('/w/bookmarks/api/')) return;
+  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return;
 
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request)
         .then((response) => {
           const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put('/w/bookmarks/', copy));
+          caches.open(CACHE_NAME).then((cache) => cache.put('/', copy));
           return response;
         })
-        .catch(() => caches.match('/w/bookmarks/'))
+        .catch(() => caches.match('/'))
     );
     return;
   }

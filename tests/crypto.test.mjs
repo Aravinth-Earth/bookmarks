@@ -39,8 +39,8 @@ import {
   seal,
   sealVault,
   vaultAssociated
-} from '../public/w/bookmarks/crypto.js';
-import { WORDLIST } from '../public/w/bookmarks/wordlist.js';
+} from '../public/crypto.js';
+import { WORDLIST } from '../public/wordlist.js';
 
 const WORD = /^[a-z]+(?:-[a-z]+)*$/;
 const BASE64URL_22 = /^[A-Za-z0-9_-]{22}$/;

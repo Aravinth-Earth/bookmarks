@@ -1,6 +1,6 @@
 # Collected links — the optional extension
 
-An add-on for the vault at <https://bookmarks.332321.xyz/w/bookmarks/>. The vault works exactly as it does without it.
+An add-on for the vault at <https://bookmarks.332321.xyz/>. The vault works exactly as it does without it.
 With it, the addresses you open are listed on this device, so you can add the ones worth keeping.
 
 ## What it keeps
