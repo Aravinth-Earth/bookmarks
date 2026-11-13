@@ -1034,6 +1034,26 @@ body.modal-open {
     cursor: default;
 }
 
+/* The invite row holds a field rather than a switch: its surface is not something to press, so it
+   keeps the flat card and the plain cursor, and its field and button stay inside the card's width
+   at every sheet width instead of pushing the page sideways. */
+.settings-invite,
+.settings-invite:hover {
+    background: var(--bg-inset, #0d1117);
+    border-color: var(--border, #21262d);
+    cursor: default;
+}
+
+.settings-invite .settings-invite-field {
+    min-width: 0;
+}
+
+.settings-invite .settings-invite-use {
+    justify-self: start;
+    width: auto;
+    cursor: pointer;
+}
+
 .settings-heading {
     margin: 0.45rem 0 0.25rem;
     color: var(--text-muted, #6e7681);

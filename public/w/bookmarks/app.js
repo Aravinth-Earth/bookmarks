@@ -70,6 +70,11 @@ const state = {
      which is dropped as soon as the account exists. */
   authKey: null,
   authSecret: null,
+  /* The code an invite-only server asks for before it will create an account, and whether one is
+     owed. Both live in memory for one attempt: a code is spent when it is used, so a copy kept
+     anywhere would be a copy left behind. */
+  invite: '',
+  inviteNeeded: false,
   key: null,
   version: 0,
   remoteVersion: 0,
@@ -577,7 +582,10 @@ function applyPrefs() {
   if (VIEWS.has(prefs.view)) currentView = prefs.view;
   writePref(VIEW_KEY, currentView);
   applyAppearance();
-  if (prefs.sync !== true) clearSyncRefusal({ reset: true });
+  if (prefs.sync !== true) {
+    clearSyncRefusal({ reset: true });
+    forgetInvite();
+  }
 }
 
 /* ---------------------------------------------------------------------- sync */
@@ -601,6 +609,35 @@ function showSyncRefusal() {
 function clearSyncRefusal({ reset = false } = {}) {
   syncRefusal.hidden = true;
   if (reset) syncRefusalDismissed = false;
+}
+
+/**
+ * Drop the invite question. A code opens one account and is spent doing it, so nothing about it
+ * outlives the attempt it was typed for: turning Sync off or locking the vault ends the question.
+ */
+function forgetInvite() {
+  state.invite = '';
+  state.inviteNeeded = false;
+}
+
+/**
+ * Give the code in the field to the creation route.
+ *
+ * `syncNow` reports its own failures and returns nothing, so the answer to "did this code open
+ * the server" is the session it left behind: a refused code leaves the client signed out and the
+ * refusal on the page, while an accepted one signs in before anything else can fail.
+ */
+async function submitInvite(code) {
+  state.invite = code;
+  await syncNow();
+  /* A reconcile already in flight queued this one rather than running it, and the answer belongs
+     to the attempt that actually ran. */
+  while (syncBusy || syncQueued) {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 40);
+    });
+  }
+  return sync.signedIn;
 }
 
 /* The vault syncs after every change; the same unreachable server must not re-announce itself
@@ -753,6 +790,26 @@ function handleSyncError(error) {
     setSyncStatus('Phrase needed to create the account');
     return;
   }
+  /* A server that will not create an account without a code is asking a question, and the sheet
+     has the field for it: `describeSyncFailure` maps INVITE_REQUIRED, INVITE_USED and
+     INVITE_EXPIRED to this kind. The code that was just refused is dropped — it is spent or
+     wrong, and the next sync would otherwise send it again. */
+  if (failure.kind === 'invite') {
+    const first = !state.inviteNeeded;
+    state.inviteNeeded = true;
+    state.invite = '';
+    setSyncStatus(failure.label);
+    announce(failure.message, { duration: 8000 });
+    /* The question is asked on the page, not left as a sentence pointing at a control the person
+       cannot see: the sheet opens at the section that answers it, with the keyboard on the field.
+       A refusal of a code already typed needs no redraw and keeps the field it was typed in. */
+    if (first) {
+      if (settingsOpen()) repaintSettings();
+      else openSettings();
+      requestAnimationFrame(() => activeModal?.dialog.querySelector('#invite-code')?.focus());
+    }
+    return;
+  }
   if (failure.kind === 'unauthorized') {
     sync.token = null;
     setSyncStatus(failure.label);
@@ -821,6 +878,10 @@ async function sealedForPush(baseVersion) {
  */
 async function syncNow() {
   if (!syncEnabled() || !state.key || !authMaterial()) return;
+  /* Creation was refused for want of a code, and the field that answers it is on the page. A
+     background sync would ask the same question and be refused the same way, so it waits for the
+     code instead of spending the server's attempts on it. */
+  if (state.inviteNeeded && state.invite === '') return;
   if (syncBusy) {
     syncQueued = true;
     return;
@@ -841,15 +902,18 @@ async function syncNow() {
         /* First sync on a new phrase: the account is created from the same secrets the login
            would have used, so there is nothing to provision and no token to hold. A remembered
            device holds the signing key, not the secret the server is given, so it cannot create
-           the account without the phrase once. */
+           the account without the phrase once. The code, when the server wants one, is the third
+           argument and is empty until a refusal asks for it. */
         setSyncStatus('Creating the account…');
         if (typeof state.authSecret !== 'string') {
           throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
         }
-        await sync.register(state.accountId, state.authSecret);
+        await sync.register(state.accountId, state.authSecret, state.invite);
         /* The server now holds the secret, so this page does not: from here the session signs
            with the non-extractable key and nothing else. */
         state.authSecret = null;
+        /* The creation is done, so the code has no further use: it was spent on this account. */
+        forgetInvite();
         session = await sync.login(state.accountId, authMaterial());
       }
 
@@ -3060,13 +3124,78 @@ function openSettings() {
     return node;
   };
 
-  /* A list that changed shape (a rule removed, a rule added) has to be drawn again, so it is — at the same place. */
-  const rebuild = () => {
-    const scroll = modal.dialog.querySelector('.modal-body')?.scrollTop ?? 0;
-    modal.close();
-    const next = openSettings();
-    const body = next.dialog.querySelector('.modal-body');
-    if (body) body.scrollTop = scroll;
+  /* ---- the invite field ---- */
+
+  /**
+   * The one question an invite-only server asks. It is drawn only while a creation has been
+   * refused for want of a code, and the value is read from the field into `state.invite` when it
+   * is pressed: the code is never stored, and the field holds it no longer than the attempt.
+   */
+  const inviteRow = () => {
+    const field = el('input', {
+      type: 'text',
+      id: 'invite-code',
+      class: 'settings-invite-field',
+      autocomplete: 'off',
+      spellcheck: false,
+      inputmode: 'text',
+      'aria-label': 'Invite code',
+      'aria-describedby': 'invite-code-hint',
+      value: state.invite
+    });
+
+    const button = el('button', {
+      class: 'button button-primary settings-invite-use',
+      type: 'button',
+      text: 'Use this code'
+    });
+
+    const use = async () => {
+      const code = field.value.trim();
+      if (code === '') {
+        field.focus();
+        return;
+      }
+
+      button.disabled = true;
+      const accepted = await submitInvite(code);
+      button.disabled = false;
+
+      if (!accepted) {
+        /* The refusal sentence is on the page and the next attempt starts where this one was
+           typed, so a mistyped code can be corrected in place. */
+        field.focus();
+        return;
+      }
+
+      forgetInvite();
+      field.value = '';
+      if (settingsOpen()) repaintSettings();
+      announce('Sync is on for this vault.');
+    };
+
+    button.addEventListener('click', use);
+    /* One field, one action: the key that people press after typing a code should run it. */
+    field.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      button.click();
+    });
+
+    return el(
+      'div',
+      { class: 'settings-item settings-control settings-invite', 'data-setting': 'sync-invite' },
+      [
+        el('strong', { text: 'Invite code' }),
+        field,
+        button,
+        el('span', {
+          class: 'settings-invite-hint',
+          id: 'invite-code-hint',
+          text: 'This is a code, not the phrase, and it is spent once used.'
+        })
+      ]
+    );
   };
 
   /* ---- the collected-links controls ---- */
@@ -3104,7 +3233,7 @@ function openSettings() {
     button.append(icon('remove'));
     button.addEventListener('click', () => {
       onRemove();
-      rebuild();
+      repaintSettings();
     });
     return button;
   };
@@ -3138,7 +3267,7 @@ function openSettings() {
     setCollectorPrefs({
       sites: [...collector.sites.filter((rule) => rule.site !== answer.value), { site: answer.value, level: answer.choice }]
     });
-    rebuild();
+    repaintSettings();
   }
 
   async function addExclusion() {
@@ -3159,7 +3288,7 @@ function openSettings() {
     setCollectorPrefs({
       exclude: [...collector.exclude, { scope: answer.choice, value: answer.value }]
     });
-    rebuild();
+    repaintSettings();
   }
 
   /* A fact about the account, not an action: no press, and a dash where the vault has no such
@@ -3423,12 +3552,17 @@ function openSettings() {
               await sync.logout();
               setSyncStatus('');
               clearSyncRefusal({ reset: true });
+              /* Off is not the same vault: the code was for a server this vault no longer talks to. */
+              forgetInvite();
               return;
             }
             clearSyncRefusal({ reset: true });
             await syncNow();
           }
         ),
+        /* The field that answers an invite-only server, in the section whose switch asked it: a
+           question about creating the account has to be on the page, not behind a chip. */
+        ...(state.inviteNeeded ? [inviteRow()] : []),
         item('Sync now', 'Reconcile with the server immediately.', async () => {
           modal.close();
           if (!syncEnabled()) {
@@ -3551,6 +3685,23 @@ function openSettings() {
   fillStamps();
 }
 
+/** Whether the sheet is the dialog currently on the page. */
+function settingsOpen() {
+  return activeModal?.dialog?.classList.contains('settings-modal') === true;
+}
+
+/**
+ * Draw the sheet again where it stands, for a change that alters which rows it holds. The sheet
+ * is built once and left alone, so a row that becomes needed is drawn by building the sheet
+ * again — at the same scroll position, which is where the person is reading.
+ */
+function repaintSettings() {
+  const scroll = activeModal?.dialog?.querySelector('.modal-body')?.scrollTop ?? 0;
+  const next = openSettings();
+  const body = next.dialog.querySelector('.modal-body');
+  if (body) body.scrollTop = scroll;
+}
+
 /**
  * Drops the key, the open document and the session, here and in every other tab.
  *
@@ -3564,6 +3715,8 @@ async function lockVault({ broadcast = true } = {}) {
   state.accountId = null;
   state.authKey = null;
   state.authSecret = null;
+  /* A code is a secret like the phrase, so a lock drops it with everything else the page held. */
+  forgetInvite();
   state.key = null;
   state.version = 0;
   state.remoteVersion = 0;
