@@ -34,7 +34,11 @@ export default defineConfig({
     ? {}
     : {
         webServer: {
-          command: `npx wrangler dev --port ${PORT} --ip 127.0.0.1 --local --persist-to .wrangler/e2e-state-${PORT}`,
+          /* A run starts on a server that has never seen a vault: the Durable Objects persist on disk between runs, and the
+               registry allows one account on this machine, so the second run of a creation test would meet a full server and
+               fail for a reason that has nothing to do with the code under test. Removed before wrangler opens it, never
+               after — a state directory deleted while workerd holds it answers SQLITE_CANTOPEN. */
+          command: `rm -rf .wrangler/e2e-state-${PORT} && npx wrangler dev --port ${PORT} --ip 127.0.0.1 --local --persist-to .wrangler/e2e-state-${PORT}`,
           url: `${BASE}/w/bookmarks/api/health`,
           reuseExistingServer: false,
           timeout: 180_000,
