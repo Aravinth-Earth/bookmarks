@@ -20,7 +20,7 @@ const CHANGED = 'collected-changed';
    injects the bridge into. Reading it from the manifest means the extension cannot name an origin the guard has
    not reviewed, and the local dev server is covered without a second copy of the address here. */
 const VAULT_PATTERNS = (chrome.runtime.getManifest().content_scripts ?? []).flatMap((script) => script.matches ?? []);
-const VAULT_ORIGINS = new Set(VAULT_PATTERNS.map((pattern) => new URL(pattern.replace('*', 'x')).origin));
+const VAULT_ORIGINS = new Set(VAULT_PATTERNS.map((pattern) => new URL(pattern.replaceAll('*', 'x')).origin));
 
 /**
  * The same origins without their port.
@@ -46,7 +46,7 @@ const VAULT_HOSTS = new Set(
 const VAULT_SETUP_URL = (() => {
   const pattern = VAULT_PATTERNS.find((entry) => entry.startsWith('https://')) ?? VAULT_PATTERNS[0] ?? '';
   if (pattern === '') return null;
-  const origin = new URL(pattern.replace('*', 'x')).origin;
+  const origin = new URL(pattern.replaceAll('*', 'x')).origin;
   return `${origin}/?collector=installed`;
 })();
 

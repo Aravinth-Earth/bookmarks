@@ -378,7 +378,7 @@ try {
     for (const match of script.matches ?? []) {
       let parsed = null;
       try {
-        parsed = new URL(match.replace('*', 'x'));
+        parsed = new URL(match.replaceAll('*', 'x'));
       } catch {
         parsed = null;
       }
