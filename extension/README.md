@@ -22,11 +22,32 @@ the file stays on the device.
 - `storage` — the list itself.
 - `alarms` — the tidy that runs every six hours and applies the retention you set.
 
-## Install (unpacked)
+## Install from a release zip
+
+A release carries `bookmarks-extension-<version>.zip`, built from this `extension/` folder and nothing else.
+There is no store listing yet, so the zip is the same unpacked install with one fewer checkout.
+
+1. Download the zip and unzip it somewhere permanent — the browser loads from that folder, so moving it
+   afterwards breaks the install.
+2. `brave://extensions` (or `chrome://extensions`) → turn on **Developer mode**.
+3. **Load unpacked** → choose the unzipped folder.
+
+## Install (unpacked, from a checkout)
 
 1. `brave://extensions` → turn on **Developer mode**.
 2. **Load unpacked** → choose this `extension/` folder.
 3. After editing a file, press the reload arrow on the card. There is no build step.
+
+## Build the zip
+
+```bash
+npm run package:extension
+```
+
+That writes `dist/bookmarks-extension-<version>.zip`, the version taken from `manifest.json`. Every regular file
+under `extension/` goes in once, in path order, at a fixed timestamp and stored uncompressed, so two builds of the
+same checkout are byte-identical. A symlink inside the folder is refused rather than followed: the parcel never
+reaches outside this repository.
 
 Installing opens the vault's own page, which is where the one question is asked: *"this device's addresses, kept
 here, nothing leaving it — collect?"* Nothing is counted until that is answered, and answering it one way or the

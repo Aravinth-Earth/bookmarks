@@ -34,6 +34,10 @@ Settings → Collected links inside the vault, sealed with the vault and pushed 
 The extension asks for `tabs` (the permission a browser describes as reading your browsing history), `storage` and
 `alarms`, and makes no network request at all; `npm run check` fails if that stops being true.
 
+A release carries `bookmarks-extension-<version>.zip`, built from `extension/` by `npm run package:extension`. Unzip it
+somewhere permanent and load that folder unpacked; `extension/README.md` has the steps, the permissions in full, and
+the uninstall path.
+
 ## Layout
 
 ```
