@@ -160,8 +160,10 @@ for (const file of assets) {
 /* 2b. The two stylesheets the page draws with are the app's own files now, not the site's. A page
    that links a path nobody ships renders unstyled and says so only in a console nobody reads, and
    these two paths used to be proxied from the site host — so the links, the files they name, and
-   the absence of that host are all checked here. Nothing in public/ may name www.332321.xyz again:
-   the app answers with the bytes in its own repository or it does not draw at all. */
+   the absence of that host are all checked here. Neither of the two hosts that used to carry this
+   app may be named in public/ again: `b.` answered with the vault itself, and `www.` answered with
+   the stylesheets it borrowed. The app answers with the bytes in its own repository, on its own
+   host, or it does not draw at all. */
 try {
   const page = readFileSync(join(publicDir, 'index.html'), 'utf8');
 
@@ -175,11 +177,12 @@ try {
     else if (statSync(file).size < 1000) problems.push(`stylesheets: public/css/${name} looks truncated`);
   }
 
+  const retiredHosts = ['www.332321.xyz', 'b.332321.xyz'];
   for (const file of assets) {
-    if (readFileSync(file, 'utf8').includes('www.332321.xyz')) {
-      problems.push(
-        `${relative(root, file)}: names www.332321.xyz, which this app no longer reads a stylesheet from`
-      );
+    const text = readFileSync(file, 'utf8');
+    const named = retiredHosts.find((host) => text.includes(host));
+    if (named) {
+      problems.push(`${relative(root, file)}: names ${named}, a retired host this app no longer reads from`);
       break;
     }
   }
