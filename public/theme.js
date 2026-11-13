@@ -34,4 +34,25 @@
     /* Storage is unavailable; the default theme is fine. */
     document.documentElement.setAttribute('data-theme', 'current');
   }
+
+  /* The window's own chrome — a tab, an installed app's title bar — is painted with `theme-color`,
+     and the app's background is a theme token rather than a constant. Keep the meta in step with
+     whichever theme is on the page: once after the stylesheet has applied, and again every time
+     the picker changes the attribute. */
+  function paintThemeColour() {
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) return;
+    var colour = getComputedStyle(document.documentElement).getPropertyValue('--bg-primary').trim();
+    if (colour) meta.setAttribute('content', colour);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', paintThemeColour);
+  } else {
+    paintThemeColour();
+  }
+  new MutationObserver(paintThemeColour).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme']
+  });
 })();

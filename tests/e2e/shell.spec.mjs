@@ -134,3 +134,46 @@ test('the app looks the same with the site unreachable, and still renders offlin
   /* Put the network back so a failure above is the only thing this test leaves behind. */
   await context.setOffline(false);
 });
+
+test('the mark is served at every size the page and the manifest ask for', async ({ page, request }) => {
+  await page.goto(BASE_URL);
+
+  const wired = await page.evaluate(() => ({
+    manifest: document.querySelector('link[rel="manifest"]')?.getAttribute('href') ?? null,
+    icons: [...document.querySelectorAll('link[rel~="icon"]')].map((link) => link.getAttribute('href')),
+    apple: document.querySelector('link[rel="apple-touch-icon"]')?.getAttribute('href') ?? null,
+    theme: document.querySelector('meta[name="theme-color"]')?.getAttribute('content') ?? null
+  }));
+
+  expect(wired.manifest, 'the page names its manifest').toBe('/manifest.webmanifest');
+  expect(wired.icons, 'the page names both icon forms').toEqual(
+    expect.arrayContaining(['/icon.svg', '/favicon-32.png'])
+  );
+  expect(wired.apple, 'the page names an apple touch icon').toBe('/apple-touch-icon.png');
+  expect(wired.theme, 'the theme colour is the app background').toBe('#0a0c10');
+
+  const response = await request.get('/manifest.webmanifest');
+  expect(response.status(), 'the manifest is served').toBe(200);
+  const manifest = await response.json();
+
+  expect(manifest.start_url, 'the installed app starts at the vault').toBe('/');
+  expect(manifest.scope, 'the installed app owns the origin').toBe('/');
+  expect(
+    manifest.icons.map((icon) => `${icon.sizes} ${icon.purpose}`),
+    'the manifest names a 192, a 512 and a maskable 512'
+  ).toEqual(expect.arrayContaining(['192x192 any', '512x512 any', '512x512 maskable']));
+
+  /* Every file the manifest and the page name is really served. The install would fail on a missing
+     one, and with the icons in the service worker's shell (`cache.addAll`) so would the install of
+     the offline copy — which is why this is checked over HTTP, not assumed. */
+  const sources = [
+    ...manifest.icons.map((icon) => icon.src),
+    '/icon.svg',
+    '/favicon-32.png',
+    '/apple-touch-icon.png'
+  ];
+  for (const src of sources) {
+    const icon = await request.get(src);
+    expect(icon.status(), `${src} is served`).toBe(200);
+  }
+});

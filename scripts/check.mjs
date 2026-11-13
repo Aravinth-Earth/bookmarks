@@ -30,6 +30,14 @@ function walk(directory) {
   return files;
 }
 
+/* A PNG's IHDR carries its width and height as big-endian 32-bit values at bytes 16 and 20. Reading
+   them here keeps the guard free of an image library, so it runs on the same node the tests do. */
+function pngSize(file) {
+  const bytes = readFileSync(file);
+  if (bytes.length < 24 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') return null;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
 const assets = walk(publicDir);
 
 /* The extension is a second parcel of browser modules. A syntax error there fails only when the worker is loaded,
@@ -188,6 +196,102 @@ try {
   }
 } catch (error) {
   problems.push(`stylesheets: ${error.message}`);
+}
+
+/* 2c. The mark. One SVG is the source and the PNGs beside it are exported from it at the sizes each
+   platform asks for, so the page cannot point at a size nobody exported. The app and the extension
+   declare the mark in their manifests, and every entry has to name a file that really is that size. */
+try {
+  const page = readFileSync(join(publicDir, 'index.html'), 'utf8');
+  for (const [what, needle] of [
+    ['an SVG icon', 'href="/icon.svg"'],
+    ['a 32px PNG icon', 'href="/favicon-32.png"'],
+    ['an apple touch icon', 'href="/apple-touch-icon.png"'],
+    ['the web app manifest', 'href="/manifest.webmanifest"']
+  ]) {
+    if (!page.includes(needle)) problems.push(`mark: index.html does not link ${what}`);
+  }
+  if (!page.includes('<meta name="theme-color" content="#0a0c10">')) {
+    problems.push('mark: index.html names no theme colour, or one that is not the app background');
+  }
+
+  const mark = readFileSync(join(publicDir, 'icon.svg'), 'utf8');
+  if (!mark.trimStart().startsWith('<svg') || !mark.includes('viewBox="0 0 64 64"')) {
+    problems.push('mark: public/icon.svg is not the 64-unit source it is supposed to be');
+  }
+
+  const manifest = JSON.parse(readFileSync(join(publicDir, 'manifest.webmanifest'), 'utf8'));
+  for (const [field, wanted] of [
+    ['start_url', '/'],
+    ['scope', '/'],
+    ['display', 'standalone'],
+    ['theme_color', '#0a0c10'],
+    ['background_color', '#0a0c10']
+  ]) {
+    if (manifest[field] !== wanted) problems.push(`mark: manifest ${field} is ${JSON.stringify(manifest[field])}`);
+  }
+
+  const wantedIcons = [
+    ['192x192', 'any'],
+    ['512x512', 'any'],
+    ['512x512', 'maskable']
+  ];
+  for (const [sizes, purpose] of wantedIcons) {
+    const icon = (manifest.icons ?? []).find((entry) => entry.sizes === sizes && entry.purpose === purpose);
+    if (!icon) {
+      problems.push(`mark: manifest has no ${sizes} ${purpose} icon`);
+      continue;
+    }
+    if (typeof icon.src !== 'string' || !icon.src.startsWith('/')) {
+      problems.push(`mark: manifest icon ${sizes} is not a root-relative file`);
+      continue;
+    }
+    const file = join(publicDir, icon.src);
+    if (!existsSync(file)) {
+      problems.push(`mark: manifest names ${icon.src}, which is not in public/`);
+      continue;
+    }
+    const [wantedWidth, wantedHeight] = sizes.split('x').map(Number);
+    const px = pngSize(file);
+    if (!px || px.width !== wantedWidth || px.height !== wantedHeight) {
+      problems.push(`mark: ${icon.src} is not ${sizes}`);
+    }
+  }
+} catch (error) {
+  problems.push(`mark: ${error.message}`);
+}
+
+/* 2d. The extension declares the same mark for its toolbar and its own install card. Chrome refuses a
+   manifest whose declared icon is missing, so every entry is checked against the file's header. */
+if (extensionNames.includes('manifest.json')) {
+  try {
+    const extensionManifest = JSON.parse(readFileSync(join(extensionDir, 'manifest.json'), 'utf8'));
+    const tables = [
+      ['icons', extensionManifest.icons ?? {}],
+      ['action.default_icon', extensionManifest.action?.default_icon ?? {}]
+    ];
+    for (const [where, table] of tables) {
+      const entries = Object.entries(table);
+      if (entries.length === 0) problems.push(`extension: ${where} names no icon`);
+      for (const [size, path] of entries) {
+        if (typeof path !== 'string' || !path.startsWith('icons/') || path.includes('..')) {
+          problems.push(`extension: ${where} ${size} is not a file under icons/`);
+          continue;
+        }
+        const file = join(extensionDir, path);
+        if (!existsSync(file)) {
+          problems.push(`extension: ${where} names ${path}, which does not exist`);
+          continue;
+        }
+        const px = pngSize(file);
+        if (!px || px.width !== Number(size) || px.height !== Number(size)) {
+          problems.push(`extension: ${path} is not ${size}px`);
+        }
+      }
+    }
+  } catch (error) {
+    problems.push(`extension icons: ${error.message}`);
+  }
 }
 
 /* 3. README.md makes the same promises to a reader who never opens the page, so it is held to
