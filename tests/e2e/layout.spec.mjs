@@ -170,6 +170,14 @@ const BOX = `
   };
 `;
 
+/* The selector reaches the page as a value, not as source. A template that interpolated it would be code built from
+   a string — the construction CodeQL flags, even when the string is a constant declared in this file. */
+async function select(page, selector) {
+  await page.evaluate((wanted) => {
+    window.__measureSelector = wanted;
+  }, selector);
+}
+
 /** The whole page: the document's own scroll width, and every visible box that reaches past it. */
 async function pageWide(page) {
   return page.evaluate(
@@ -234,9 +242,10 @@ async function toolbarBox(page) {
 
 /** One table's cells, row by row, plus whether the text inside each cell had to be cut. */
 async function tableBoxes(page, selector) {
+  await select(page, selector);
   return page.evaluate(
     `(() => {${BOX}
-      const list = document.querySelector(${JSON.stringify(selector)});
+      const list = document.querySelector(window.__measureSelector);
       if (!list) return null;
       const cellsOf = (row) => {
         const wanted = [
@@ -285,9 +294,10 @@ async function tableBoxes(page, selector) {
 
 /** Every pill in a list: its own box, and whether it stayed inside the container that wraps it. */
 async function pillBoxes(page, selector) {
+  await select(page, selector);
   return page.evaluate(
     `(() => {${BOX}
-      const list = document.querySelector(${JSON.stringify(selector)});
+      const list = document.querySelector(window.__measureSelector);
       if (!list) return null;
       const listBox = box(list);
       const style = getComputedStyle(list);
