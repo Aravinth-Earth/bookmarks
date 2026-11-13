@@ -10,11 +10,17 @@
  * The API is never cached: a stale vault read would be worse than no answer at all.
  */
 
-const CACHE_NAME = 'bookmarks-v84';
+const CACHE_NAME = 'bookmarks-v85';
 const SHELL = [
   '/',
   '/index.html',
   '/bookmarks.css',
+  '/icon.svg',
+  '/favicon-32.png',
+  '/apple-touch-icon.png',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/manifest.webmanifest',
   '/theme.js',
   '/app.js',
   '/crypto.js',

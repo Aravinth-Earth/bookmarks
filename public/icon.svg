@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Bookmarks">
+  <title>Bookmarks</title>
+  <!-- A bookmark whose keyhole is the notch it hangs by: the mark is the two things the app is,
+       a place to keep an address and a thing sealed with a phrase. Dark-first: the tile is the
+       page's own background, and the only bright thing is the glyph. -->
+  <rect width="64" height="64" rx="14" fill="#0a0c10"/>
+  <path fill="#58a6ff" d="M21 11h22a5 5 0 0 1 5 5v35.2c0 1.5-1.7 2.4-2.9 1.6L32 44.6 18.9 52.8c-1.2.8-2.9-.1-2.9-1.6V16a5 5 0 0 1 5-5z"/>
+  <circle cx="32" cy="27.5" r="7" fill="#0a0c10"/>
+  <path fill="#0a0c10" d="M28.8 32h6.4l1.4 12.6h-9.2z"/>
+</svg>
