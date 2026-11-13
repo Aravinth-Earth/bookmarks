@@ -178,12 +178,14 @@ test('a row that is already held does not spend the daily budget', async () => {
 });
 
 test('the daily budget rolls over on the local calendar day', async () => {
-  let clock = Date.parse('2026-11-10T23:50:00+05:30');
+  /* The day the cap rolls on is the machine's own, so these two moments are built in its zone rather than pinned to
+     one offset — a fixed `+05:30` reads as the same UTC day on a CI runner and never rolls over there. */
+  let clock = new Date(2026, 10, 10, 23, 50).getTime();
   const collector = createCollector({ persistent: memory(), now: () => clock });
   await collector.setPolicy({ enabled: true, dailyCap: 1 });
 
   assert.equal(await collector.capture('https://one.example/'), 'captured');
-  clock = Date.parse('2026-11-11T00:10:00+05:30');
+  clock = new Date(2026, 10, 11, 0, 10).getTime();
   assert.equal(await collector.capture('https://two.example/'), 'captured');
 });
 
