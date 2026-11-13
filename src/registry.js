@@ -134,6 +134,12 @@ export class Registry {
       return json({ error: 'full', max: await this.max() }, 429);
     }
 
+    /* How this account came to exist is written down with it, so the operator view can say whether a vault paid for
+       itself, came in on a code, or was the first one on the server. An account that already exists is never
+       re-decided: this branch is only reached on creation. */
+    const firstOnServer = accounts.length === 0;
+    let via = firstOnServer ? 'owner' : 'direct';
+
     if (this.invitesRequired()) {
       const hash = typeof body.value?.inviteHash === 'string' ? body.value.inviteHash : '';
       const invites = await this.invites();
@@ -148,11 +154,12 @@ export class Registry {
       /* Marked here, inside the one object that owns the list, so two creations cannot spend the same code. */
       invites[at] = { ...invite, usedAt: Date.now(), accountId };
       await this.storage.put('invites', invites);
+      via = 'invite';
     }
 
     accounts.push(accountId);
     await this.storage.put('accounts', accounts);
-    return json({ ok: true, count: accounts.length, max: await this.max() });
+    return json({ ok: true, via, count: accounts.length, max: await this.max() });
   }
 
   /**

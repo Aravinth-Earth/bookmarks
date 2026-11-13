@@ -1134,107 +1134,10 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   }
 }
 
-/**
- * Two secrets are equal, compared without letting the time it takes say how nearly equal they were.
- *
- * Both sides are digested first, so the comparison is over a fixed length whatever was offered.
- */
-async function sameSecret(offered, expected) {
-  const encoder = new TextEncoder();
-  const [left, right] = await Promise.all([
-    crypto.subtle.digest('SHA-256', encoder.encode(String(offered))),
-    crypto.subtle.digest('SHA-256', encoder.encode(String(expected)))
-  ]);
-
-  const a = new Uint8Array(left);
-  const b = new Uint8Array(right);
-  let difference = a.length === b.length ? 0 : 1;
-  for (let index = 0; index < Math.min(a.length, b.length); index += 1) difference |= a[index] ^ b[index];
-
-  return difference === 0 && String(offered).length === String(expected).length;
-}
-
-/**
- * The operator's page: what the server holds, in totals, and the codes that let a new account exist.
- *
- * It answers only when an admin token is configured, and only to a caller who presents it, so an untouched deploy
- * has no operator surface at all.
- */
-async function handleAdmin(request, env, path) {
-  const expected = String(env?.ADMIN_TOKEN ?? '');
-  if (expected === '') return json({ error: 'not_found' }, 404);
-
-  const offered = (request.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '');
-  if (!(await sameSecret(offered, expected))) return json({ error: 'unauthorized' }, 401);
-
-  const registry = env?.REGISTRY;
-  if (!registry) return json({ error: 'no_registry' }, 503);
-  const stub = registry.get(registry.idFromName('registry'));
-
-  if (path === '/admin/overview' && request.method === 'GET') {
-    const list = await (await stub.fetch(new Request('https://registry/admin-list'))).json();
-    const ids = Array.isArray(list.ids) ? [...list.ids] : [];
-
-    /* One size per vault, asked of the object that holds it. A sealed copy is opaque, so its length is the whole of
-       what can be said about its contents. */
-    const accounts = [];
-    let bytes = 0;
-    for (const id of ids) {
-      const row = { id: id.slice(0, 8) };
-      try {
-        const answer = await env.VAULTS.get(env.VAULTS.idFromName(id)).fetch(
-          new Request('https://vault/admin-stats')
-        );
-        if (answer.ok) {
-          const stats = await answer.json();
-          row.bytes = Number(stats.ctChars) || 0;
-          row.version = Number(stats.vaultVersion) || 0;
-          row.sessions = Number(stats.sessions) || 0;
-          row.createdAt = stats.createdAt ?? null;
-          row.updatedAt = stats.updatedAt ?? null;
-          row.plan = stats.plan ?? null;
-          bytes += row.bytes;
-        } else {
-          row.error = true;
-        }
-      } catch {
-        row.error = true;
-      }
-      accounts.push(row);
-    }
-
-    const invites = await (await stub.fetch(new Request('https://registry/invites'))).json();
-    const settings = await (await stub.fetch(new Request('https://registry/settings'))).json();
-
-    return json({
-      accounts,
-      totals: { accounts: ids.length, bytes, max: list.max ?? settings.max ?? null },
-      invites: invites.invites ?? [],
-      required: Boolean(invites.required),
-      settings: settings.settings ?? {},
-      max: settings.max ?? list.max ?? null
-    });
-  }
-
-  /* Everything else is the registry's own answer, forwarded as it came. */
-  const target = new URL(`https://registry${path.replace('/admin', '')}`);
-  const body = request.method === 'GET' ? undefined : await request.text();
-
-  return stub.fetch(
-    new Request(target, {
-      method: request.method,
-      headers: { 'content-type': 'application/json' },
-      body
-    })
-  );
-}
-
 async function handleApi(request, env, url) {
   const path = url.pathname.slice(API_PREFIX.length);
 
   if (path === '/health') return json({ ok: true, version: VERSION });
-
-  if (path === '/admin' || path.startsWith('/admin/')) return handleAdmin(request, env, path);
 
   if (path === ICON_PATH) {
     return limited(env, ROUTE_CLASS[ICON_PATH], request, () =>

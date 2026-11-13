@@ -307,6 +307,9 @@ export class Vault {
        never reaches this point, so a full registry cannot lock out the person who already has
        one, and a retried first sync cannot consume a second slot. */
     const registry = this.env?.REGISTRY;
+    /* How the slot was granted: `owner` for the first account on a server, `invite` for a code, `direct` otherwise.
+       The operator view reads it back; nothing here decides anything. */
+    let via = 'direct';
     if (registry) {
       const stub = registry.get(registry.idFromName('registry'));
       /* The code is turned into a digest here, so the registry never holds a code that could be used. An absent
@@ -323,6 +326,15 @@ export class Vault {
           body: JSON.stringify({ accountId, inviteHash })
         })
       );
+      if (reserved.ok) {
+        try {
+          const answer = await reserved.clone().json();
+          via = typeof answer.via === 'string' ? answer.via : via;
+        } catch {
+          /* An answer without a reason still reserves the slot; the reason stays unknown. */
+        }
+      }
+
       if (!reserved.ok) {
         /* The Registry's answer is the reason this creation wrote nothing: a full server, a missing code, a spent
            one or an expired one. They are told apart because each asks the person for something different. */
@@ -357,6 +369,7 @@ export class Vault {
       authSecret,
       plan,
       units,
+      via,
       createdAt: now,
       lastSeenAt: now,
       paidUntil: null
@@ -521,6 +534,7 @@ export class Vault {
       token,
       expiresAt,
       plan: account.plan ?? 'free',
+      via: account.via ?? 'direct',
       units: account.units ?? 0,
       paidUntil: account.paidUntil ?? null,
       /* The account's own dates, in milliseconds. They are only ever sent in this answer, which
@@ -732,6 +746,7 @@ export class Vault {
 
     return json({
       plan: account.plan ?? 'free',
+      via: account.via ?? 'direct',
       units: account.units ?? 0,
       createdAt: account.createdAt ?? null,
       lastSeenAt: account.lastSeenAt ?? null,

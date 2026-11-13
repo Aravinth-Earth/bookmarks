@@ -1190,7 +1190,8 @@ test('admin stats carry dates, sizes and counts, and no secret or blob', async (
     'sessions',
     'units',
     'updatedAt',
-    'vaultVersion'
+    'vaultVersion',
+    'via'
   ]);
 
   assert.equal(body.plan, 'free');
