@@ -11,7 +11,8 @@
     "check": "node scripts/check.mjs",
     "deploy": "node scripts/check.mjs && wrangler deploy",
     "test:e2e": "playwright test",
-    "test:e2e:install": "playwright install chromium"
+    "test:e2e:install": "playwright install chromium",
+    "package:extension": "node scripts/package-extension.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",
