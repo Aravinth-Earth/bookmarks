@@ -28,8 +28,9 @@ Nothing in the suite names a path on the machine it was written on:
 
 `wrangler dev` writes into `.wrangler/e2e-state-<port>`, which is ignored by git and removed before each run: the
 registry allows one account on this machine, so a creation test would otherwise meet a full server on its second pass
-and fail for a reason that has nothing to do with the code. Pointed at someone else's server (`E2E_BASE_URL`), nothing
-is removed.
+and fail for a reason that has nothing to do with the code. The account cap is raised to eight at the same time, because
+the deployed server takes one account and more than one test needs a server that will take one. Pointed at someone else's
+server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
 
 ## What is covered
 
@@ -44,10 +45,11 @@ is removed.
 | `ux.spec.mjs` | first run, refusals, search and sort, lock and unlock, settings, selection, undo, import and export |
 | `perf-security.spec.mjs` | same-origin-only cold load, timings, security headers, sealed bytes, XSS through a name, lock hygiene |
 | `invite.spec.mjs` | a server that needs a code: the field, the three refusals, the code never kept, and a phone/monitor fit |
+| `two-devices.spec.mjs` | two real profiles, one phrase: the sealed backup carried across, a visit counted in each, the total added in both directions and again without climbing |
 | `theme.spec.mjs` | dark regardless of the system setting, a light theme saved by an older build, and the picker |
 | `setup.spec.mjs` | the install link, the consent question, the defaults, "keep it off", and that the question is asked once |
 
-Eighty-one tests; a full run takes about five minutes on four workers, sixteen on one (`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance budgets are the one thing to re-read on an idle machine.
+Eighty-two tests; a full run takes about five minutes on four workers, sixteen on one (`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance budgets are the one thing to re-read on an idle machine.
 
 ## When a requirement is not met
 

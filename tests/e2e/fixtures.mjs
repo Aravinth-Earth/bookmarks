@@ -26,6 +26,34 @@ export function profileDir() {
 }
 
 /**
+ * Turn sync on through the sheet.
+ *
+ * The phrase is only asked for when this page does not already hold it: a vault created in this session has it, so the
+ * prompt is a question that may not be asked — both cases have to work, and this waits for whichever happens.
+ */
+export async function turnOnSync(page, phrase) {
+  const modal = await openSettings(page);
+  await (await settingsItem(modal, /^Sync: off/)).click();
+
+  const prompt = page.locator('#modal-root .phrase-input');
+  const asked = await prompt
+    .waitFor({ state: 'visible', timeout: 3000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (asked) {
+    await prompt.fill(phrase);
+    await page.locator('#modal-root').getByRole('button', { name: 'Turn on sync' }).click();
+  }
+}
+
+/** Ask the server for the other device's copy now, rather than waiting for the next change. */
+export async function syncNow(page) {
+  const modal = await openSettings(page);
+  await (await settingsItem(modal, /^Sync now/)).click();
+}
+
+/**
  * A real Chromium with (or without) the extension.
  *
  * `channel: 'chromium'` is what makes headless carry an extension: the headless shell has no extension machinery at

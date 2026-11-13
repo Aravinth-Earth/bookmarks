@@ -16,7 +16,8 @@ import {
   expect,
   openSettings,
   settingsItem,
-  test
+  test,
+  turnOnSync
 } from './fixtures.mjs';
 
 /** Everything a page could keep a string in, as one string. */
@@ -47,28 +48,6 @@ async function everythingStored(page) {
 
     return `${local}|${session}|${records}|${location.href}`;
   });
-}
-
-/**
- * Turn sync on through the sheet.
- *
- * The phrase is only asked for when this page does not already hold it: a vault created in this session has it, so
- * the prompt is a question that may not be asked — both cases have to work, and this waits for whichever happens.
- */
-async function turnOnSync(page, phrase) {
-  const modal = await openSettings(page);
-  await (await settingsItem(modal, /^Sync: off/)).click();
-
-  const prompt = page.locator('#modal-root .phrase-input');
-  const asked = await prompt
-    .waitFor({ state: 'visible', timeout: 3000 })
-    .then(() => true)
-    .catch(() => false);
-
-  if (asked) {
-    await prompt.fill(phrase);
-    await page.locator('#modal-root').getByRole('button', { name: 'Turn on sync' }).click();
-  }
 }
 
 test('a server that needs a code asks for one, and three refusals read as three sentences', async ({ page }) => {
