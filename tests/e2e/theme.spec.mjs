@@ -1,4 +1,12 @@
-import { addBookmark, createVault, expect, openSettings, settingsItem, test } from './fixtures.mjs';
+import {
+  addBookmark,
+  createVault,
+  expect,
+  openSettings,
+  settingsItem,
+  test,
+  unlockVault
+} from './fixtures.mjs';
 
 /** The page's own background, as three numbers. */
 async function bodyColour(page) {
@@ -45,4 +53,33 @@ test('the theme picker does not offer a light theme', async ({ page }) => {
   expect(themes, 'a theme picker in the sheet').toBeTruthy();
   expect(themes.length, 'themes offered').toBeGreaterThan(3);
   expect(themes, 'themes offered').not.toContain('light');
+});
+
+test('the window colour is the theme background, on a reload and when the picker changes it', async ({
+  page
+}) => {
+  const phrase = await createVault(page);
+  await addBookmark(page, { url: 'https://e2e.local/one', name: 'One' });
+
+  /* Saved before the load: the colour is read from the theme after the stylesheet applies, so a
+     theme that is not the default paints its own background rather than the constant in the head. */
+  await page.evaluate(() => localStorage.setItem('site-theme', 'nord'));
+  await page.reload();
+
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'nord');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#2e3440');
+
+  /* The saved theme survives into the vault, and the picker's change repaints the window colour. */
+  await unlockVault(page, phrase);
+  await openSettings(page);
+  await page.evaluate(() => {
+    const select = [...document.querySelectorAll('#modal-root select')].find((node) =>
+      [...node.options].some((option) => option.value === 'teal')
+    );
+    select.value = 'teal';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'teal');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#0b1221');
 });
