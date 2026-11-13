@@ -21,6 +21,7 @@ import {
   expect,
   lockVault,
   openSettings,
+  settingsItem,
   test,
   visit
 } from './fixtures.mjs';
@@ -474,6 +475,74 @@ test('the collected section draws a table header it also exposes as column heade
   for (const link of links) {
     expect(link.target).toBe('_blank');
     expect(link.rel).toContain('noopener');
+  }
+});
+
+/* --------------------------------------------------------------- the settings sheet */
+
+test('the settings sheet names every control, including the collected-link ones', async ({ page }) => {
+  await createVault(page);
+  await addBookmark(page, { url: 'https://example.com/one', name: 'One' });
+  await openSettings(page);
+
+  /* The sheet is one long form of switches, selects and rows; none of it may be announced as an unnamed
+     control, which is what a keyboard or screen-reader user meets first. */
+  expect(await unnamedControls(page), 'unnamed controls in Settings').toEqual([]);
+
+  const names = (await axTree(page)).map((node) => node.name);
+  for (const wanted of [
+    'Record each site as',
+    'Group by domain',
+    'Include private windows',
+    'Keep collected links for',
+    'Keep at most',
+    'New addresses a day',
+    'Show rows seen at least',
+    'Add a site rule',
+    'Exclude a site or a page'
+  ]) {
+    expect(
+      names.some((name) => name.startsWith(wanted)),
+      `Settings names "${wanted}" (saw: ${names.filter((name) => name !== '').slice(0, 20).join(' | ')})`
+    ).toBe(true);
+  }
+});
+
+test('the site-rule and exclusion dialogs name their field and their scope, and give focus back', async ({
+  page
+}) => {
+  await createVault(page);
+  await addBookmark(page, { url: 'https://example.com/one', name: 'One' });
+
+  const cases = [
+    {
+      item: /^Add a site rule/,
+      title: 'Record a site differently',
+      field: 'Site',
+      scope: 'How to record this site'
+    },
+    {
+      item: /^Exclude a site or a page/,
+      title: 'Never collect this',
+      field: 'Site, hostname or path',
+      scope: 'What to exclude'
+    }
+  ];
+
+  for (const { item, title, field, scope } of cases) {
+    const modal = await openSettings(page);
+    await (await settingsItem(modal, item)).click();
+
+    const dialog = page.getByRole('dialog', { name: title });
+    await expect(dialog, `${title} is a named dialog`).toBeVisible();
+    await expect(page.getByRole('textbox', { name: field }), `${title} focuses its field`).toBeFocused();
+    await expect(page.getByRole('combobox', { name: scope }), `${title} names its scope`).toBeVisible();
+    expect(await unnamedControls(page), `unnamed controls in ${title}`).toEqual([]);
+
+    /* Escape leaves the dialog and puts the keyboard back on the Settings button that started it. */
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(page.locator('#settings-button'), `${title} gives focus back`).toBeFocused();
   }
 });
 
