@@ -196,12 +196,18 @@ test('a browser bookmark file imports, decoding entities and keeping the added d
   assert.equal(tools.name, "Tools 'n' things");
 });
 
+test('a name with a formed tag inside it loses every tag, not only the first pass', () => {
+  const html = '<DL><DT><A HREF="https://nested.example/"><<b>Nested</b></A></DL>';
+  const { document } = importBrowserBookmarks(html, now);
+  assert.equal(document.bookmarks[0].name, 'Nested');
+});
+
 test('a browser export re-imports to the same two bookmarks', () => {
   const original = importPlain(LEGACY, now).document;
   const html = exportBrowserBookmarks(original);
 
   assert.match(html, /^<!DOCTYPE NETSCAPE-Bookmark-file-1>/);
-  assert.ok(html.includes('https://example.com/'));
+  assert.match(html, /<A HREF="https:\/\/example\.com\/"/i);
 
   const again = importBrowserBookmarks(html, now);
   assert.equal(again.statistics.imported, 3);
