@@ -6,9 +6,9 @@ sync service is the paid part, and it is still being built.
 
 The vault is sealed in the browser with AES-256-GCM under a key derived from a 13-word phrase.
 The Worker holds one ciphertext blob per account and cannot read any of it; beside the blob it
-keeps an account record — creation and last-seen dates, plan, sealed size, and the devices
-signed in. Adding, editing, deleting, searching and importing all work with no network at all;
-sync only ever moves the sealed blob.
+keeps an account record — creation and last-seen dates, plan, sealed size, and the sessions signed
+in on each device. Adding, editing, deleting, searching and importing all work with no network at
+all; sync only ever moves the sealed blob.
 
 ## What this is not
 
@@ -96,14 +96,23 @@ A branch build only uploads a preview version; it never takes production traffic
 
 ## Turning on sync
 
-The server stores one sealed blob per account and an account record of dates, plan, size and
-signed-in devices; it cannot read the blob. There is no signup form and no provisioning step:
-the first sync that names an account creates it, first write wins, from the same phrase-derived
-secrets the login uses.
+The server stores one sealed blob per account and an account record of dates, plan, size, the
+sessions signed in on each device, and how the slot was granted; it cannot read the blob. There is
+no signup form and no provisioning step: the first sync that names an account creates it, first
+write wins, from the same phrase-derived secrets the login uses. A session names only the kind of
+client — phone, computer or unknown — never a user agent.
 
 Open the app, create a vault (or unlock one), then Settings → **Sync**. The first run creates
-the account and pushes this device's vault; another device that enters the same phrase pulls it
-and merges.
+the account and pushes this device's vault. A device that already holds a vault merges what the
+server has; a device that holds nothing is asked whether to load the server's copy, and loading
+turns sync on and brings the bookmarks across.
+
+When the server is set to require one, the same sheet asks for an invite code. A code opens one
+account and is spent doing it; a refused, used or expired code each reads as its own sentence, and
+the code is not kept. Whether creation needs a code is `INVITES_REQUIRED` in `wrangler.toml`.
+
+Each device counts its own opens, and a merge adds the counts up per device rather than keeping the
+larger number. Two browsers on one phrase settle on one total, and a second merge does not raise it.
 
 Creation is open but bounded: one Registry object caps how many accounts may exist. The cap
 is **1 while the service is being tested** — set in `wrangler.toml` as `MAX_ACCOUNTS`, falling
@@ -118,9 +127,9 @@ network, and the bookmark list is never deleted because time passed. Self-hostin
 free as well; the code is AGPL-3.0-or-later.
 
 Hosted sync is the paid part of the service, and it is not finished. It keeps one sealed copy per
-account on this server, so a second device that enters the same phrase can pull it. Today a few
-testers are invited and nobody pays; when it opens, a subscription buys the hosted copy and the
-space it uses, not the vault.
+account on this server, so a device that holds nothing can load it after entering the phrase.
+Today a few testers are invited and nobody pays; when it opens, a subscription buys the hosted copy
+and the space it uses, not the vault.
 
 | Plan | Hosted copy | Size | How it is chosen |
 |---|---|---|---|
