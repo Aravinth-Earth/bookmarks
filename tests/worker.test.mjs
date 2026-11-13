@@ -494,12 +494,16 @@ test('the app answers on its own host and nowhere else', async () => {
   const onApp = await worker.fetch(new Request('https://bookmarks.332321.xyz/'), harness().env);
   assert.equal(onApp.status, 200);
 
-  /* The site's own host is not routed here any more, so this Worker is never asked about it; if it is, it refuses
-     rather than answering with the app. No redirect stands in for a retired address: one origin, one vault. */
-  for (const host of ['www.332321.xyz', '332321.xyz']) {
-    const elsewhere = await worker.fetch(new Request(`https://${host}/`), harness().env);
-    assert.equal(elsewhere.status, 421);
-    assert.deepEqual(await elsewhere.json(), { error: 'wrong_host' });
+  /* The host that used to carry this app (`b.`), the site's host, and the apex are not routed here any
+     more, so this Worker is never asked about them; if it is, it refuses rather than answering with the
+     app — including under the old `/w/bookmarks/` path. No redirect stands in for a retired address: one
+     origin, one vault. */
+  for (const host of ['b.332321.xyz', 'www.332321.xyz', '332321.xyz']) {
+    for (const path of ['/', '/w/bookmarks/']) {
+      const elsewhere = await worker.fetch(new Request(`https://${host}${path}`), harness().env);
+      assert.equal(elsewhere.status, 421, `${host}${path}`);
+      assert.deepEqual(await elsewhere.json(), { error: 'wrong_host' });
+    }
   }
 
   /* The dev server is loopback, which is the one other host allowed. */
