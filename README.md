@@ -105,7 +105,9 @@ client — phone, computer or unknown — never a user agent.
 Open the app, create a vault (or unlock one), then Settings → **Sync**. The first run creates
 the account and pushes this device's vault. A device that already holds a vault merges what the
 server has; a device that holds nothing is asked whether to load the server's copy, and loading
-turns sync on and brings the bookmarks across.
+turns sync on and brings the bookmarks across. If the server cannot be asked — offline, or the
+sign-in limiter refusing — the device stays local and says so, rather than opening an empty list
+with no explanation.
 
 When the server is set to require one, the same sheet asks for an invite code. A code opens one
 account and is spent doing it; a refused, used or expired code each reads as its own sentence, and
