@@ -20,7 +20,7 @@ import {
   recordUses,
   togglePin,
   updateBookmark,
-  useCount
+  useSplit
 } from './bookmarks.js';
 import {
   deriveAccount,
@@ -1708,10 +1708,11 @@ function rowFor(bookmark) {
      one host read as three identical rows. */
   const host = el('span', { class: 'row-host', text: addressLabel(bookmark.url) });
 
+  const split = useSplit(bookmark, deviceId());
   const clicks = el('span', {
     class: 'clicks',
-    text: String(useCount(bookmark)),
-    'aria-label': `${useCount(bookmark)} uses`
+    text: String(split.total),
+    'aria-label': splitLabel(split)
   });
 
   const when = el('span', { class: 'row-when', text: lastUsedLabel(bookmark) });
@@ -1735,6 +1736,23 @@ function lastUsedLabel(bookmark) {
   const when = new Date(stamp);
   if (Number.isNaN(when.getTime())) return '—';
   return when.toLocaleDateString([], { day: 'numeric', month: 'short' });
+}
+
+/** The count as a screen reader hears it, with the two contributions when there are two. */
+function splitLabel({ here, elsewhere, total }) {
+  const noun = total === 1 ? 'use' : 'uses';
+  if (elsewhere === 0) return `${total} ${noun}`;
+  const other = elsewhere === 1 ? 'another device' : 'other devices';
+  return `${total} ${noun}: ${here} from this device, ${elsewhere} from ${other}`;
+}
+
+/** The count as the bookmark's own sheet says it: one sentence, so the total and its parts agree. */
+function splitSentence({ here, elsewhere, total }) {
+  if (total === 0) return 'No uses counted yet.';
+  const noun = total === 1 ? 'use' : 'uses';
+  if (elsewhere === 0) return `${total} ${noun} in total, all counted on this device.`;
+  const other = elsewhere === 1 ? 'another device' : 'other devices';
+  return `${total} ${noun} in total: ${here} counted on this device, ${elsewhere} on ${other}.`;
 }
 
 function render() {
@@ -2688,6 +2706,9 @@ function openEditModal(bookmark) {
         el('span', { class: 'field-label', text: 'Clicks from this list' }),
         clicks
       ]),
+      /* The row shows only the sum; this is where the sum is explained — what this device counted and what the
+         other devices that share the vault counted. */
+      el('p', { class: 'field-hint', text: splitSentence(useSplit(bookmark, deviceId())) }),
       el('label', { class: 'confirm-saved' }, [pinned, el('span', { text: 'Pin to the top' })]),
       el('label', { class: 'confirm-saved' }, [
         iconOnly,

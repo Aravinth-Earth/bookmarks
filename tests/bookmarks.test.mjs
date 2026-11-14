@@ -429,6 +429,26 @@ test('a bookmark counts every use: the ones opened here and the ones opened in t
   assert.equal(recordUses(both, bookmark.id, 'device-two', 3), both, 'and the same slot twice is not');
 });
 
+test('a count splits into what this device saw and what the others saw', async () => {
+  const { addBookmark, recordUses, useSplit } = await import('../public/bookmarks.js');
+
+  const document = { schema: 1, bookmarks: [], tombstones: [], prefs: { iconOnly: false } };
+  const { document: added, bookmark } = addBookmark(document, { url: 'https://a.example/x', name: 'A' });
+  assert.deepEqual(useSplit(bookmark, 'device-one'), { here: 0, elsewhere: 0, total: 0 });
+
+  const counted = recordUses(added, bookmark.id, 'device-one', 4);
+  assert.deepEqual(useSplit(counted.bookmarks[0], 'device-one'), { here: 4, elsewhere: 0, total: 4 });
+
+  /* The same vault read from either device: the total is shared, the split is not. */
+  const both = recordUses(counted, bookmark.id, 'device-two', 3);
+  assert.deepEqual(useSplit(both.bookmarks[0], 'device-one'), { here: 4, elsewhere: 3, total: 7 });
+  assert.deepEqual(useSplit(both.bookmarks[0], 'device-two'), { here: 3, elsewhere: 4, total: 7 });
+
+  /* The old single number and the old unnamed slot belong to the device asking. */
+  const legacy = { ...both.bookmarks[0], uses: { legacy: 2, other: 1 }, clickCount: 5 };
+  assert.deepEqual(useSplit(legacy, 'device-one'), { here: 7, elsewhere: 1, total: 8 });
+});
+
 test('a merge adds two devices\' slots and keeps the larger number inside one slot', async () => {
   const { mergeBookmark, useCount } = await import('../public/bookmarks.js');
 

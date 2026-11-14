@@ -287,6 +287,24 @@ export function useCount(bookmark) {
   return (bookmark.clickCount ?? 0) + opened;
 }
 
+/**
+ * How a bookmark's uses divide between this profile and the other ones that share the vault.
+ *
+ * The device ids are random and name nothing, so the honest split is two-way: what this profile
+ * counted, and what every other slot counted. The legacy single number belongs to the device whose
+ * build wrote it, which is the one asking, so it counts as "here" and so does the old unnamed slot.
+ */
+export function useSplit(bookmark, device) {
+  const uses = usesOf(bookmark);
+  let here = bookmark?.clickCount ?? 0;
+  let elsewhere = 0;
+  for (const [id, count] of Object.entries(uses)) {
+    if (id === device || id === LEGACY_DEVICE) here += count;
+    else elsewhere += count;
+  }
+  return { here, elsewhere, total: here + elsewhere };
+}
+
 /** Change one bookmark. A URL change is re-normalised and re-checked for duplicates. */
 export function updateBookmark(document, id, patch, now = Date.now) {
   assertDocument(document, 'the document');
