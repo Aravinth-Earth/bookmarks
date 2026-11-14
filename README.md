@@ -1,7 +1,8 @@
 # Bookmarks
 
 An end-to-end encrypted, local-first bookmark vault, served at
-<https://bookmarks.332321.xyz/>. The local vault is free for everyone, for good; the hosted
+<https://bookmarks.332321.xyz/>. There is a page describing it, with screenshots, at
+<https://www.332321.xyz/w/bookmarks/>. The local vault is free for everyone, for good; the hosted
 sync service is the paid part, and it is still being built.
 
 The vault is sealed in the browser with AES-256-GCM under a key derived from a 13-word phrase.
