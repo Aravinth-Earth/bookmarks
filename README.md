@@ -111,7 +111,9 @@ with no explanation.
 
 When the server is set to require one, the same sheet asks for an invite code. A code opens one
 account and is spent doing it; a refused, used or expired code each reads as its own sentence, and
-the code is not kept. Whether creation needs a code is `INVITES_REQUIRED` in `wrangler.toml`.
+the code is not kept. An account that already exists is never asked for one — the code is for the
+creation that opens the account, and a reinstall or a second device signs in instead. Whether
+creation needs a code is `INVITES_REQUIRED` in `wrangler.toml`.
 
 Each device counts its own opens, and a merge adds the counts up per device rather than keeping the
 larger number. Two browsers on one phrase settle on one total, and a second merge does not raise it.
