@@ -43,18 +43,51 @@ export class SyncError extends Error {
 }
 
 /**
+ * Everything known about an error the page has no sentence for.
+ *
+ * The exact name, code and HTTP status are kept: a clean sentence that hides what failed is how
+ * "no connection" came to stand for a copy that could not be opened. The message is rendered as
+ * text, never as markup.
+ */
+function describeDetail(error) {
+  const code = typeof error?.code === 'string' ? error.code : '';
+  const name = typeof error?.name === 'string' ? error.name : '';
+  const message = typeof error?.message === 'string' ? error.message.trim() : '';
+  const status = Number(error?.status) || 0;
+  const bits = [code || name || 'unknown error'];
+  if (status) bits.push(`HTTP ${status}`);
+  if (message) bits.push(message);
+  return bits.join(' · ');
+}
+
+/**
  * What a failed sync means to the person reading about it.
  *
  * The page owns the words it shows for a refusal that needs an address in it, so the cap case
  * carries no `message`: it is the only failure with its own persistent notice. Every other case
  * returns one sentence that a wrong phrase, a dead connection, an account that does not exist and
  * a full server cannot share — those are different events and reading one as another is a lie.
+ * Anything this map does not know is shown as itself, with its own name and status, rather than
+ * being folded into the network sentence.
  */
 export function describeSyncFailure(error) {
-  const code = typeof error?.code === 'string' ? error.code : 'NETWORK';
+  const code = typeof error?.code === 'string' ? error.code : '';
   const status = Number(error?.status) || 0;
 
   switch (code) {
+    case 'NETWORK':
+      return {
+        kind: 'network',
+        label: 'Offline',
+        message: 'No connection to the server. The vault still works on this device.'
+      };
+    case 'REMOTE_UNREADABLE':
+      return {
+        kind: 'unreadable',
+        label: 'Copy not opened',
+        message:
+          'The copy on the server could not be opened with this phrase. It may have been saved by an older version of the app.'
+      };
     case 'FULL':
       return { kind: 'cap', label: 'No new accounts' };
     /* A limiter is not a closed server: the same 429 means "not this second" here and "never
@@ -142,10 +175,20 @@ export function describeSyncFailure(error) {
         message: 'The server did not list the connected places.'
       };
     default:
+      /* A raw `fetch` rejection that did not pass through `request()` is still the network. Every
+         other unrecognised error is reported as itself — the name, the code and the status are what
+         make a report actionable, and "no connection" must not stand in for them. */
+      if (error?.name === 'TypeError') {
+        return {
+          kind: 'network',
+          label: 'Offline',
+          message: 'No connection to the server. The vault still works on this device.'
+        };
+      }
       return {
-        kind: 'network',
-        label: 'Offline',
-        message: 'No connection to the server. The vault still works on this device.'
+        kind: 'unknown',
+        label: 'Sync failed',
+        message: `Sync stopped: ${describeDetail(error)}. The vault still works on this device.`
       };
   }
 }
@@ -232,13 +275,23 @@ export class SyncClient {
     if (body !== undefined) headers['content-type'] = 'application/json';
     if (token) headers.authorization = `Bearer ${token}`;
 
-    const response = await this.fetch(`${this.base}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      credentials: 'same-origin',
-      cache: 'no-store'
-    });
+    let response;
+    try {
+      response = await this.fetch(`${this.base}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        credentials: 'same-origin',
+        cache: 'no-store'
+      });
+    } catch (error) {
+      /* The one failure that is the network and nothing else. Naming it here keeps every other
+         exception from being told as "no connection": a page that could not open a copy is not a
+         page that could not reach the server. */
+      const refused = new SyncError('NETWORK', 'No connection to the server.');
+      refused.cause = error;
+      throw refused;
+    }
 
     const payload = await response.json().catch(() => ({}));
 

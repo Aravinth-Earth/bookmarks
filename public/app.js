@@ -835,7 +835,9 @@ function handleSyncError(error) {
   /* A local-first vault retries on its own, so the same quiet failure is announced once. */
   if (failure.message !== lastSyncNotice) {
     lastSyncNotice = failure.message;
-    announce(failure.message, { duration: failure.kind === 'size' ? 8000 : 6000 });
+    announce(failure.message, {
+      duration: failure.kind === 'size' || failure.kind === 'unreadable' ? 8000 : 6000
+    });
   }
 }
 
@@ -850,13 +852,23 @@ function authMaterial() {
 /**
  * Whether a blob sealed before the version was bound may still be opened.
  *
- * This device answers yes only while its own copy is in the old shape: once it has written a
- * bound blob, the vault has moved, and a server that later serves an unmarked ciphertext is
- * serving something older than what this device already has. A device whose first read is the
- * old shape still opens it, which is what keeps an existing vault readable across the change.
+ * This device answers yes while its own copy is in the old shape: once it has written a bound
+ * blob, the vault has moved, and a server that later serves an unmarked ciphertext is serving
+ * something older than what this device already has.
+ *
+ * It also answers yes while the device holds nothing at all. An empty vault is a placeholder
+ * written seconds ago, not data a rollback could lose, and a device that has just accepted a
+ * phrase is the one that has to be able to open a server copy sealed before the binding — the
+ * alternative is a person whose old vault exists on the server and cannot be opened anywhere.
  */
 function legacyBlobAllowed() {
-  return state.sealed?.at === undefined;
+  return state.sealed?.at === undefined || holdsNothing();
+}
+
+/** True while this device's own copy is the empty document a new phrase starts with. */
+function holdsNothing() {
+  const document = state.document;
+  return !document || ((document.bookmarks?.length ?? 0) === 0 && (document.tombstones?.length ?? 0) === 0);
 }
 
 /** The number a device's own copy was sealed at, falling back to its stored version. */
@@ -934,9 +946,19 @@ async function syncNow() {
 
     if (remote) {
       state.remoteVersion = remote.version;
-      const remoteDocument = await openVault(state.key, remote, state.accountId, remote.version, {
-        allowLegacy: legacyBlobAllowed()
-      });
+      let remoteDocument;
+      try {
+        remoteDocument = await openVault(state.key, remote, state.accountId, remote.version, {
+          allowLegacy: legacyBlobAllowed()
+        });
+      } catch {
+        /* The bytes arrived and this page could not open them. That is not a lost connection, and
+           the difference is the whole of why this error exists. */
+        throw new SyncError(
+          'REMOTE_UNREADABLE',
+          'The copy on the server could not be opened with this phrase.'
+        );
+      }
       const { document: merged } = mergeDocuments(state.document, remoteDocument);
 
       if (fingerprint(merged) !== fingerprint(state.document)) {
@@ -962,13 +984,21 @@ async function syncNow() {
     if (result.conflict) {
       state.remoteVersion = result.currentVersion;
       if (result.current) {
-        const conflictDocument = await openVault(
-          state.key,
-          result.current,
-          state.accountId,
-          result.current.version,
-          { allowLegacy: legacyBlobAllowed() }
-        );
+        let conflictDocument;
+        try {
+          conflictDocument = await openVault(
+            state.key,
+            result.current,
+            state.accountId,
+            result.current.version,
+            { allowLegacy: legacyBlobAllowed() }
+          );
+        } catch {
+          throw new SyncError(
+            'REMOTE_UNREADABLE',
+            'The copy on the server could not be opened with this phrase.'
+          );
+        }
         const { document: merged } = mergeDocuments(state.document, conflictDocument);
         state.document = merged;
         absorbed = true;
