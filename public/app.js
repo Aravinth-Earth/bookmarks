@@ -1314,7 +1314,11 @@ async function offerServerVault() {
   try {
     exists = await sync.accountExists(state.accountId);
   } catch {
-    return; /* Offline, or the question could not be asked: stay local, say nothing. */
+    /* Offline, throttled, or the question could not be asked. Stay local — but say so: an empty
+       list with no explanation is the state this prompt exists to prevent, and a silent version of
+       it is worse than the question never being asked. */
+    announce('Could not ask the server about this vault. This device starts empty.');
+    return;
   }
   if (!exists) return;
 
