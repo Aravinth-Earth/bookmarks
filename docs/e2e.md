@@ -47,7 +47,7 @@ server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
 | `ux.spec.mjs` | first run, refusals, search and sort, lock and unlock, settings, selection, undo, import and export |
 | `perf-security.spec.mjs` | same-origin-only cold load, timings, security headers, sealed bytes, XSS through a name, lock hygiene |
 | `invite.spec.mjs` | a server that needs a code: the field, the three refusals, the code never kept, and a phone/monitor fit |
-| `two-devices.spec.mjs` | two real profiles, one phrase: the sealed backup carried across, a visit counted in each, the total added in both directions and again without climbing |
+| `two-devices.spec.mjs` | two real profiles, one phrase: the sealed backup carried across, a visit counted in each, the total added in both directions and again without climbing, and each side's own share in the bookmark's sheet |
 | `new-device.spec.mjs` | a device that holds nothing: the phrase, the server copy offered, loading it, starting empty, and what is said when the server cannot answer |
 | `theme.spec.mjs` | dark regardless of the system setting, a light theme saved by an older build, and the picker |
 | `setup.spec.mjs` | the install link, the consent question, the defaults, "keep it off", and that the question is asked once |

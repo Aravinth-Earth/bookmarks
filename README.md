@@ -115,6 +115,8 @@ the code is not kept. Whether creation needs a code is `INVITES_REQUIRED` in `wr
 
 Each device counts its own opens, and a merge adds the counts up per device rather than keeping the
 larger number. Two browsers on one phrase settle on one total, and a second merge does not raise it.
+A bookmark's own sheet says how much of its count was counted here and how much on the other
+devices — the row shows the sum, the sheet explains it.
 
 Creation is open but bounded: one Registry object caps how many accounts may exist. The cap
 is **1 while the service is being tested** — set in `wrangler.toml` as `MAX_ACCOUNTS`, falling
