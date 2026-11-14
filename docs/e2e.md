@@ -1,7 +1,8 @@
 # End-to-end tests
 
 Real browser, real extension, real Worker. Playwright drives a Chromium profile with `extension/` loaded and the app
-served by `wrangler dev`; nothing is mocked except the pages the tests ask the browser to open.
+served by `wrangler dev`; nothing is mocked except the pages the tests ask the browser to open, and — in
+`invite.spec.mjs` — the server's refusal answers, because the local server takes no code.
 
 ## Running them
 
@@ -37,6 +38,7 @@ server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
 | File | Flows |
 |---|---|
 | `vault.spec.mjs` | create a vault, add, search, lock/unlock, duplicate refusal, wrong phrase, pills vs list, settings |
+| `shell.spec.mjs` | the app draws with its own stylesheets with the site blocked, the offline shell installs and reloads, and every icon and the manifest are served |
 | `collected.spec.mjs` | off by default, capture, repeat visits, approval, the vault's own count, batch add, dismiss, exclusion, per-site rule, clear, visit floor |
 | `edge.spec.mjs` | non-web pages, search narrowing the section, a `javascript:` address, and a browser with no extension |
 | `roundtrip.spec.mjs` | a vault, a collected page, a sealed backup downloaded, the device wiped, the same vault restored |
@@ -49,7 +51,9 @@ server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
 | `theme.spec.mjs` | dark regardless of the system setting, a light theme saved by an older build, and the picker |
 | `setup.spec.mjs` | the install link, the consent question, the defaults, "keep it off", and that the question is asked once |
 
-Eighty-two tests; a full run takes about five minutes on four workers, sixteen on one (`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance budgets are the one thing to re-read on an idle machine.
+Eighty-seven tests in thirteen files; a full run takes about eight minutes on four workers, about twenty on one
+(`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance
+budgets are the one thing to re-read on an idle machine.
 
 ## When a requirement is not met
 

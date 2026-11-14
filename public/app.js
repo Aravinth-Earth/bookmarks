@@ -3248,9 +3248,11 @@ function openSettings() {
     return button;
   };
 
-  const askForRule = async ({ title, fieldLabel, placeholder, options, confirmLabel }) => {
+  const askForRule = async ({ title, fieldLabel, placeholder, options, selectLabel, confirmLabel }) => {
     const field = el('input', { type: 'text', placeholder, 'aria-label': fieldLabel });
-    const select = el('select', {}, options.map(([value, text]) => el('option', { value, text })));
+    /* The select has no visible label of its own — the dialog title is the question — so it carries
+       the same kind of name the field does, instead of being announced as "combo box" and nothing. */
+    const select = el('select', { 'aria-label': selectLabel }, options.map(([value, text]) => el('option', { value, text })));
     const sure = await askModal({ title, body: [field, select], confirmLabel });
     if (!sure) return null;
 
@@ -3270,6 +3272,7 @@ function openSettings() {
         ['domains', 'One row for the whole site'],
         ['addresses', 'Every page']
       ],
+      selectLabel: 'How to record this site',
       confirmLabel: 'Save'
     });
     if (answer === null) return;
@@ -3291,6 +3294,7 @@ function openSettings() {
         ['host', 'Exactly this hostname'],
         ['path', 'This hostname and this path']
       ],
+      selectLabel: 'What to exclude',
       confirmLabel: 'Exclude'
     });
     if (answer === null) return;
