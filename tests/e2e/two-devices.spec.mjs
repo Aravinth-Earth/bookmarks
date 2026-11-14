@@ -46,6 +46,26 @@ async function expectUses(page, name, expected) {
     .toBe(expected);
 }
 
+/**
+ * The bookmark's own sheet: the total, then what this device and the others each contributed.
+ *
+ * The count column carries the split in its accessible name; the sheet is where a sighted reader
+ * finds the same sentence. Both are read here so the two surfaces cannot drift apart.
+ */
+async function expectSplit(page, label, sentence) {
+  if ((await page.locator('#list').getAttribute('data-view')) !== 'list') {
+    await page.locator('#view-toggle').click();
+    await expect(page.locator('#list')).toHaveAttribute('data-view', 'list');
+  }
+
+  await expect(page.locator('#list .row[data-id] .clicks').first()).toHaveAttribute('aria-label', label);
+
+  await page.getByRole('button', { name: 'Edit Shared' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Edit bookmark' });
+  await expect(sheet).toContainText(sentence);
+  await sheet.getByRole('button', { name: 'Cancel' }).click();
+}
+
 test('what each browser counted is added up, and nothing is counted twice', async ({ page, context }, testInfo) => {
   /* Two devices reconcile in both directions, and the server's per-source sign-in budget can make
      one of those presses wait out a window. The work is the same; the clock is not. */
@@ -116,6 +136,18 @@ test('what each browser counted is added up, and nothing is counted twice', asyn
     /* A reading taken after the round trip: neither side invented a count. */
     await expectUses(page, 'Shared', 3);
     await expectUses(other, 'Shared', 3);
+
+    /* And each side says where its three came from: the same total, two different splits. */
+    await expectSplit(
+      page,
+      '3 uses: 2 from this device, 1 from another device',
+      '3 uses in total: 2 counted on this device, 1 on another device.'
+    );
+    await expectSplit(
+      other,
+      '3 uses: 1 from this device, 2 from other devices',
+      '3 uses in total: 1 counted on this device, 2 on other devices.'
+    );
   } finally {
     await second.close();
   }
