@@ -46,13 +46,13 @@ server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
 | `layout.spec.mjs` | overflow and column tracks at phone, tablet and desktop, pills, settings modal, bulk bar, 200% zoom, 320px reflow |
 | `ux.spec.mjs` | first run, refusals, search and sort, lock and unlock, settings, selection, undo, import and export |
 | `perf-security.spec.mjs` | same-origin-only cold load, timings, security headers, sealed bytes, XSS through a name, lock hygiene |
-| `invite.spec.mjs` | a server that needs a code: the field, the three refusals, the code never kept, and a phone/monitor fit |
+| `invite.spec.mjs` | a server that needs a code: the field, the three refusals, the code never kept, a phone/monitor fit, and an account that already exists turning sync on without one |
 | `two-devices.spec.mjs` | two real profiles, one phrase: the sealed backup carried across, a visit counted in each, the total added in both directions and again without climbing, and each side's own share in the bookmark's sheet |
 | `new-device.spec.mjs` | a device that holds nothing: the phrase, the server copy offered, loading it, starting empty, and what is said when the server cannot answer |
 | `theme.spec.mjs` | dark regardless of the system setting, a light theme saved by an older build, and the picker |
 | `setup.spec.mjs` | the install link, the consent question, the defaults, "keep it off", and that the question is asked once |
 
-Ninety tests in fourteen files; a full run takes about eight minutes on four workers, about twenty on one
+Ninety-one tests in fourteen files; a full run takes about eight minutes on four workers, about twenty on one
 (`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance
 budgets are the one thing to re-read on an idle machine.
 
