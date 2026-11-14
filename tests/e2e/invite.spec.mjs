@@ -12,9 +12,12 @@
 
 import {
   addBookmark,
+  closeSettings,
   createVault,
   expect,
+  launch,
   openSettings,
+  openVault,
   settingsItem,
   test,
   turnOnSyncPatiently
@@ -115,6 +118,52 @@ test('an open server never asks for a code, and sync turns on', async ({ page })
   const modal = await openSettings(page);
   await expect(modal.locator('[data-setting="sync-invite"]')).toHaveCount(0);
   await expect(await settingsItem(modal, /^Sync: on/)).toBeVisible();
+});
+
+test('an account that already exists turns sync on without a code and never tries to create one', async ({
+  page
+}) => {
+  test.setTimeout(420_000);
+
+  /* Device A creates the account on the open test server. */
+  const phrase = await createVault(page);
+  await addBookmark(page, { url: 'https://e2e.local/existing', name: 'Existing' });
+  await turnOnSyncPatiently(page, phrase);
+  await expect(page.locator('#vault-status')).toContainText(/Synced/i, { timeout: 30_000 });
+  await closeSettings(page);
+
+  /* Device B holds nothing and enters the same phrase. The account exists, so the sheet loads the
+     server's copy: no creation, no code field, and the creation route is never touched. */
+  const second = await launch();
+  try {
+    const other = await openVault(await second.context.newPage());
+
+    let creationAttempts = 0;
+    await other.route('**/api/a/*/account', (route) => {
+      creationAttempts += 1;
+      return route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'unexpected_creation' })
+      });
+    });
+
+    await other.locator('#phrase').fill(phrase);
+    await other.locator('#unlock-button').click();
+
+    const prompt = other.getByRole('dialog', { name: 'This vault is on the server' });
+    await expect(prompt, 'the account is found, so the copy is offered').toBeVisible({ timeout: 30_000 });
+    await prompt.getByRole('button', { name: 'Load from server' }).click();
+
+    await expect(other.locator('#vault-status')).toContainText(/Synced/i, { timeout: 60_000 });
+    expect(creationAttempts, 'an existing account is signed in to, never created again').toBe(0);
+
+    const modal = await openSettings(other);
+    await expect(modal.locator('[data-setting="sync-invite"]'), 'no code is asked for').toHaveCount(0);
+    await expect(await settingsItem(modal, /^Sync: on/), 'sync is on without a code').toBeVisible();
+  } finally {
+    await second.close();
+  }
 });
 
 test('the code field fits a phone and a monitor, and says what it is to a screen reader', async ({ page }) => {

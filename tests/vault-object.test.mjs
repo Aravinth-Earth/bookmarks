@@ -147,7 +147,7 @@ async function blind(harness, authSecret = ACCOUNT.authSecret) {
 }
 
 /** The full creation flow: ask for a nonce, sign it with the secret, and write the account. */
-async function provision(harness, authSecret = ACCOUNT.authSecret) {
+async function provision(harness, authSecret = ACCOUNT.authSecret, invite) {
   const challenge = await blind(harness, authSecret);
   if (challenge.status !== 428) return challenge;
 
@@ -155,7 +155,7 @@ async function provision(harness, authSecret = ACCOUNT.authSecret) {
   return read(
     await harness.vault.fetch(
       request('/account', {
-        body: { accountId: ACCOUNT.accountId, authSecret, proof }
+        body: { accountId: ACCOUNT.accountId, authSecret, proof, ...(invite === undefined ? {} : { invite }) }
       })
     )
   );
@@ -296,6 +296,49 @@ test('the registry is asked once for a retried first sync', async () => {
   await provision(harness);
 
   assert.deepEqual(harness.reserved, [ACCOUNT.accountId]);
+});
+
+test('a server that wants a code never asks a device whose account already exists', async () => {
+  const { hashCode } = await import('../src/invites.js');
+  const code = 'ABCD-EFGH-JKLM';
+  const digest = await hashCode(code);
+  const reserved = [];
+
+  /* The Registry as a server that requires codes behaves: an empty or wrong digest is refused,
+     the one live code reserves a slot and is spent. */
+  const registry = {
+    idFromName: (name) => ({ name }),
+    get: () => ({
+      fetch: async (request) => {
+        const body = await request.clone().json();
+        const headers = { 'content-type': 'application/json' };
+        if (body.inviteHash !== digest) {
+          return new Response(JSON.stringify({ error: 'invite_required' }), { status: 403, headers });
+        }
+        reserved.push(body.accountId);
+        return new Response(JSON.stringify({ ok: true, via: 'invite' }), { status: 200, headers });
+      }
+    })
+  };
+
+  const harness = object({ registry });
+
+  const noCode = await provision(harness);
+  assert.equal(noCode.status, 403);
+  assert.equal(noCode.body.error, 'invite_required');
+  assert.deepEqual(reserved, [], 'a refused creation spends no slot');
+
+  const withCode = await provision(harness, ACCOUNT.authSecret, code);
+  assert.equal(withCode.status, 201);
+  assert.equal((await harness.storage.get('account')).via, 'invite');
+  assert.deepEqual(reserved, [ACCOUNT.accountId]);
+
+  /* The same phrase on a second device: the account exists, so creation answers 200 before the
+     registry is asked. No code is needed, and no second slot is spent. */
+  const secondDevice = await provision(harness);
+  assert.equal(secondDevice.status, 200);
+  assert.equal(secondDevice.body.created, false);
+  assert.deepEqual(reserved, [ACCOUNT.accountId], 'the registry was not asked a second time');
 });
 
 test('a provisioning call cannot write into a differently named object', async () => {
