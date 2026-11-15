@@ -99,7 +99,7 @@ export class Registry {
     if (path === '/invites' && request.method === 'GET') return this.listInvites();
     if (path === '/invites/new' && request.method === 'POST') return this.createInvites(request);
     if (path === '/invites/revoke' && request.method === 'POST') return this.revokeInvite(request);
-    if (path === '/settings' && request.method === 'GET') return json({ settings: await this.settings(), max: await this.max() });
+    if (path === '/settings' && request.method === 'GET') return json({ settings: await this.settings(), max: await this.max(), invitesRequired: this.invitesRequired() });
     if (path === '/settings' && request.method === 'POST') return this.saveSettings(request);
     if (path === '/release' && request.method === 'POST') return this.release(request);
     /* Operator route: the ids the cap is counted from, for a Worker bound to this object. */

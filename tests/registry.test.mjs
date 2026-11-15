@@ -325,6 +325,16 @@ test('the cap can be set from the operator side, and lowering it deletes nothing
   assert.equal(list.body.ids.length, 2, 'and none was deleted');
 });
 
+test('the settings read says whether the gate is on, from the environment', async () => {
+  const off = harness({ INVITES_REQUIRED: 'false' });
+  const readOff = await json(await off.registry.fetch(new Request('https://registry/settings')));
+  assert.equal(readOff.body.invitesRequired, false);
+
+  const on = harness({ INVITES_REQUIRED: 'true' });
+  const readOn = await json(await on.registry.fetch(new Request('https://registry/settings')));
+  assert.equal(readOn.body.invitesRequired, true);
+});
+
 test('a revoked code is gone, and a spent one cannot be revoked', async () => {
   const { registry } = harness({ INVITES_REQUIRED: 'true' });
   const minted = await mint(registry, { count: 2 });

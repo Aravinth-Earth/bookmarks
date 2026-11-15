@@ -480,3 +480,14 @@ test('each invite failure tells the person what to do about it', () => {
     message: 'That invite code has expired.'
   });
 });
+
+test('a disabled account is its own error, not "no account" or a server failure', async () => {
+  const disabled = stub({
+    [`/api/a/${ACCOUNT.accountId}/challenge`]: [403, { error: 'account_disabled' }]
+  });
+
+  await assert.rejects(
+    () => new SyncClient({ fetch: disabled.fetch }).accountExists(ACCOUNT.accountId),
+    (error) => error instanceof SyncError && error.code === 'ACCOUNT_DISABLED'
+  );
+});

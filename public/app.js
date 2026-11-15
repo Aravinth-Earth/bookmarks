@@ -836,7 +836,10 @@ function handleSyncError(error) {
   if (failure.message !== lastSyncNotice) {
     lastSyncNotice = failure.message;
     announce(failure.message, {
-      duration: failure.kind === 'size' || failure.kind === 'unreadable' ? 8000 : 6000
+      duration:
+        failure.kind === 'size' || failure.kind === 'unreadable' || failure.kind === 'disabled'
+          ? 8000
+          : 6000
     });
   }
 }
@@ -1343,7 +1346,14 @@ async function offerServerVault() {
   let exists;
   try {
     exists = await sync.accountExists(state.accountId);
-  } catch {
+  } catch (error) {
+    if (error?.code === 'ACCOUNT_DISABLED') {
+      announce(
+        'This vault has been disabled by the administrator. Contact feedback@8alias.com.',
+        { duration: 8000 }
+      );
+      return;
+    }
     /* Offline, throttled, or the question could not be asked. Stay local — but say so: an empty
        list with no explanation is the state this prompt exists to prevent, and a silent version of
        it is worse than the question never being asked. */

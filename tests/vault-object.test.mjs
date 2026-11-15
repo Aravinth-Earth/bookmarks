@@ -81,6 +81,7 @@ function object(overrides = {}) {
 
   const env = {
     OWNER_ACCOUNT_ID: overrides.ownerId ?? '',
+    ADMIN_SECRET: overrides.adminSecret ?? 'test-admin-secret-0123456789',
     REGISTRY: overrides.registry ?? {
       idFromName: (name) => ({ name }),
       get: (id) => ({
@@ -136,6 +137,14 @@ function request(path, { method = 'POST', body, headers = {} } = {}) {
 
 async function read(response) {
   return { status: response.status, body: await response.json() };
+}
+
+function adminRequest(path, body, secret = 'test-admin-secret-0123456789') {
+  return request(path, {
+    method: 'POST',
+    body,
+    headers: { 'x-admin-secret': secret }
+  });
 }
 
 async function blind(harness, authSecret = ACCOUNT.authSecret) {
@@ -1227,6 +1236,7 @@ test('admin stats carry dates, sizes and counts, and no secret or blob', async (
     'capChars',
     'createdAt',
     'ctChars',
+    'disabled',
     'lastSeenAt',
     'paidUntil',
     'plan',
@@ -1237,6 +1247,7 @@ test('admin stats carry dates, sizes and counts, and no secret or blob', async (
     'via'
   ]);
 
+  assert.equal(body.disabled, null, 'a live account has no operator switch');
   assert.equal(body.plan, 'free');
   assert.equal(body.units, 0);
   assert.equal(body.vaultVersion, 1);
@@ -1292,4 +1303,83 @@ test('admin stats count live places only, and an empty object has no account', a
 
   const { body } = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
   assert.equal(body.sessions, 0, 'an expired place that has not been pruned is not counted');
+});
+
+/* ------------------------------------------------- the operator's switch */
+
+test('the operator can disable a vault, every account route refuses, and enable restores it', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+  const token = session.body.token;
+
+  const disabled = await read(
+    await harness.vault.fetch(adminRequest('/admin-disable', { reason: 'testing', by: 'operator' }))
+  );
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.disabled.reason, 'testing');
+
+  const stats = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(stats.body.disabled.reason, 'testing');
+
+  /* Every account-facing route answers the same 403, including a session that was valid a
+     moment ago, and creation cannot re-claim the account. */
+  for (const [label, response] of [
+    ['challenge', await harness.vault.fetch(request('/challenge'))],
+    ['login', await harness.vault.fetch(request('/login', { body: { proof: 'x' } }))],
+    ['sessions', await harness.vault.fetch(request('/sessions', { method: 'GET', headers: { authorization: `Bearer ${token}` } }))],
+    ['read', await harness.vault.fetch(request('/vault', { method: 'GET', headers: { authorization: `Bearer ${token}` } }))],
+    ['write', await harness.vault.fetch(request('/vault', { method: 'PUT', headers: { authorization: `Bearer ${token}` }, body: { baseVersion: 0, iv: IV, ct: CT } }))],
+    ['create', await harness.vault.fetch(request('/account', { body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret } }))]
+  ]) {
+    assert.equal(response.status, 403, label);
+    assert.equal((await response.json()).error, 'account_disabled', label);
+  }
+
+  const enabled = await read(await harness.vault.fetch(adminRequest('/admin-enable', {})));
+  assert.equal(enabled.status, 200);
+
+  const again = await loginAs(harness, 'desktop');
+  assert.equal(again.status, 200, 'the account works again');
+  const readBack = await read(
+    await harness.vault.fetch(request('/vault', { method: 'GET', headers: { authorization: `Bearer ${again.body.token}` } }))
+  );
+  assert.equal(readBack.status, 404, 'the vault is untouched by the switch; there is still no blob');
+});
+
+test('a wrong or missing operator secret changes nothing', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const wrong = await read(await harness.vault.fetch(adminRequest('/admin-disable', { reason: 'x' }, 'wrong-secret')));
+  assert.equal(wrong.status, 401);
+
+  const missing = await harness.vault.fetch(
+    request('/admin-disable', { body: { reason: 'x' } })
+  );
+  assert.equal(missing.status, 401);
+
+  const stats = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(stats.body.disabled, null);
+  assert.equal((await loginAs(harness, 'desktop')).status, 200);
+});
+
+test('the operator can delete a vault and free its slot, and a second call is a no-op', async () => {
+  const harness = object();
+  await provision(harness);
+  await loginAs(harness, 'desktop');
+
+  const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', { reason: 'ended' })));
+  assert.equal(removed.status, 200);
+  assert.equal(removed.body.ok, true);
+  assert.deepEqual([...harness.storage.raw.keys()], [], 'every account key is gone');
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the Registry slot is released');
+
+  const again = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
+  assert.equal(again.status, 200);
+  assert.equal(again.body.deleted, false);
+
+  const missing = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(missing.status, 404);
+  assert.deepEqual(harness.released, [ACCOUNT.accountId, ACCOUNT.accountId], 'release is idempotent');
 });

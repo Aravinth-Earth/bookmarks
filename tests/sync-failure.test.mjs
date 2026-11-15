@@ -104,3 +104,15 @@ test('an expired session asks for a sign-in rather than announcing a failure', (
   assert.equal(failure.kind, 'unauthorized');
   assert.equal(failure.message, undefined);
 });
+
+test('a disabled vault tells the person what happened and who to ask', () => {
+  const failure = describeSyncFailure(
+    new SyncError('ACCOUNT_DISABLED', 'This vault has been disabled by the administrator.', { status: 403 })
+  );
+
+  assert.equal(failure.kind, 'disabled');
+  assert.equal(failure.label, 'Vault disabled');
+  assert.match(failure.message, /disabled by the administrator/);
+  assert.match(failure.message, /feedback@8alias\.com/);
+  assert.doesNotMatch(failure.message, /No connection/);
+});

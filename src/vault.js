@@ -65,6 +65,10 @@ export const ACCOUNT_RETRY_MAX_MS = 30_000;
 
 const SOURCE_PREFIX = 'source:';
 const ATTEMPTS_KEY = 'attempts';
+/* The operator's switch. It lives beside the account, not inside the sealed blob: the server
+   has to read it before any proof is checked, and it must survive the vault being replaced. */
+const ADMIN_DISABLED_KEY = 'admin-disabled';
+const ADMIN_SECRET_HEADER = 'x-admin-secret';
 /* The Worker's digest of the caller's address. A malformed header is not a source. */
 const SOURCE_DIGEST = /^[0-9a-f]{64}$/;
 /* The one bucket used when the object was reached without a source, as a test or a binding is. */
@@ -129,6 +133,24 @@ function json(body, status = 200) {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
   });
+}
+
+/* Constant-time comparison for the operator secret, so a wrong guess learns nothing from timing. */
+function sameSecret(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const a = encoder.encode(left);
+  const b = encoder.encode(right);
+  if (a.length === 0 || a.length !== b.length) return false;
+  let difference = 0;
+  for (let index = 0; index < a.length; index += 1) difference |= a[index] ^ b[index];
+  return difference === 0;
+}
+
+/** The operator routes are reachable only through a Worker binding and with the shared secret. */
+function adminAllowed(request, env) {
+  const secret = typeof env?.ADMIN_SECRET === 'string' ? env.ADMIN_SECRET : '';
+  const given = request.headers.get(ADMIN_SECRET_HEADER) ?? '';
+  return secret.length >= 16 && sameSecret(given, secret);
 }
 
 function toBase64Url(bytes) {
@@ -208,6 +230,9 @@ export class Vault {
     const path = new URL(request.url).pathname;
 
     if (path === '/admin-stats' && request.method === 'GET') return this.adminStats();
+    if (path === '/admin-disable' && request.method === 'POST') return this.adminDisable(request);
+    if (path === '/admin-enable' && request.method === 'POST') return this.adminEnable(request);
+    if (path === '/admin-delete' && request.method === 'POST') return this.adminDelete(request);
     if (path === '/account') return this.createAccount(request);
     if (path === '/challenge') return this.challenge(request);
     if (path === '/login') return this.login(request);
@@ -224,6 +249,19 @@ export class Vault {
   }
 
   /**
+   * The refusal every account route answers while the operator's switch is on.
+   *
+   * It is checked before a proof or a body is read: a disabled account costs no HMAC, no
+   * storage write and no chance to try the phrase. The state carries the timestamp only; the
+   * reason is for the operator, not for the caller.
+   */
+  async refuseDisabled() {
+    const state = await this.storage.get(ADMIN_DISABLED_KEY);
+    if (!state) return null;
+    return json({ error: 'account_disabled', disabledAt: state.at ?? null }, 403);
+  }
+
+  /**
    * Create the account, gated on a proof of the secret it will store.
    *
    * A request without `proof` writes nothing. It stores a single-use nonce and answers 428 with
@@ -237,6 +275,9 @@ export class Vault {
    */
   async createAccount(request) {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
+
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
 
     const body = await readJson(request, MAX_SMALL_BODY);
     if (body.tooLarge) {
@@ -395,6 +436,9 @@ export class Vault {
   async challenge(request) {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
 
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
+
     const account = await this.storage.get('account');
     if (!account) return json({ error: 'no_account' }, 404);
 
@@ -408,6 +452,9 @@ export class Vault {
 
   async login(request) {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
+
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
 
     let account = await this.storage.get('account');
     if (!account) {
@@ -621,6 +668,9 @@ export class Vault {
   }
 
   async logout(request) {
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
+
     const auth = await this.authorize(request);
     if (!auth) return json({ error: 'unauthorized' }, 401);
 
@@ -636,6 +686,9 @@ export class Vault {
    * bookmark, a name or a key is involved — this is account metadata, not vault content.
    */
   async listSessions(request) {
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
+
     const auth = await this.authorize(request);
     if (!auth) return json({ error: 'unauthorized' }, 401);
 
@@ -655,6 +708,9 @@ export class Vault {
   }
 
   async readVault(request) {
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
+
     const auth = await this.authorize(request);
     if (!auth) return json({ error: 'unauthorized' }, 401);
 
@@ -664,6 +720,9 @@ export class Vault {
   }
 
   async writeVault(request) {
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
+
     const auth = await this.authorize(request);
     if (!auth) return json({ error: 'unauthorized' }, 401);
 
@@ -732,6 +791,57 @@ export class Vault {
    *
    * The phrase, the auth secret, the session records and the sealed blob are not in the answer.
    */
+  /**
+   * Turn the operator's switch on or off. Both routes are binding-only and secret-guarded.
+   *
+   * Disabling never touches the vault, the account or a session: it is a refusal checked ahead
+   * of every account route. Re-enabling is the same write in reverse, so a mistake is not
+   * permanent and does not cost the slot.
+   */
+  async adminDisable(request) {
+    if (!adminAllowed(request, this.env)) return json({ error: 'unauthorized' }, 401);
+    const body = await readJson(request, 4096);
+    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+
+    const account = await this.storage.get('account');
+    if (!account) return json({ error: 'no_account' }, 404);
+
+    const reason = typeof body.value?.reason === 'string' ? body.value.reason.trim().slice(0, 200) : '';
+    const by = typeof body.value?.by === 'string' ? body.value.by.trim().slice(0, 100) : '';
+    const disabled = { at: this.now(), reason, by };
+    await this.storage.put(ADMIN_DISABLED_KEY, disabled);
+    return json({ ok: true, disabled });
+  }
+
+  async adminEnable(request) {
+    if (!adminAllowed(request, this.env)) return json({ error: 'unauthorized' }, 401);
+    await this.storage.delete(ADMIN_DISABLED_KEY);
+    return json({ ok: true });
+  }
+
+  /**
+   * End an account from the operator side: no phrase is available and none is needed.
+   *
+   * The same key list as the user-facing deletion, then the Registry release. No tombstone:
+   * this is a removal, not a ban — the operator can disable instead when the phrase must not
+   * come back. A second call is a no-op, so a double submit cannot fail halfway.
+   */
+  async adminDelete(request) {
+    if (!adminAllowed(request, this.env)) return json({ error: 'unauthorized' }, 401);
+    const body = await readJson(request, 4096);
+    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+
+    const account = await this.storage.get('account');
+    const accountId = account?.accountId ?? this.ctx?.id?.name ?? '';
+
+    const keys = [...(await this.storage.list())].map(([key]) => key);
+    for (const key of keys) await this.storage.delete(key);
+    if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
+
+    if (accountId) await this.releaseSlot(accountId);
+    return json({ ok: true, deleted: keys.length > 0 });
+  }
+
   async adminStats() {
     const account = await this.storage.get('account');
     if (!account) return json({ error: 'no_account' }, 404);
@@ -755,7 +865,8 @@ export class Vault {
       ctChars: typeof vault.ct === 'string' ? vault.ct.length : 0,
       updatedAt: vault.updatedAt ?? null,
       capChars: this.capChars(account),
-      sessions
+      sessions,
+      disabled: (await this.storage.get(ADMIN_DISABLED_KEY)) ?? null
     });
   }
 

@@ -88,6 +88,13 @@ export function describeSyncFailure(error) {
         message:
           'The copy on the server could not be opened with this phrase. It may have been saved by an older version of the app.'
       };
+    case 'ACCOUNT_DISABLED':
+      return {
+        kind: 'disabled',
+        label: 'Vault disabled',
+        message:
+          'This vault has been disabled by the administrator. Sync is off. Contact feedback@8alias.com. The local vault still works on this device.'
+      };
     case 'FULL':
       return { kind: 'cap', label: 'No new accounts' };
     /* A limiter is not a closed server: the same 429 means "not this second" here and "never
@@ -294,6 +301,14 @@ export class SyncClient {
     }
 
     const payload = await response.json().catch(() => ({}));
+
+    /* The operator's switch is refused by every account route. It is its own code so the page
+       can say what happened and who to ask, instead of calling it a server refusal. */
+    if (payload?.error === 'account_disabled') {
+      throw new SyncError('ACCOUNT_DISABLED', 'This vault has been disabled by the administrator.', {
+        status: response.status
+      });
+    }
 
     /* The limiter's own answer to "how long?": the header names the period the window is counted
        over, so a caller can wait it out instead of retrying into the same refusal. Absent or
