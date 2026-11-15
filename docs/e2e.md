@@ -29,9 +29,9 @@ Nothing in the suite names a path on the machine it was written on:
 
 `wrangler dev` writes into `.wrangler/e2e-state-<port>`, which is ignored by git and removed before each run: the
 registry allows one account on this machine, so a creation test would otherwise meet a full server on its second pass
-and fail for a reason that has nothing to do with the code. The account cap is raised to eight at the same time, because
-the deployed server takes one account and more than one test needs a server that will take one. Pointed at someone else's
-server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
+and fail for a reason that has nothing to do with the code. The account cap is raised to sixteen at the same time,
+because the suite's sync tests each create one account and four workers run several side by side; the deployed server
+takes one account. Pointed at someone else's server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
 
 ## What is covered
 
