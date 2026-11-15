@@ -132,6 +132,9 @@ Activity shows the latest across the vault. A device that has not synced cannot 
 device's line, and the log cannot explain a fall that happened before it existed. Because the log
 is part of the vault, any change to it is a vault change like any other.
 
+Restoring a sealed backup merges it with the vault this device already holds, so a backup taken
+before a visit cannot erase that visit. A device that holds no vault simply gets the backup.
+
 Creation is open but bounded: one Registry object caps how many accounts may exist. The cap
 is **1 while the service is being tested** — set in `wrangler.toml` as `MAX_ACCOUNTS`, falling
 back to 50 in `src/registry.js` when the var is absent. At the cap the server answers

@@ -1661,6 +1661,7 @@ async function handleRestore() {
       ...backupDocument,
       activity: normaliseActivity(backupDocument.activity, Date.now)
     };
+    let mergedWithCurrent = false;
     if (stored.sealed) {
       try {
         const current = await openVault(
@@ -1674,6 +1675,7 @@ async function handleRestore() {
           device: deviceId(),
           cause: 'restore'
         }).document;
+        mergedWithCurrent = true;
       } catch {
         /* The device's own vault was sealed under another phrase, so the backup is the only
            copy this phrase can open. */
@@ -1698,7 +1700,7 @@ async function handleRestore() {
       sealed: resealed,
       document: vaultDocument
     });
-    announce(stored.sealed ? 'Backup restored and merged with this device’s vault.' : 'Backup restored.');
+    announce(mergedWithCurrent ? 'Backup restored and merged with this device’s vault.' : 'Backup restored.');
   } catch (error) {
     showLockError(messageFor(error));
   }
