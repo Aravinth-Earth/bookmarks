@@ -511,3 +511,176 @@ test('the status route says whether the account is disabled, without a proof', a
     (error) => error.code === 'STATUS_FAILED'
   );
 });
+
+/* ------------------------------------------------------------ deleting an account */
+
+/** The routes a deletion needs: one challenge, then the delete the proof rides on. */
+function deletionServer({ deleteStatus = 200, deleteBody = { ok: true, deletedAt: 1 } } = {}) {
+  const calls = [];
+  let nonce = 0;
+  const fetch = async (url, options = {}) => {
+    const path = new URL(url, 'https://example.test').pathname;
+    calls.push({ path, method: options.method ?? 'GET', body: options.body, headers: options.headers });
+    const headers = { 'content-type': 'application/json' };
+
+    if (path.endsWith('/challenge')) {
+      nonce += 1;
+      return new Response(JSON.stringify({ nonce: `nonce-${nonce}` }), { status: 200, headers });
+    }
+    if (path.endsWith('/login')) {
+      return new Response(JSON.stringify({ token: 't'.repeat(43) }), { status: 200, headers });
+    }
+    if (path.endsWith('/delete')) {
+      return new Response(JSON.stringify(deleteBody), { status: deleteStatus, headers });
+    }
+    return new Response('{}', { status: 404, headers });
+  };
+  return { fetch, calls };
+}
+
+test('deleting asks for a challenge, signs it and sends only the proof', async () => {
+  const server = deletionServer();
+  const client = new SyncClient({ fetch: server.fetch });
+  client.token = 'x'.repeat(43);
+  client.accountId = ACCOUNT.accountId;
+
+  const result = await client.deleteAccount(ACCOUNT.accountId, ACCOUNT.authSecret);
+  assert.deepEqual(result, { ok: true, deletedAt: 1 });
+
+  assert.deepEqual(
+    server.calls.map((call) => `${call.method} ${call.path.split('/').pop()}`),
+    ['POST challenge', 'POST delete']
+  );
+  const sent = JSON.parse(server.calls.at(-1).body);
+  assert.deepEqual(Object.keys(sent), ['proof'], 'nothing but the proof is sent');
+  assert.match(sent.proof, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(JSON.stringify(server.calls).includes(ACCOUNT.authSecret), false, 'the secret never leaves');
+  assert.equal(server.calls.at(-1).headers.authorization, `Bearer ${'x'.repeat(43)}`);
+});
+
+test('deleting signs in first when this page holds no session', async () => {
+  const server = deletionServer();
+  const client = new SyncClient({ fetch: server.fetch });
+
+  await client.deleteAccount(ACCOUNT.accountId, ACCOUNT.authSecret);
+  assert.deepEqual(
+    server.calls.map((call) => call.path.split('/').pop()),
+    ['challenge', 'login', 'challenge', 'delete']
+  );
+  assert.equal(client.token, null, 'the session died with the account, so the token is dropped');
+});
+
+test('an account that is already deleted is ACCOUNT_DELETED, never NO_ACCOUNT', async () => {
+  const challenge = stub({
+    [`/api/a/${ACCOUNT.accountId}/challenge`]: [410, { error: 'account_deleted', deletedAt: 7 }]
+  });
+  const client = new SyncClient({ fetch: challenge.fetch });
+
+  await assert.rejects(
+    () => client.deleteAccount(ACCOUNT.accountId, ACCOUNT.authSecret),
+    (error) => error instanceof SyncError && error.code === 'ACCOUNT_DELETED' && error.status === 410
+  );
+});
+
+test('a deleted account is answered as deleted when signing in, not as a missing account', async () => {
+  const server = stub({
+    [`/api/a/${ACCOUNT.accountId}/challenge`]: [410, { error: 'account_deleted', deletedAt: 7 }]
+  });
+  const client = new SyncClient({ fetch: server.fetch });
+
+  await assert.rejects(
+    () => client.login(ACCOUNT.accountId, ACCOUNT.authSecret),
+    (error) => error.code === 'ACCOUNT_DELETED'
+  );
+  const failure = describeSyncFailure(new SyncError('ACCOUNT_DELETED', '', { status: 410 }));
+  assert.equal(failure.kind, 'deleted');
+  assert.match(failure.message, /deleted/i);
+  assert.match(failure.message, /new invite/i, 'it says how a new account is made');
+});
+
+test('a wrong phrase on the delete is the phrase sentence, and the dead token is dropped', async () => {
+  const server = deletionServer({ deleteStatus: 401, deleteBody: { error: 'bad_proof' } });
+  const client = new SyncClient({ fetch: server.fetch });
+  client.token = 'y'.repeat(43);
+  client.accountId = ACCOUNT.accountId;
+
+  await assert.rejects(
+    () => client.deleteAccount(ACCOUNT.accountId, ACCOUNT.authSecret),
+    (error) => {
+      assert.equal(error.code, 'LOGIN_FAILED');
+      assert.equal(error.status, 401);
+      assert.equal(describeSyncFailure(error).message, 'The phrase did not match this account.');
+      return true;
+    }
+  );
+  assert.equal(client.token, null);
+});
+
+test('a wait named by the limiter on the delete is a THROTTLED error', async () => {
+  const server = stub({
+    [`/api/a/${ACCOUNT.accountId}/challenge`]: [429, { error: 'rate_limited' }]
+  });
+  const client = new SyncClient({ fetch: server.fetch });
+
+  await assert.rejects(
+    () => client.deleteAccount(ACCOUNT.accountId, ACCOUNT.authSecret),
+    (error) => error.code === 'THROTTLED' && error.retryAfter === 0
+  );
+});
+
+/* ------------------------------------------------------------ ending one place */
+
+test('a place is signed out with a DELETE and the current token', async () => {
+  const server = stub({
+    [`/api/a/${ACCOUNT.accountId}/sessions/ABCDEFGHIJK`]: [200, { ok: true, current: false, count: 1 }]
+  });
+  const client = new SyncClient({ fetch: server.fetch });
+  client.token = 'z'.repeat(43);
+  client.accountId = ACCOUNT.accountId;
+
+  const answer = await client.revokeSession('ABCDEFGHIJK');
+  assert.deepEqual(answer, { ok: true, current: false, count: 1 });
+
+  const call = server.calls.at(-1);
+  assert.equal(call.method, 'DELETE');
+  assert.equal(call.path, `/api/a/${ACCOUNT.accountId}/sessions/ABCDEFGHIJK`);
+  assert.equal(call.headers.authorization, `Bearer ${'z'.repeat(43)}`);
+});
+
+test('signing out this place says so, and an unknown place is its own sentence', async () => {
+  const self = stub({
+    [`/api/a/${ACCOUNT.accountId}/sessions/ABCDEFGHIJK`]: [200, { ok: true, current: true, count: 0 }]
+  });
+  const client = new SyncClient({ fetch: self.fetch });
+  client.token = 'z'.repeat(43);
+  client.accountId = ACCOUNT.accountId;
+  assert.equal((await client.revokeSession('ABCDEFGHIJK')).current, true);
+
+  const unknown = stub({
+    [`/api/a/${ACCOUNT.accountId}/sessions/ABCDEFGHIJK`]: [404, { error: 'not_found' }]
+  });
+  const missing = new SyncClient({ fetch: unknown.fetch });
+  missing.token = 'z'.repeat(43);
+  missing.accountId = ACCOUNT.accountId;
+  await assert.rejects(
+    () => missing.revokeSession('ABCDEFGHIJK'),
+    (error) => error.code === 'SESSION_NOT_FOUND'
+  );
+  assert.match(describeSyncFailure(new SyncError('SESSION_NOT_FOUND', '')).message, /no longer/i);
+});
+
+test('a revoked token is UNAUTHORIZED and is dropped, so the next sync signs in again', async () => {
+  const server = stub({
+    [`/api/a/${ACCOUNT.accountId}/sessions/ABCDEFGHIJK`]: [401, { error: 'unauthorized' }]
+  });
+  const client = new SyncClient({ fetch: server.fetch });
+  client.token = 'q'.repeat(43);
+  client.accountId = ACCOUNT.accountId;
+
+  await assert.rejects(
+    () => client.revokeSession('ABCDEFGHIJK'),
+    (error) => error.code === 'UNAUTHORIZED'
+  );
+  assert.equal(client.token, null);
+  assert.equal(client.signedIn, false);
+});
