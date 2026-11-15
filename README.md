@@ -164,6 +164,7 @@ Ownership is named, never positional. Copy the Account id from Settings, then se
 
 ```sh
 npx wrangler secret put OWNER_ACCOUNT_ID   # paste the id from Settings
+npx wrangler secret put ADMIN_SECRET       # the operator view's VAULT_ADMIN_SECRET, same value
 ```
 
 The id routes requests to the account and cannot log in. If the account already exists on the

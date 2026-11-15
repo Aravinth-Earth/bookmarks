@@ -220,6 +220,7 @@ const ROUTE_CLASS = {
   '/login': 'signin',
   '/logout': 'vault',
   '/sessions': 'vault',
+  '/status': 'signin',
   '/vault': 'vault',
   [ICON_PATH]: 'fetch',
   [TITLE_PATH]: 'fetch'

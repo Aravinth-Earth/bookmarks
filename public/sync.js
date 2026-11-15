@@ -88,6 +88,13 @@ export function describeSyncFailure(error) {
         message:
           'The copy on the server could not be opened with this phrase. It may have been saved by an older version of the app.'
       };
+    case 'ACCOUNT_DISABLED':
+      return {
+        kind: 'disabled',
+        label: 'Vault disabled',
+        message:
+          'This vault has been disabled by the administrator. Sync is off. Contact aravinth@332321.xyz. The local vault still works on this device.'
+      };
     case 'FULL':
       return { kind: 'cap', label: 'No new accounts' };
     /* A limiter is not a closed server: the same 429 means "not this second" here and "never
@@ -295,6 +302,14 @@ export class SyncClient {
 
     const payload = await response.json().catch(() => ({}));
 
+    /* The operator's switch is refused by every account route. It is its own code so the page
+       can say what happened and who to ask, instead of calling it a server refusal. */
+    if (payload?.error === 'account_disabled') {
+      throw new SyncError('ACCOUNT_DISABLED', 'This vault has been disabled by the administrator.', {
+        status: response.status
+      });
+    }
+
     /* The limiter's own answer to "how long?": the header names the period the window is counted
        over, so a caller can wait it out instead of retrying into the same refusal. Absent or
        unreadable is zero, which every caller reads as "no wait was asked for". */
@@ -420,6 +435,21 @@ export class SyncClient {
     throw new SyncError('CHALLENGE_FAILED', 'The server did not answer.', {
       status: response.status
     });
+  }
+
+  /**
+   * Whether this account exists and the operator's switch is on. No proof, no vault content:
+   * the id is already a hash of the phrase, and the app asks only when sync is on.
+   */
+  async accountStatus(accountId) {
+    const response = await this.request(`/a/${accountId}/status`);
+    if (response.status === 404) return { exists: false, disabled: false };
+    if (!response.ok) {
+      throw new SyncError('STATUS_FAILED', 'The server did not answer.', {
+        status: response.status
+      });
+    }
+    return response.payload;
   }
 
   /** The places this account is signed in on. Needs a live session; no key material moves. */

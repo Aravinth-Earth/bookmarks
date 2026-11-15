@@ -480,3 +480,34 @@ test('each invite failure tells the person what to do about it', () => {
     message: 'That invite code has expired.'
   });
 });
+
+test('a disabled account is its own error, not "no account" or a server failure', async () => {
+  const disabled = stub({
+    [`/api/a/${ACCOUNT.accountId}/challenge`]: [403, { error: 'account_disabled' }]
+  });
+
+  await assert.rejects(
+    () => new SyncClient({ fetch: disabled.fetch }).accountExists(ACCOUNT.accountId),
+    (error) => error instanceof SyncError && error.code === 'ACCOUNT_DISABLED'
+  );
+});
+
+test('the status route says whether the account is disabled, without a proof', async () => {
+  const disabled = stub({
+    [`/api/a/${ACCOUNT.accountId}/status`]: [200, { exists: true, disabled: true, disabledAt: 1 }]
+  });
+  const status = await new SyncClient({ fetch: disabled.fetch }).accountStatus(ACCOUNT.accountId);
+  assert.deepEqual(status, { exists: true, disabled: true, disabledAt: 1 });
+
+  const missing = stub({ [`/api/a/${ACCOUNT.accountId}/status`]: [404, { error: 'no_account' }] });
+  assert.deepEqual(await new SyncClient({ fetch: missing.fetch }).accountStatus(ACCOUNT.accountId), {
+    exists: false,
+    disabled: false
+  });
+
+  const broken = stub({ [`/api/a/${ACCOUNT.accountId}/status`]: [500, { error: 'x' }] });
+  await assert.rejects(
+    () => new SyncClient({ fetch: broken.fetch }).accountStatus(ACCOUNT.accountId),
+    (error) => error.code === 'STATUS_FAILED'
+  );
+});
