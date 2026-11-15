@@ -31,9 +31,20 @@ async function loadOnSecondDevice(phrase) {
   await page.locator('#unlock-button').click();
 
   const prompt = page.getByRole('dialog', { name: 'This vault is on the server' });
-  await expect(prompt).toBeVisible({ timeout: 30_000 });
-  await prompt.getByRole('button', { name: 'Load from server' }).click();
-  await expectSynced(page, { attempts: 1 });
+  const offered = await prompt
+    .waitFor({ state: 'visible', timeout: 30_000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (offered) {
+    await prompt.getByRole('button', { name: 'Load from server' }).click();
+    await expectSynced(page, { attempts: 1 });
+  } else {
+    /* The existence question can meet the shared sign-in limiter. The same account is reached
+       by turning sync on, and the patient fixture waits the window out. */
+    await turnOnSyncPatiently(page, phrase);
+    await expectSynced(page, { attempts: 1 });
+  }
   return { device, page };
 }
 

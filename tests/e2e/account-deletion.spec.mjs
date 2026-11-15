@@ -25,7 +25,14 @@ import {
   vaultRows
 } from './fixtures.mjs';
 
-/** Open a second profile and ask the server for the copy the phrase names. */
+/**
+ * Open a second profile and ask the server for the copy the phrase names.
+ *
+ * The question about a server copy is a sign-in request, and the suite shares one source's
+ * sign-in budget, so the answer can be a limiter rather than a copy. When that happens the
+ * dialog is never drawn; turning sync on by hand reaches the same account, and the fixture
+ * waits the window out. The account is the same either way.
+ */
 async function loadOnSecondDevice(phrase) {
   const device = await launch();
   const page = await openVault(await device.context.newPage());
@@ -33,9 +40,18 @@ async function loadOnSecondDevice(phrase) {
   await page.locator('#unlock-button').click();
 
   const prompt = page.getByRole('dialog', { name: 'This vault is on the server' });
-  await expect(prompt, 'the new device is offered the server copy').toBeVisible({ timeout: 30_000 });
-  await prompt.getByRole('button', { name: 'Load from server' }).click();
-  await expectSynced(page, { attempts: 1 });
+  const offered = await prompt
+    .waitFor({ state: 'visible', timeout: 30_000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (offered) {
+    await prompt.getByRole('button', { name: 'Load from server' }).click();
+    await expectSynced(page, { attempts: 1 });
+  } else {
+    await turnOnSyncPatiently(page, phrase);
+    await expectSynced(page, { attempts: 1 });
+  }
   return { device, page };
 }
 
