@@ -390,9 +390,10 @@ function normaliseEvent(input) {
 }
 
 /**
- * The log as the vault holds it: newest first, one entry per id, at most `MAX_ACTIVITY` lines
- * and nothing older than `ACTIVITY_DAYS`. A vault written before the log existed has no
- * `activity`, which reads as no lines rather than an error.
+ * The log as the vault holds it: newest first, one entry per id, at most `MAX_ACTIVITY` lines,
+ * nothing older than `ACTIVITY_DAYS`, and no larger than the vault's room for it. A vault
+ * written before the log existed has no `activity`, which reads as no lines rather than an
+ * error.
  */
 export function normaliseActivity(input, now = Date.now) {
   if (!Array.isArray(input)) return [];
@@ -498,8 +499,8 @@ export function changedSlot(before, after, observer = UNSETTLED_DEVICE) {
  * Random ids would grow the log each time the same remote copy was merged; the same change seen
  * twice must be the same line. The values that make the change are what name it.
  */
-function mergeEventId(cause, bookmark, before, after) {
-  return `${cause}:${bookmark.id}:${before}:${after}:${bookmark.updatedAt}`;
+function mergeEventId(cause, bookmark, before, after, slot) {
+  return `${cause}:${bookmark.id}:${before}:${after}:${bookmark.updatedAt}:${slot?.device ?? '-'}`;
 }
 
 /** Change one bookmark. A URL change is re-normalised and re-checked for duplicates. */
@@ -765,17 +766,18 @@ export function mergeDocuments(local, remote, now = Date.now, options = {}) {
     const is = useCount(merged);
     if (is <= was) continue;
 
+    const slot = changedSlot(before ?? null, merged, device);
     events.push(
       activityEvent(
         {
-          id: mergeEventId(cause, merged, was, is),
+          id: mergeEventId(cause, merged, was, is, slot),
           device,
           bookmarkId: merged.id,
           url: merged.url,
           cause,
           before: was,
           after: is,
-          slot: changedSlot(before ?? null, merged, device)
+          slot
         },
         now
       )
