@@ -188,6 +188,33 @@ The id routes requests to the account and cannot log in. If the account already 
 member plan, the next login upgrades it to the owner plan. No one can become the owner by
 arriving first.
 
+## Deleting an account and ending a sign-in
+
+Settings has two actions about access. **Connected places** lists the account's signed-in
+devices and can end one. **Delete account** removes the server copy and clears this device.
+
+Ending a place is authorized by the caller's own session token and names the place by a public
+id of eight random bytes; the token and its SHA-256 never leave the account object. The ended
+token is refused on its next request. The account, the sealed vault and every other place are
+untouched, and the last place may be ended — including the one making the request, in which case
+the page locks and the phrase opens the account again.
+
+Deleting needs the phrase as well as a session. The page asks for the 13 words even on a device
+that remembers its key, asks for a challenge, signs it, and sends the proof with the delete. A
+wrong proof spends the nonce and is counted exactly as a failed sign-in, so deletion is not a
+cheaper way to guess. The object removes its account record, the sealed vault and its history,
+every session, both nonce keys, the attempt counters and the per-source failure keys; it
+cancels the alarm and releases the Registry slot. A used code stops naming the account.
+
+What stays is one key: the date. Login, the challenge, status and a second delete answer
+`410 {"error":"account_deleted"}` — not `404 no_account`, which is the answer that tells a
+client to create the account again. That tombstone makes the deletion stick against a device
+that still holds the phrase and still has sync on: it is told what happened and does not
+register a new account. On a server that hands out codes, a creation that presents a valid new
+code clears the tombstone and is the explicit way back. On a server without codes only the
+operator's end-account route can clear it. That is deliberate: a deletion should not be undone
+by pressing sync on another device. There is no recovery by phrase alone.
+
 ## Request limits
 
 Each route class is counted per source, and a source that has spent a class's ceiling is
@@ -201,9 +228,9 @@ counters are a brake on one source spending the service, not a quota.
 
 | Class | Routes | Ceiling per source |
 |---|---|---|
-| Sign-in | `/account`, `/challenge`, `/login` | 10 per minute |
+| Sign-in | `/account`, `/challenge`, `/login`, `/delete` | 10 per minute |
 | Fetch | `/icon`, `/title` | 30 per ten seconds |
-| Vault | `/vault`, `/sessions`, `/logout` | 60 per minute |
+| Vault | `/vault`, `/sessions`, `/sessions/<id>`, `/logout` | 60 per minute |
 
 Sign-in and fetch are the two classes that write storage or contact another host; the vault
 class is the app's own traffic and is the most permissive of the three.
@@ -241,8 +268,9 @@ lockout.
 ## Events
 
 Observability is on for the Worker, and each refusal is written as one JSON line through
-`console.log`, which is what it captures. A request that is served writes nothing, so a line
-means something was refused or failed:
+`console.log`, which is what it captures. A request that is served writes nothing, with one
+exception: deleting an account writes `account_deleted`. So a line means something was refused,
+failed, or erased:
 
 ```json
 {"event":"signin_failed","route":"signin","reason":"bad_proof","account":"9f2c1ab04d7e"}
@@ -250,7 +278,7 @@ means something was refused or failed:
 
 | Field | Value |
 |---|---|
-| `event` | `signin_failed`, `signin_locked`, `create_refused`, `rate_limited`, `proxy_refused`, `server_error` |
+| `event` | `signin_failed`, `signin_locked`, `create_refused`, `account_deleted`, `rate_limited`, `proxy_refused`, `server_error` |
 | `route` | The class the route is counted as — `signin`, `fetch` or `vault` — or `api` when an exception surfaced before a class was known |
 | `reason` | The code the refusing branch answered with: `bad_proof`, `challenge_expired`, `no_account`, `too_large`, `cap_full`, `invalid`, `mismatch`, `locked`, `throttled`, `over_limit`, `bad_host`, `blocked_host`, `bad_hash`, `timeout`, `fetch_failed`, `unhandled` |
 | `account` | The first 12 hex characters of SHA-256(account id), present when the branch holds the account. The id itself is never written. |
@@ -263,10 +291,10 @@ prefix. The phrase, the auth secret, a proof, a nonce, a session token, a sealed
 hostname and the caller's address are not fields and never appear; the rate limiter keys on a
 digest of its own and never passes it here.
 
-The account object writes `signin_failed`, `signin_locked` and `create_refused`. The Worker
-writes `rate_limited`, `proxy_refused` and `server_error`. `tests/events.test.mjs` reads the
-lines the way the platform would — by capturing the console — and checks both the fields and the
-absence of anything identifying.
+The account object writes `signin_failed`, `signin_locked`, `create_refused` and the one served
+line, `account_deleted`. The Worker writes `rate_limited`, `proxy_refused` and `server_error`.
+`tests/events.test.mjs` reads the lines the way the platform would — by capturing the console —
+and checks both the fields and the absence of anything identifying.
 
 ## Secrets
 

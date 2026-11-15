@@ -1216,113 +1216,26 @@ async function syncNow() {
   }
 
   syncBusy = true;
-  let absorbed = false;
   try {
-    if (!sync.signedIn) {
-      setSyncStatus('Signing in…');
-      let session;
+    let absorbed = false;
+    let retried = false;
 
+    for (;;) {
       try {
-        session = await sync.login(state.accountId, authMaterial());
+        absorbed = await reconcile();
+        break;
       } catch (error) {
-        if (error.code !== 'NO_ACCOUNT') throw error;
-
-        /* First sync on a new phrase: the account is created from the same secrets the login
-           would have used, so there is nothing to provision and no token to hold. A remembered
-           device holds the signing key, not the secret the server is given, so it cannot create
-           the account without the phrase once. The code, when the server wants one, is the third
-           argument and is empty until a refusal asks for it. */
-        setSyncStatus('Creating the account…');
-        if (typeof state.authSecret !== 'string') {
-          throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
+        /* A token that died between two requests is not a dead end: the client has already
+           dropped it, and signing in again is what tells a deleted account (410) from an
+           expired session. One retry, then the error is reported. */
+        if (error?.code === 'UNAUTHORIZED' && !retried) {
+          retried = true;
+          continue;
         }
-        await sync.register(state.accountId, state.authSecret, state.invite);
-        /* The server now holds the secret, so this page does not: from here the session signs
-           with the non-extractable key and nothing else. */
-        state.authSecret = null;
-        /* The creation is done, so the code has no further use: it was spent on this account. */
-        forgetInvite();
-        session = await sync.login(state.accountId, authMaterial());
-      }
-
-      applyPlan(session);
-    }
-
-    const remote = await sync.pull();
-
-    if (remote) {
-      state.remoteVersion = remote.version;
-      let remoteDocument;
-      try {
-        remoteDocument = await openVault(state.key, remote, state.accountId, remote.version, {
-          allowLegacy: legacyBlobAllowed()
-        });
-      } catch {
-        /* The bytes arrived and this page could not open them. That is not a lost connection, and
-           the difference is the whole of why this error exists. */
-        throw new SyncError(
-          'REMOTE_UNREADABLE',
-          'The copy on the server could not be opened with this phrase.'
-        );
-      }
-      const { document: merged } = mergeDocuments(state.document, remoteDocument, Date.now, {
-        device: deviceId()
-      });
-
-      if (fingerprint(merged) !== fingerprint(state.document)) {
-        state.document = merged;
-        absorbed = true;
-        /* The merge may have carried a newer sort or view from the other device; the controls
-           have to show it before the list is built, or they show the state they replaced. */
-        applyPrefs();
-        render();
-        await saveNow({ push: false });
-      }
-      if (fingerprint(merged) === fingerprint(remoteDocument)) {
-        markSynced();
-        if (absorbed) announce('Merged changes from another device.');
-        return;
-      }
-    } else {
-      state.remoteVersion = 0;
-    }
-
-    let result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
-
-    if (result.conflict) {
-      state.remoteVersion = result.currentVersion;
-      if (result.current) {
-        let conflictDocument;
-        try {
-          conflictDocument = await openVault(
-            state.key,
-            result.current,
-            state.accountId,
-            result.current.version,
-            { allowLegacy: legacyBlobAllowed() }
-          );
-        } catch {
-          throw new SyncError(
-            'REMOTE_UNREADABLE',
-            'The copy on the server could not be opened with this phrase.'
-          );
-        }
-        const { document: merged } = mergeDocuments(state.document, conflictDocument, Date.now, {
-          device: deviceId()
-        });
-        state.document = merged;
-        absorbed = true;
-        applyPrefs();
-        render();
-        await saveNow({ push: false });
-      }
-      result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
-      if (result.conflict) {
-        throw new SyncError('CONFLICT', 'Another device is changing the vault.');
+        throw error;
       }
     }
 
-    state.remoteVersion = result.version;
     markSynced();
     if (absorbed) announce('Merged changes from another device.');
   } catch (error) {
@@ -1334,6 +1247,114 @@ async function syncNow() {
       syncNow();
     }
   }
+}
+
+/** The one pass over the server: sign in if needed, read, merge, push. */
+async function reconcile() {
+  let absorbed = false;
+
+  if (!sync.signedIn) {
+    setSyncStatus('Signing in…');
+    let session;
+
+    try {
+      session = await sync.login(state.accountId, authMaterial());
+    } catch (error) {
+      if (error.code !== 'NO_ACCOUNT') throw error;
+
+      /* First sync on a new phrase: the account is created from the same secrets the login
+         would have used, so there is nothing to provision and no token to hold. A remembered
+         device holds the signing key, not the secret the server is given, so it cannot create
+         the account without the phrase once. The code, when the server wants one, is the third
+         argument and is empty until a refusal asks for it. */
+      setSyncStatus('Creating the account…');
+      if (typeof state.authSecret !== 'string') {
+        throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
+      }
+      await sync.register(state.accountId, state.authSecret, state.invite);
+      /* The server now holds the secret, so this page does not: from here the session signs
+         with the non-extractable key and nothing else. */
+      state.authSecret = null;
+      /* The creation is done, so the code has no further use: it was spent on this account. */
+      forgetInvite();
+      session = await sync.login(state.accountId, authMaterial());
+    }
+
+    applyPlan(session);
+  }
+
+  const remote = await sync.pull();
+
+  if (remote) {
+    state.remoteVersion = remote.version;
+    let remoteDocument;
+    try {
+      remoteDocument = await openVault(state.key, remote, state.accountId, remote.version, {
+        allowLegacy: legacyBlobAllowed()
+      });
+    } catch {
+      /* The bytes arrived and this page could not open them. That is not a lost connection, and
+         the difference is the whole of why this error exists. */
+      throw new SyncError(
+        'REMOTE_UNREADABLE',
+        'The copy on the server could not be opened with this phrase.'
+      );
+    }
+    const { document: merged } = mergeDocuments(state.document, remoteDocument, Date.now, {
+      device: deviceId()
+    });
+
+    if (fingerprint(merged) !== fingerprint(state.document)) {
+      state.document = merged;
+      absorbed = true;
+      /* The merge may have carried a newer sort or view from the other device; the controls
+         have to show it before the list is built, or they show the state they replaced. */
+      applyPrefs();
+      render();
+      await saveNow({ push: false });
+    }
+    if (fingerprint(merged) === fingerprint(remoteDocument)) return absorbed;
+  } else {
+    state.remoteVersion = 0;
+  }
+
+  let result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
+
+  if (result.conflict) {
+    state.remoteVersion = result.currentVersion;
+    if (result.current) {
+      let conflictDocument;
+      try {
+        conflictDocument = await openVault(
+          state.key,
+          result.current,
+          state.accountId,
+          result.current.version,
+          { allowLegacy: legacyBlobAllowed() }
+        );
+      } catch {
+        throw new SyncError(
+          'REMOTE_UNREADABLE',
+          'The copy on the server could not be opened with this phrase.'
+        );
+      }
+      const { document: merged } = mergeDocuments(state.document, conflictDocument, Date.now, {
+        device: deviceId()
+      });
+      state.document = merged;
+      absorbed = true;
+      applyPrefs();
+      render();
+      await saveNow({ push: false });
+    }
+    result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
+    if (result.conflict) {
+      throw new SyncError('CONFLICT', 'Another device is changing the vault.');
+    }
+  }
+
+  state.remoteVersion = result.version;
+  return absorbed;
 }
 
 /* ------------------------------------------------------------------ screens */
