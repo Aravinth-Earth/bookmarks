@@ -380,6 +380,50 @@ test('switching views keeps the collected selection and the bar consistent', asy
 
 /* ------------------------------------------------------- 10. delete and undo */
 
+test('a count change leaves a line in the bookmark sheet and in Settings, and none in localStorage', async ({
+  page,
+  context
+}) => {
+  await createVault(page);
+  await addBookmark(page, { url: 'https://e2e.local/activity', name: 'Activity' });
+  await showListView(page);
+
+  /* Two opens from the list: each is a count change, so each is a line. */
+  for (let index = 0; index < 2; index += 1) {
+    const [opened] = await Promise.all([
+      context.waitForEvent('page'),
+      page.locator('#list .row[data-id] .row-link').first().click()
+    ]);
+    await opened.close();
+    await page.waitForTimeout(50);
+  }
+  await expect.poll(async () => (await vaultRows(page))[0].uses).toBe(2);
+
+  await page.getByRole('button', { name: 'Edit Activity' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Edit bookmark' });
+  const bookmarked = sheet.getByRole('list', { name: 'Activity for Activity' });
+  await expect(bookmarked).toBeVisible();
+  const lines = bookmarked.getByRole('listitem');
+  await expect(lines).toHaveCount(2);
+  await expect(lines.first()).toContainText('Opened from this list');
+  await expect(lines.first()).toContainText('this device');
+  await expect(lines.first()).toContainText('1 → 2 uses');
+  await sheet.getByRole('button', { name: 'Cancel' }).click();
+
+  /* Settings carries the same lines across bookmarks, newest first, and opening it writes none. */
+  const modal = await openSettings(page);
+  const recent = modal.getByRole('list', { name: 'Recent count activity' });
+  await expect(recent).toBeVisible();
+  await expect(recent.getByRole('listitem')).toHaveCount(2);
+  await expect(recent.getByRole('listitem').first()).toContainText('Activity');
+  await expect(recent.getByRole('listitem').first()).toContainText('Opened from this list');
+  await closeSettings(page);
+
+  /* The address is in the sealed vault, not in the page's own local storage. */
+  const storage = await page.evaluate(() => JSON.stringify(localStorage));
+  expect(storage).not.toContain('e2e.local/activity');
+});
+
 test('a deleted bookmark is offered back with Undo', async ({ page }) => {
   await createVault(page);
   await addBookmark(page, { url: 'https://e2e.local/keep-me', name: 'Keep me' });

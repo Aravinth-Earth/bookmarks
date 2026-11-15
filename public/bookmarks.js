@@ -56,7 +56,7 @@ function fail(code, message) {
 }
 
 function iso(now) {
-  return new Date(now()).toISOString();
+  return new Date(typeof now === 'function' ? now() : now).toISOString();
 }
 
 function later(left, right) {

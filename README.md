@@ -121,6 +121,17 @@ larger number. Two browsers on one phrase settle on one total, and a second merg
 A bookmark's own sheet says how much of its count was counted here and how much on the other
 devices — the row shows the sum, the sheet explains it.
 
+A short activity log lives inside the same sealed vault: one line when a count changes — opened
+from this list, opened in the browser, merged from another device, restored from a backup, or
+imported. A line names when it happened, which device saw it, the address, the cause, and the
+total before and after; where one device's slot moved, it names that device too. The log is a
+ring: at most 500 lines, nothing older than 90 days, and only as much as the sealed vault has room
+for. It is merged by line id, so syncing the same copy twice adds nothing, and it never leaves the
+vault — no extra request and no server field. A bookmark's sheet shows its own lines; Settings →
+Activity shows the latest across the vault. A device that has not synced cannot show another
+device's line, and the log cannot explain a fall that happened before it existed. Because the log
+is part of the vault, any change to it is a vault change like any other.
+
 Creation is open but bounded: one Registry object caps how many accounts may exist. The cap
 is **1 while the service is being tested** — set in `wrangler.toml` as `MAX_ACCOUNTS`, falling
 back to 50 in `src/registry.js` when the var is absent. At the cap the server answers

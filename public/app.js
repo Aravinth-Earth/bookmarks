@@ -9,17 +9,22 @@
 
 import {
   SEARCH_CLEAR_DELAY_MS,
+  activityEvent,
   addBookmark,
+  appendActivity,
+  changedSlot,
   createDocument,
   deleteBookmark,
   filterBookmarks,
   mergeDocuments,
+  normaliseActivity,
   recordClick,
   searchNarrowsList,
   sortBookmarks,
   recordUses,
   togglePin,
   updateBookmark,
+  useCount,
   useSplit
 } from './bookmarks.js';
 import {
@@ -656,7 +661,8 @@ function fingerprint(document) {
     schema: document.schema,
     prefs: document.prefs ?? {},
     bookmarks,
-    tombstones
+    tombstones,
+    activity: document.activity ?? []
   });
 }
 
@@ -962,7 +968,9 @@ async function syncNow() {
           'The copy on the server could not be opened with this phrase.'
         );
       }
-      const { document: merged } = mergeDocuments(state.document, remoteDocument);
+      const { document: merged } = mergeDocuments(state.document, remoteDocument, Date.now, {
+        device: deviceId()
+      });
 
       if (fingerprint(merged) !== fingerprint(state.document)) {
         state.document = merged;
@@ -1002,7 +1010,9 @@ async function syncNow() {
             'The copy on the server could not be opened with this phrase.'
           );
         }
-        const { document: merged } = mergeDocuments(state.document, conflictDocument);
+        const { document: merged } = mergeDocuments(state.document, conflictDocument, Date.now, {
+          device: deviceId()
+        });
         state.document = merged;
         absorbed = true;
         applyPrefs();
@@ -1073,7 +1083,9 @@ function enter({ accountId, authSecret, authKey = null, key, version, sealed, do
   state.key = key;
   state.version = version;
   state.sealed = sealed;
-  state.document = vaultDocument;
+  /* A vault written before the log existed has no `activity`, and one written by a newer build
+     may carry a line this build cannot read: both are read into the shape the page draws. */
+  state.document = { ...vaultDocument, activity: normaliseActivity(vaultDocument.activity, Date.now) };
 
   lockView.hidden = true;
   appView.hidden = false;
@@ -1636,10 +1648,37 @@ async function handleRestore() {
 
   try {
     const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
-    const vaultDocument = await openVault(vaultKey, sealed, accountId, sealed.at ?? 1, {
+    const backupDocument = await openVault(vaultKey, sealed, accountId, sealed.at ?? 1, {
       allowLegacy: sealed.at === undefined
     });
     const stored = await store.load(accountId);
+
+    /* A backup is a copy from another moment, not a replacement for what this device has seen.
+       It is merged into the vault already here, so restoring one taken before a visit cannot
+       erase that visit, and a count can never fall on this path. A device that cannot open its
+       own copy is the one case where the backup is all there is. */
+    let vaultDocument = {
+      ...backupDocument,
+      activity: normaliseActivity(backupDocument.activity, Date.now)
+    };
+    if (stored.sealed) {
+      try {
+        const current = await openVault(
+          vaultKey,
+          stored.sealed,
+          accountId,
+          localSealVersion(stored),
+          { allowLegacy: true }
+        );
+        vaultDocument = mergeDocuments(current, backupDocument, Date.now, {
+          device: deviceId(),
+          cause: 'restore'
+        }).document;
+      } catch {
+        /* The device's own vault was sealed under another phrase, so the backup is the only
+           copy this phrase can open. */
+      }
+    }
 
     const version = Math.max(stored.version, 0) + 1;
     /* The backup is re-sealed at the number this device will store it under: the blob it came
@@ -1659,7 +1698,7 @@ async function handleRestore() {
       sealed: resealed,
       document: vaultDocument
     });
-    announce('Backup restored.');
+    announce(stored.sealed ? 'Backup restored and merged with this device’s vault.' : 'Backup restored.');
   } catch (error) {
     showLockError(messageFor(error));
   }
@@ -1820,6 +1859,103 @@ function splitSentence({ here, elsewhere, total }) {
   if (elsewhere === 0) return `${total} ${noun} in total, all counted on this device.`;
   const other = elsewhere === 1 ? 'another device' : 'other devices';
   return `${total} ${noun} in total: ${here} counted on this device, ${elsewhere} on ${other}.`;
+}
+
+/* Every count change the vault records, in the words a person reads rather than the field names
+   the model uses. A cause outside this list is shown as it came, because a newer build may have
+   added one and a line is still better than a blank. */
+const ACTIVITY_CAUSE_LABELS = Object.freeze({
+  click: 'Opened from this list',
+  open: 'Opened in the browser',
+  merge: 'Merged from another device',
+  restore: 'Restored from a backup',
+  import: 'Imported from a file',
+  'history-import': 'Added from browsing history'
+});
+
+/** A device named the way the split names it: this one, or the start of an anonymous id. */
+function deviceName(id) {
+  if (id === deviceId()) return 'this device';
+  if (id === 'legacy') return 'an older build';
+  if (id === 'unsettled') return 'an unnamed device';
+  return id.length > 8 ? id.slice(0, 8) : id;
+}
+
+function activityWhen(at) {
+  const when = new Date(at);
+  if (Number.isNaN(when.getTime())) return String(at);
+  return when.toLocaleString([], {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+/** One line: time, device, cause, and the total before and after, with the slot when it moved. */
+function activityRow(event, { showBookmark = false } = {}) {
+  const parts = [];
+
+  if (showBookmark) {
+    const bookmark = findBookmark(event.bookmarkId);
+    parts.push(
+      el('strong', {
+        class: 'activity-bookmark',
+        text: bookmark ? labelOf(bookmark) : event.url
+      })
+    );
+  }
+
+  parts.push(
+    el('time', { class: 'activity-when', datetime: event.at, text: activityWhen(event.at) }),
+    el('span', { class: 'activity-device', text: deviceName(event.device) }),
+    el('span', {
+      class: 'activity-cause',
+      text: ACTIVITY_CAUSE_LABELS[event.cause] ?? event.cause
+    }),
+    el('span', {
+      class: 'activity-count',
+      text: `${event.before} → ${event.after} ${event.after === 1 ? 'use' : 'uses'}`
+    })
+  );
+
+  if (event.slot) {
+    parts.push(
+      el('span', {
+        class: 'activity-slot',
+        text: `${deviceName(event.slot.device)}: ${event.slot.before} → ${event.slot.after}`
+      })
+    );
+  }
+
+  return el('li', { class: 'activity-row' }, parts);
+}
+
+/**
+ * The activity list as the page draws it: newest first, capped so a sheet never becomes a wall.
+ * A bookmark's sheet asks for its own id; Settings asks for every bookmark, with the name first.
+ */
+function activityList(
+  vault,
+  { bookmarkId = null, limit = 20, showBookmark = false, label = 'Count activity', empty = 'No count changes recorded yet.' } = {}
+) {
+  const events = (Array.isArray(vault?.activity) ? vault.activity : []).filter(
+    (event) => bookmarkId === null || event.bookmarkId === bookmarkId
+  );
+  if (events.length === 0) return el('p', { class: 'modal-note', text: empty });
+
+  const shown = events.slice(0, limit);
+  const list = el(
+    'ul',
+    { class: 'activity-list', 'aria-label': label },
+    shown.map((event) => activityRow(event, { showBookmark }))
+  );
+  if (events.length <= limit) return list;
+
+  return el('div', { class: 'activity-block' }, [
+    list,
+    el('p', { class: 'modal-note', text: `Showing the latest ${limit} of ${events.length}.` })
+  ]);
 }
 
 function render() {
@@ -2185,6 +2321,36 @@ function updateCollectedBar(rows = collectedRows()) {
   }
 }
 
+/**
+ * A collected row that becomes a bookmark brings its visits with it. That is a count arriving
+ * from the browser's history rather than from this list or another device, so it is filed under
+ * its own cause; a row with no visits changes no count and writes nothing.
+ */
+function recordHistoryImport(document, bookmark) {
+  const after = useCount(bookmark);
+  if (after === 0) return document;
+
+  const at = Date.now();
+  return appendActivity(
+    document,
+    [
+      activityEvent(
+        {
+          device: deviceId(),
+          bookmarkId: bookmark.id,
+          url: bookmark.url,
+          cause: 'history-import',
+          before: 0,
+          after,
+          slot: changedSlot(null, bookmark, deviceId())
+        },
+        at
+      )
+    ],
+    at
+  );
+}
+
 /** Add every selected row, in one save rather than one per row. */
 function approveMany(rows) {
   let next = state.document;
@@ -2198,7 +2364,7 @@ function approveMany(rows) {
         { url: row.url, name: nameForCollected(row), uses: { [deviceId()]: Number(row.visits) || 0 } },
         Date.now
       );
-      next = result.document;
+      next = recordHistoryImport(result.document, result.bookmark);
       added += 1;
     } catch (error) {
       if (error.code === 'DUPLICATE') {
@@ -2358,12 +2524,12 @@ function approveCollected(url, visits, label = '') {
   try {
     /* The count crosses with the row: the visits were made to this address, and starting the bookmark at zero
        would throw away the only thing the extension was counting. */
-    const { document: next, bookmark } = addBookmark(
+    const { document: added, bookmark } = addBookmark(
       state.document,
       { url, name: nameForCollected({ url }), uses: { [deviceId()]: Number.isInteger(visits) ? visits : 0 } },
       Date.now
     );
-    state.document = next;
+    state.document = recordHistoryImport(added, bookmark);
     render();
     saveNow();
     announce(`Added ${labelOf(bookmark)}`);
@@ -2550,6 +2716,10 @@ function removeBookmark(bookmark) {
             url: deleted.url,
             name: deleted.name,
             clickCount: deleted.clickCount,
+            /* The per-device visits came with the record and go back with it: an undo that
+               restored only the list-click number would lose every browser open. */
+            uses: deleted.uses,
+            openCount: deleted.openCount,
             pinned: deleted.pinned,
             hideLabel: deleted.hideLabel,
             icon: deleted.icon,
@@ -2776,6 +2946,16 @@ function openEditModal(bookmark) {
       /* The row shows only the sum; this is where the sum is explained — what this device counted and what the
          other devices that share the vault counted. */
       el('p', { class: 'field-hint', text: splitSentence(useSplit(bookmark, deviceId())) }),
+      /* The timeline that explains when the sum moved. Read-only: a count is changed by using the
+         bookmark, not by editing this list. */
+      el('div', { class: 'activity-block' }, [
+        el('p', { class: 'field-label', text: 'Activity' }),
+        activityList(state.document, {
+          bookmarkId: bookmark.id,
+          limit: 20,
+          label: `Activity for ${labelOf(bookmark)}`
+        })
+      ]),
       el('label', { class: 'confirm-saved' }, [pinned, el('span', { text: 'Pin to the top' })]),
       el('label', { class: 'confirm-saved' }, [
         iconOnly,
@@ -2889,9 +3069,17 @@ function handleListClick(event) {
   const bookmark = row ? findBookmark(row.dataset.id) : null;
   if (!bookmark) return;
 
-  state.document = recordClick(state.document, bookmark.id, Date.now);
+  state.document = recordClick(state.document, bookmark.id, Date.now, { device: deviceId() });
+  /* The row shows uses, not list clicks: a bookmark opened twice in the browser reads three
+     uses after a click here, and writing the click count alone would make the number fall on
+     screen until the next render. */
   const counter = row.querySelector('.clicks');
-  if (counter) counter.textContent = String(bookmark.clickCount + 1);
+  const clicked = findBookmark(bookmark.id);
+  if (counter && clicked) {
+    const split = useSplit(clicked, deviceId());
+    counter.textContent = String(split.total);
+    counter.setAttribute('aria-label', splitLabel(split));
+  }
 
   /* The browser has the page; the filtered list behind it is no longer being read. */
   scheduleSearchClear();
@@ -3059,7 +3247,7 @@ async function handleImport() {
         body: [
           el('p', {
             class: 'modal-note',
-            text: 'Every bookmark currently in this vault is removed and replaced by the file. This cannot be undone except from a backup.'
+            text: 'Every bookmark currently in this vault is removed and replaced by the file, along with the counts and count activity this vault holds. This cannot be undone except from a backup.'
           })
         ],
         confirmLabel: 'Replace everything',
@@ -3069,7 +3257,9 @@ async function handleImport() {
     }
     state.document = parsed.document;
   } else {
-    state.document = mergeInto(state.document, parsed.document).document;
+    state.document = mergeInto(state.document, parsed.document, Date.now, {
+      device: deviceId()
+    }).document;
   }
 
   render();
@@ -3469,6 +3659,16 @@ function openSettings() {
           handleImport();
         })
       ]),
+      heading('Activity'),
+      el('p', {
+        class: 'modal-note',
+        text: 'Count changes recorded in this sealed vault, newest first. A bookmark’s own sheet shows its lines.'
+      }),
+      activityList(state.document, {
+        limit: 20,
+        showBookmark: true,
+        label: 'Recent count activity'
+      }),
       heading('Collected links'),
       el('div', { class: 'settings-list' }, [
         (() => {
@@ -3736,6 +3936,7 @@ function openSettings() {
     Appearance: 'vault',
     Export: 'vault',
     Import: 'vault',
+    Activity: 'activity',
     Icons: 'vault',
     'Collected links': 'collected',
     Server: 'sync',
@@ -3743,6 +3944,7 @@ function openSettings() {
   };
   const PLAN = [
     ['vault', 'Vault'],
+    ['activity', 'Activity'],
     ['collected', 'Collected links'],
     ['sync', 'Sync'],
     ['device', 'This device']
