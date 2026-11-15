@@ -19,6 +19,7 @@ import {
   appendActivity,
   changedSlot,
   createDocument,
+  fitActivity,
   mergeBookmark,
   normaliseActivity,
   normaliseUses,
@@ -224,7 +225,7 @@ export function importPlain(payload, now = Date.now, options = {}) {
   }
 
   const carriedIds = new Set(remappedIds.keys());
-  document = {
+  document = fitActivity({
     ...document,
     activity: normaliseActivity(
       [
@@ -235,7 +236,7 @@ export function importPlain(payload, now = Date.now, options = {}) {
       ],
       now
     )
-  };
+  });
 
   return { document, statistics };
 }
@@ -362,14 +363,14 @@ export function mergeInto(existing, incoming, now = Date.now, options = {}) {
   }
 
   return {
-    document: {
+    document: fitActivity({
       ...existing,
       bookmarks,
       activity: normaliseActivity(
         [...events, ...carried, ...(Array.isArray(existing.activity) ? existing.activity : [])],
         now
       )
-    },
+    }),
     statistics
   };
 }

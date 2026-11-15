@@ -125,8 +125,11 @@ A short activity log lives inside the same sealed vault: one line when a count c
 from this list, opened in the browser, merged from another device, restored from a backup, or
 imported. A line names when it happened, which device saw it, the address, the cause, and the
 total before and after; where one device's slot moved, it names that device too. The log is a
-ring: at most 500 lines, nothing older than 90 days, and only as much as the sealed vault has room
-for. It is merged by line id, so syncing the same copy twice adds nothing, and it never leaves the
+ring: at most 100 lines, nothing older than 90 days, and no more than 24,000 characters of log
+JSON — about 80 lines with a full address, fewer when the rest of the vault is large. On save the
+oldest lines are dropped first if the whole document would not fit the free hosted copy (160,000
+sealed characters), so a full log plus a nearly full vault still fits; bookmarks are never cut.
+It is merged by line id, so syncing the same copy twice adds nothing, and it never leaves the
 vault — no extra request and no server field. A bookmark's sheet shows its own lines; Settings →
 Activity shows the latest across the vault. A device that has not synced cannot show another
 device's line, and the log cannot explain a fall that happened before it existed. Because the log

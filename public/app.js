@@ -16,6 +16,7 @@ import {
   createDocument,
   deleteBookmark,
   filterBookmarks,
+  fitActivity,
   mergeDocuments,
   normaliseActivity,
   recordClick,
@@ -533,6 +534,9 @@ async function saveNow({ push = true } = {}) {
       /* A lock may have arrived while the previous pass was still sealing. Nothing further is
          written once the key is gone. */
       if (!state.key) return;
+      /* A library near the free copy's size leaves the log less room; the oldest lines go before
+         the seal, so the log can never be why a push is refused. */
+      state.document = fitActivity(state.document);
       state.version += 1;
       /* Sealed at the number the server will give it, so a later read under any other number
          refuses instead of handing back older bytes. */
@@ -892,6 +896,15 @@ function localSealVersion(stored) {
  * being sent bound to a version the server will not give it.
  */
 async function sealedForPush(baseVersion) {
+  /* The same whole-document trim as a save: a vault that grew enough to need the log's room
+     must not be pushed with a log that no longer fits. A stale sealed copy is dropped here so
+     the re-seal below sees the trimmed document. */
+  const fitted = fitActivity(state.document);
+  if (fitted !== state.document) {
+    state.document = fitted;
+    state.sealed = null;
+  }
+
   const wanted = baseVersion + 1;
   if (state.sealed?.at === wanted) return state.sealed;
 
@@ -1085,7 +1098,10 @@ function enter({ accountId, authSecret, authKey = null, key, version, sealed, do
   state.sealed = sealed;
   /* A vault written before the log existed has no `activity`, and one written by a newer build
      may carry a line this build cannot read: both are read into the shape the page draws. */
-  state.document = { ...vaultDocument, activity: normaliseActivity(vaultDocument.activity, Date.now) };
+  state.document = fitActivity({
+    ...vaultDocument,
+    activity: normaliseActivity(vaultDocument.activity, Date.now)
+  });
 
   lockView.hidden = true;
   appView.hidden = false;
@@ -1682,6 +1698,7 @@ async function handleRestore() {
       }
     }
 
+    vaultDocument = fitActivity(vaultDocument);
     const version = Math.max(stored.version, 0) + 1;
     /* The backup is re-sealed at the number this device will store it under: the blob it came
        from was bound to its own version, and a record that names a number the bytes were not

@@ -24,12 +24,20 @@ export const TOMBSTONE_DAYS = 180;
 
 /* The audit log is a ring, not a history: the vault is small and sealed, and a line kept for
    every count change since the beginning would grow without bound inside it. */
-export const MAX_ACTIVITY = 500;
+export const MAX_ACTIVITY = 100;
 export const ACTIVITY_DAYS = 90;
-/* A full 500-line ring of long addresses can be larger than the hosted copy a member is given
-   (~120 KB sealed). The log is the newest lines that fit this budget, so a log can never be the
-   reason a vault no longer syncs. The bound is on the JSON the events take, before sealing. */
-export const MAX_ACTIVITY_CHARS = 96_000;
+/* A log is a small part of the vault, not most of it. At roughly 280 characters for a full
+   line with a real address, 24,000 characters is about 80 lines; a shorter address holds more,
+   up to the 100-line cap. The oldest lines fall first. */
+export const MAX_ACTIVITY_CHARS = 24_000;
+/* The whole document, as JSON, that still seals inside the free hosted copy. The copy is
+   160,000 ciphertext characters (`FREE_MAX_CT_CHARS`); a 1 KiB-padded plaintext plus the GCM tag
+   becomes 4/3 as many base64url characters, so 120,000 plaintext bytes is the ceiling. The
+   envelope and the padding bucket need a little of that, and this leaves a margin. The size is
+   the whole document, not only the log: a large vault leaves the log less room, and `fitActivity`
+   drops the oldest lines until both fit. tests/activity.test.mjs checks this against the real
+   server cap. */
+export const FREE_DOCUMENT_BYTES = 117_000;
 export const ACTIVITY_CAUSES = Object.freeze([
   'click',
   'open',
@@ -431,6 +439,35 @@ function compareActivity(left, right) {
   return right.at.localeCompare(left.at) || right.id.localeCompare(left.id);
 }
 
+/** The document's size as the sealed envelope will carry it: UTF-8 bytes of its JSON. */
+function documentBytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/**
+ * Drop the oldest lines until the whole document fits the free hosted copy.
+ *
+ * The log budget above bounds the log on its own; this bounds it against everything else in the
+ * vault. A library already near the cap leaves little room, and a log is the part that can go —
+ * bookmarks are never cut. The newest line is kept as long as it fits at all; a document whose
+ * bookmarks alone are over the cap is returned with an empty log rather than pretending to fix
+ * something the log did not cause.
+ */
+export function fitActivity(document, { maxBytes = FREE_DOCUMENT_BYTES } = {}) {
+  const activity = Array.isArray(document.activity) ? document.activity : [];
+  if (activity.length === 0) return document;
+
+  let bytes = documentBytes(document);
+  if (bytes <= maxBytes) return document;
+
+  const kept = [...activity];
+  while (kept.length > 0 && bytes > maxBytes) {
+    /* One event plus the comma that separated it from the next; the oldest is last. */
+    bytes -= documentBytes(kept.pop()) + 1;
+  }
+  return { ...document, activity: kept };
+}
+
 /** Build one event for the log, refusing a shape that could not be read back. */
 export function activityEvent(input, now = Date.now) {
   const event = normaliseEvent({
@@ -454,7 +491,7 @@ export function activityEvent(input, now = Date.now) {
   return event;
 }
 
-/** Add lines to the ring, dropping duplicates and anything past the bound. */
+/** Add lines to the ring, dropping duplicates, anything past the bound and anything past the document's room. */
 export function appendActivity(document, events, now = Date.now) {
   assertDocument(document, 'the document');
   const incoming = Array.isArray(events) ? events : [events];
@@ -462,7 +499,7 @@ export function appendActivity(document, events, now = Date.now) {
     [...incoming, ...(Array.isArray(document.activity) ? document.activity : [])],
     now
   );
-  return { ...document, activity };
+  return fitActivity({ ...document, activity });
 }
 
 /**
@@ -785,7 +822,7 @@ export function mergeDocuments(local, remote, now = Date.now, options = {}) {
   }
 
   return {
-    document: {
+    document: fitActivity({
       schema: SCHEMA,
       bookmarks,
       tombstones: keptTombstones,
@@ -794,7 +831,7 @@ export function mergeDocuments(local, remote, now = Date.now, options = {}) {
         now
       ),
       prefs: newerPrefs(local.prefs, remote.prefs)
-    },
+    }),
     statistics
   };
 }
