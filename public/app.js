@@ -4395,6 +4395,7 @@ async function lockVault({ broadcast = true } = {}) {
   lastSyncedAt = 0;
   plan = null;
   units = 0;
+  placesCount = null;
   vaultCreatedAt = null;
   lastActivityAt = null;
   list.replaceChildren();

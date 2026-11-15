@@ -210,10 +210,15 @@ What stays is one key: the date. Login, the challenge, status and a second delet
 `410 {"error":"account_deleted"}` — not `404 no_account`, which is the answer that tells a
 client to create the account again. That tombstone makes the deletion stick against a device
 that still holds the phrase and still has sync on: it is told what happened and does not
-register a new account. On a server that hands out codes, a creation that presents a valid new
-code clears the tombstone and is the explicit way back. On a server without codes only the
-operator's end-account route can clear it. That is deliberate: a deletion should not be undone
-by pressing sync on another device. There is no recovery by phrase alone.
+register a new account after a deletion. On a server that hands out codes, a creation that
+presents a valid new code clears the tombstone and is the explicit way back; on a server
+without codes only the operator's end-account route can clear it. The app does not offer that
+recreation after a deletion: the same phrase names the same account id, and the phrase alone is
+deliberately not enough. A new phrase is a new account, with its own code.
+
+A sign-in recorded before the public id existed has no id, so the list offers no action for it;
+it expires on its own. The operator's disabled switch refuses deletion as it refuses every
+account route — the operator can end the account instead.
 
 ## Request limits
 
