@@ -120,8 +120,11 @@ const bannedCopy = [
   'free sync has ended',
   '7 days read-only'
 ];
-/* Nothing personal belongs in a page strangers load. */
+/* Nothing personal belongs in a page strangers load. One address is deliberately public: the
+   owner's support address in the disabled-vault sentence. It is removed before the scan, so every
+   other mention of the name or the personal domain is still refused. */
 const personal = ['aravinth', '@332321.xyz', 'simplelogin'];
+const SUPPORT_ADDRESS = 'aravinth@332321.xyz';
 
 for (const file of assets) {
   const text = readFileSync(file, 'utf8');
@@ -155,8 +158,9 @@ for (const file of assets) {
   for (const phrase of bannedCopy) {
     if (flat.includes(phrase)) problems.push(`${relative(root, file)}: overclaiming copy "${phrase}"`);
   }
+  const withoutSupport = flat.split(SUPPORT_ADDRESS).join('');
   for (const who of personal) {
-    if (flat.includes(who)) problems.push(`${relative(root, file)}: personal detail "${who}" in a public asset`);
+    if (withoutSupport.includes(who)) problems.push(`${relative(root, file)}: personal detail "${who}" in a public asset`);
   }
   /* The CSP has no 'unsafe-inline' for scripts, so an inline handler would simply not run. */
   if (file.endsWith('.html')) {

@@ -113,6 +113,6 @@ test('a disabled vault tells the person what happened and who to ask', () => {
   assert.equal(failure.kind, 'disabled');
   assert.equal(failure.label, 'Vault disabled');
   assert.match(failure.message, /disabled by the administrator/);
-  assert.match(failure.message, /feedback@8alias\.com/);
+  assert.match(failure.message, /aravinth@332321\.xyz/);
   assert.doesNotMatch(failure.message, /No connection/);
 });

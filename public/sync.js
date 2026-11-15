@@ -93,7 +93,7 @@ export function describeSyncFailure(error) {
         kind: 'disabled',
         label: 'Vault disabled',
         message:
-          'This vault has been disabled by the administrator. Sync is off. Contact feedback@8alias.com. The local vault still works on this device.'
+          'This vault has been disabled by the administrator. Sync is off. Contact aravinth@332321.xyz. The local vault still works on this device.'
       };
     case 'FULL':
       return { kind: 'cap', label: 'No new accounts' };
