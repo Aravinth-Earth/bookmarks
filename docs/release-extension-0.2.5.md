@@ -10,8 +10,8 @@ heading removed.
 | File | `bookmarks-extension-0.2.5.zip` |
 | Size | 54,914 bytes, 12 files, stored (uncompressed, fixed timestamps) |
 | SHA-256 | `1bbacac071c3f7a3245843acfec90ca3aeaef9a63a95b8f2213c5f2c48e647bb` |
-| Built from | the tree merged as this release's branch, `extension/` only |
-| Browsers | Chrome, Brave, Edge, Vivaldi — 116 or newer, unpacked |
+| Built from | `extension/` on the branch `release/extension-0.2.5`, merged as `main` before publishing |
+| Browsers | Chromium 116 or newer, unpacked — tested on Brave and Chrome |
 
 ## Install
 
