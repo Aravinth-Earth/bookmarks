@@ -233,6 +233,7 @@ export class Vault {
     if (path === '/admin-disable' && request.method === 'POST') return this.adminDisable(request);
     if (path === '/admin-enable' && request.method === 'POST') return this.adminEnable(request);
     if (path === '/admin-delete' && request.method === 'POST') return this.adminDelete(request);
+    if (path === '/status' && request.method === 'GET') return this.status();
     if (path === '/account') return this.createAccount(request);
     if (path === '/challenge') return this.challenge(request);
     if (path === '/login') return this.login(request);
@@ -791,6 +792,22 @@ export class Vault {
    *
    * The phrase, the auth secret, the session records and the sealed blob are not in the answer.
    */
+  /**
+   * The one question a locked device may ask without a proof: does this account exist, and is
+   * the operator's switch on? It answers no vault content and no account metadata; the id is
+   * already a hash of the phrase. The app asks it only when sync is on.
+   */
+  async status() {
+    const account = await this.storage.get('account');
+    if (!account) return json({ exists: false, disabled: false }, 404);
+    const disabled = await this.storage.get(ADMIN_DISABLED_KEY);
+    return json({
+      exists: true,
+      disabled: Boolean(disabled),
+      disabledAt: disabled?.at ?? null
+    });
+  }
+
   /**
    * Turn the operator's switch on or off. Both routes are binding-only and secret-guarded.
    *

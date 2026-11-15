@@ -437,6 +437,21 @@ export class SyncClient {
     });
   }
 
+  /**
+   * Whether this account exists and the operator's switch is on. No proof, no vault content:
+   * the id is already a hash of the phrase, and the app asks only when sync is on.
+   */
+  async accountStatus(accountId) {
+    const response = await this.request(`/a/${accountId}/status`);
+    if (response.status === 404) return { exists: false, disabled: false };
+    if (!response.ok) {
+      throw new SyncError('STATUS_FAILED', 'The server did not answer.', {
+        status: response.status
+      });
+    }
+    return response.payload;
+  }
+
   /** The places this account is signed in on. Needs a live session; no key material moves. */
   async sessions() {
     this.requireSession();

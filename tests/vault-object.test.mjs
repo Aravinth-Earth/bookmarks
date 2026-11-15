@@ -1322,6 +1322,10 @@ test('the operator can disable a vault, every account route refuses, and enable 
   const stats = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
   assert.equal(stats.body.disabled.reason, 'testing');
 
+  const live = await read(await harness.vault.fetch(request('/status', { method: 'GET' })));
+  assert.equal(live.status, 200);
+  assert.deepEqual(live.body, { exists: true, disabled: true, disabledAt: stats.body.disabled.at });
+
   /* Every account-facing route answers the same 403, including a session that was valid a
      moment ago, and creation cannot re-claim the account. */
   for (const [label, response] of [
@@ -1338,6 +1342,9 @@ test('the operator can disable a vault, every account route refuses, and enable 
 
   const enabled = await read(await harness.vault.fetch(adminRequest('/admin-enable', {})));
   assert.equal(enabled.status, 200);
+
+  const back = await read(await harness.vault.fetch(request('/status', { method: 'GET' })));
+  assert.deepEqual(back.body, { exists: true, disabled: false, disabledAt: null });
 
   const again = await loginAs(harness, 'desktop');
   assert.equal(again.status, 200, 'the account works again');
@@ -1378,6 +1385,10 @@ test('the operator can delete a vault and free its slot, and a second call is a 
   const again = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
   assert.equal(again.status, 200);
   assert.equal(again.body.deleted, false);
+
+  const status = await read(await harness.vault.fetch(request('/status', { method: 'GET' })));
+  assert.equal(status.status, 404);
+  assert.deepEqual(status.body, { exists: false, disabled: false });
 
   const missing = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
   assert.equal(missing.status, 404);

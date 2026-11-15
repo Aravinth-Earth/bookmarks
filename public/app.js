@@ -1324,6 +1324,10 @@ async function handleUnlock(event) {
     if (!stored.sealed) {
       await saveNow();
       await offerServerVault();
+    } else if (syncEnabled()) {
+      /* A local vault opens without the server; still ask, once, whether the operator has
+         switched this account off, so the sentence appears at the moment the person unlocks. */
+      void noticeIfDisabled();
     }
   } catch (error) {
     showLockError(messageFor(error));
@@ -1348,10 +1352,9 @@ async function offerServerVault() {
     exists = await sync.accountExists(state.accountId);
   } catch (error) {
     if (error?.code === 'ACCOUNT_DISABLED') {
-      announce(
-        'This vault has been disabled by the administrator. Contact feedback@8alias.com.',
-        { duration: 8000 }
-      );
+      const failure = disabledNotice();
+      lastSyncNotice = failure.message;
+      announce(failure.message, { duration: 8000 });
       return;
     }
     /* Offline, throttled, or the question could not be asked. Stay local — but say so: an empty
@@ -1384,6 +1387,30 @@ async function offerServerVault() {
 /* Only an empty vault is worth asking about: anything already here wins over a prompt. */
 function hasBookmarks() {
   return (state.document?.bookmarks.length ?? 0) > 0;
+}
+
+/** The one sentence for a vault the operator has switched off. */
+function disabledNotice() {
+  return describeSyncFailure(new SyncError('ACCOUNT_DISABLED', 'disabled'));
+}
+
+/**
+ * Ask the server whether this account is switched off, at unlock, without blocking the local
+ * vault. A failure is silent: the next sync says the same thing if it matters.
+ */
+async function noticeIfDisabled() {
+  try {
+    const status = await sync.accountStatus(state.accountId);
+    if (!status.disabled) return;
+    const failure = disabledNotice();
+    setSyncStatus(failure.label);
+    if (failure.message !== lastSyncNotice) {
+      lastSyncNotice = failure.message;
+      announce(failure.message, { duration: 8000 });
+    }
+  } catch {
+    /* Offline or throttled: the local vault opens, and sync will say it when it can. */
+  }
 }
 
 function openCreateModal() {
