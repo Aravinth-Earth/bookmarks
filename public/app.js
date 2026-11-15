@@ -1051,6 +1051,10 @@ async function forgetDeletedVault(message) {
   lockSignal.broadcast();
 
   showLock(message, { hasVault: false });
+  /* The generic empty-device note offers to load a synced copy; there is none to load. */
+  deviceNote.textContent =
+    'No vault on this device. The deleted account cannot be reopened here; a new vault starts a new account.';
+  deviceNote.hidden = false;
   announce(message, { duration: 8000 });
 }
 
