@@ -120,3 +120,38 @@ test('a place is signed out from the list, and the survivor keeps syncing', asyn
     await other.device.close();
   }
 });
+
+test('signing out this place locks the page, and the phrase opens the local vault again', async ({
+  page
+}) => {
+  test.setTimeout(420_000);
+
+  const phrase = await createVault(page);
+  await addBookmark(page, { url: 'https://e2e.local/local', name: 'Local' });
+  await turnOnSyncPatiently(page, phrase);
+  await expectSynced(page);
+
+  const modal = await openSettings(page);
+  await (await settingsItem(modal, /^Connected places/)).click();
+
+  const places = page.getByRole('dialog', { name: 'Connected places' });
+  await expect(places).toBeVisible({ timeout: 30_000 });
+
+  /* This place is the last one in a fresh account, and ending it is allowed. */
+  const current = places.locator('.places-row').filter({ hasText: 'this device' });
+  await current.getByRole('button', { name: /^Sign out / }).click();
+
+  /* No token is left to sync with, so the page locks rather than pretending otherwise. The
+     account and the sealed vault are untouched. */
+  await expect(page.locator('#lock-view'), 'this place signs itself out').toBeVisible({
+    timeout: 30_000
+  });
+  await expect(page.locator('#status')).toContainText(/This place is signed out/i);
+
+  await page.locator('#phrase').fill(phrase);
+  await page.locator('#unlock-button').click();
+  await expect(page.locator('#app-view')).toBeVisible({ timeout: 60_000 });
+  await expect
+    .poll(async () => (await vaultRows(page)).map((row) => row.name), { timeout: 60_000 })
+    .toContain('Local');
+});
