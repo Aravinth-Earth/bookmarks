@@ -614,6 +614,7 @@ test('a wrong phrase on the delete is the phrase sentence, and the dead token is
     }
   );
   assert.equal(client.token, null);
+  assert.equal(server.calls.length, 2, 'a wrong proof is not retried with a fresh session');
 });
 
 test('a wait named by the limiter on the delete is a THROTTLED error', async () => {
@@ -683,4 +684,40 @@ test('a revoked token is UNAUTHORIZED and is dropped, so the next sync signs in 
   );
   assert.equal(client.token, null);
   assert.equal(client.signedIn, false);
+});
+
+test('a session that died before the delete is signed in again, not called a wrong phrase', async () => {
+  const calls = [];
+  let deletions = 0;
+  const fetch = async (url, options = {}) => {
+    const path = new URL(url, 'https://example.test').pathname;
+    calls.push(path.split('/').pop());
+    const headers = { 'content-type': 'application/json' };
+
+    if (path.endsWith('/challenge')) {
+      return new Response(JSON.stringify({ nonce: 'nonce' }), { status: 200, headers });
+    }
+    if (path.endsWith('/login')) {
+      return new Response(JSON.stringify({ token: 't'.repeat(43) }), { status: 200, headers });
+    }
+    if (path.endsWith('/delete')) {
+      deletions += 1;
+      if (deletions === 1) {
+        return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers });
+      }
+      return new Response(JSON.stringify({ ok: true, deletedAt: 9 }), { status: 200, headers });
+    }
+    return new Response('{}', { status: 404, headers });
+  };
+
+  const client = new SyncClient({ fetch });
+  client.token = 'x'.repeat(43);
+  client.accountId = ACCOUNT.accountId;
+
+  assert.deepEqual(await client.deleteAccount(ACCOUNT.accountId, ACCOUNT.authSecret), {
+    ok: true,
+    deletedAt: 9
+  });
+  assert.deepEqual(calls, ['challenge', 'delete', 'challenge', 'login', 'challenge', 'delete']);
+  assert.equal(client.token, null);
 });

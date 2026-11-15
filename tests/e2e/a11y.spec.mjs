@@ -584,7 +584,7 @@ test('the delete-account dialog names both fields, holds the action until both a
   await expect(action, 'the phrase alone is not enough').toBeDisabled();
 
   await typed.fill('delete');
-  await expect(action, 'both fields filled, in capitals, enables it').toBeEnabled();
+  await expect(action, 'both fields filled enables it').toBeEnabled();
 
   expect(await unnamedControls(page), 'unnamed controls in the delete dialog').toEqual([]);
 

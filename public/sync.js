@@ -596,39 +596,51 @@ export class SyncClient {
    * The caller is left signed out, because the session it held is part of what was deleted.
    */
   async deleteAccount(accountId, authSecret) {
-    if (!this.signedIn) await this.login(accountId, authSecret);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!this.signedIn) await this.login(accountId, authSecret);
 
-    const challenge = await this.request(`/a/${accountId}/challenge`, { method: 'POST' });
-    if (challenge.status === 404) {
-      throw new SyncError('NO_ACCOUNT', 'This vault is not registered on the server.', { status: 404 });
-    }
-    if (challenge.status === 429) throw throttle(challenge);
-    if (!challenge.ok || typeof challenge.payload.nonce !== 'string') {
-      throw new SyncError('CHALLENGE_FAILED', 'The server did not answer.', {
-        status: challenge.status
+      const challenge = await this.request(`/a/${accountId}/challenge`, { method: 'POST' });
+      if (challenge.status === 404) {
+        throw new SyncError('NO_ACCOUNT', 'This vault is not registered on the server.', {
+          status: 404
+        });
+      }
+      if (challenge.status === 429) throw throttle(challenge);
+      if (!challenge.ok || typeof challenge.payload.nonce !== 'string') {
+        throw new SyncError('CHALLENGE_FAILED', 'The server did not answer.', {
+          status: challenge.status
+        });
+      }
+
+      const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
+      const response = await this.request(`/a/${accountId}/delete`, {
+        method: 'POST',
+        token: this.token,
+        body: { proof }
       });
-    }
 
-    const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
-    const response = await this.request(`/a/${accountId}/delete`, {
-      method: 'POST',
-      token: this.token,
-      body: { proof }
-    });
+      if (response.status === 429) throw throttle(response);
+      if (response.status === 401) {
+        /* A 401 is two different answers: the proof was wrong, or the session this page held
+           had already died. Only the second is worth a fresh sign-in and one more try. */
+        const dead =
+          response.payload?.error === 'unauthorized' ||
+          response.payload?.error === 'challenge_expired';
+        this.token = null;
+        if (dead && attempt === 0) continue;
+        throw new SyncError('LOGIN_FAILED', 'The server refused the proof.', { status: 401 });
+      }
+      if (!response.ok) {
+        throw new SyncError('DELETE_FAILED', 'The server did not delete the account.', {
+          status: response.status
+        });
+      }
 
-    if (response.status === 429) throw throttle(response);
-    if (response.status === 401) {
       this.token = null;
-      throw new SyncError('LOGIN_FAILED', 'The server refused the proof.', { status: 401 });
-    }
-    if (!response.ok) {
-      throw new SyncError('DELETE_FAILED', 'The server did not delete the account.', {
-        status: response.status
-      });
+      return response.payload;
     }
 
-    this.token = null;
-    return response.payload;
+    throw new SyncError('DELETE_FAILED', 'The server did not delete the account.');
   }
 
   async logout() {

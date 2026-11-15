@@ -930,7 +930,7 @@ function deleteAccountSheet() {
       el('p', {
         class: 'field-hint',
         id: 'delete-confirm-hint',
-        text: 'The word, in capitals, so this is not one tap away from an ordinary setting.'
+        text: 'The word DELETE, so this is not one tap away from an ordinary setting.'
       }),
       errorLine
     ],
