@@ -631,3 +631,40 @@ test('no line carries an account id, a secret, a token, a hostname or a raw addr
     assert.doesNotMatch(line, /[A-Za-z0-9_-]{22}/, 'no identifier-shaped token');
   }
 });
+
+test('a deletion writes one account_deleted line with the digest, and nothing else', async () => {
+  const harness = vaultObject();
+  await provision(harness);
+
+  const challenge = await read(await harness.vault.fetch(vaultRequest('/challenge')));
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const session = await read(await harness.vault.fetch(vaultRequest('/login', { proof })));
+  const token = session.body.token;
+
+  const second = await read(await harness.vault.fetch(vaultRequest('/challenge')));
+  const deletion = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, second.body.nonce);
+
+  const { lines } = await withEvents(() =>
+    harness.vault.fetch(
+      new Request('https://vault/delete', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ proof: deletion })
+      })
+    )
+  );
+
+  assert.equal(lines.length, 1, 'one line, on the one served request that writes one');
+  assert.deepEqual(JSON.parse(lines[0]), {
+    event: 'account_deleted',
+    route: 'vault',
+    account: REF
+  });
+  assert.equal(lines[0].includes(token), false, 'no session token');
+  assert.equal(lines[0].includes(deletion), false, 'no proof');
+  assert.equal(lines[0].includes(ACCOUNT.authSecret), false, 'no secret');
+  assert.equal(lines[0].includes(ACCOUNT.accountId), false, 'the id itself never leaves');
+});

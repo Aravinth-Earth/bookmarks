@@ -218,6 +218,8 @@ const ROUTE_CLASS = {
   '/account': 'signin',
   '/challenge': 'signin',
   '/login': 'signin',
+  /* Deleting proves the phrase, so it spends the same budget as the route that checks one. */
+  '/delete': 'signin',
   '/logout': 'vault',
   '/sessions': 'vault',
   '/status': 'signin',
@@ -227,6 +229,17 @@ const ROUTE_CLASS = {
 };
 
 /**
+ * The class a route path is counted as.
+ *
+ * Most routes are one segment, but ending one place is `/sessions/<id>`, whose tail names a
+ * placeholder rather than a route. Its class is the first segment's, so the whole family shares
+ * the one budget it is documented under.
+ */
+function classOfRoute(path) {
+  return ROUTE_CLASS[path] ?? ROUTE_CLASS[`/${path.split('/')[1]}`] ?? null;
+}
+
+/**
  * The class an API path is counted as, for a boundary line written after dispatch threw.
  *
  * The path is read the same way `handleApi` reads it — the direct route, or the route after
@@ -234,10 +247,11 @@ const ROUTE_CLASS = {
  */
 function routeClassOf(pathname) {
   const path = pathname.slice(API_PREFIX.length);
-  if (ROUTE_CLASS[path]) return ROUTE_CLASS[path];
+  const direct = classOfRoute(path);
+  if (direct) return direct;
 
-  const forwarded = path.match(/^\/a\/[^/]+\/([^/]+)/);
-  return (forwarded && ROUTE_CLASS[`/${forwarded[1]}`]) || 'api';
+  const forwarded = path.match(/^\/a\/[^/]+\/(.+)$/);
+  return (forwarded && classOfRoute(`/${forwarded[1]}`)) || 'api';
 }
 
 /** The account an API path names, if it names one that is well formed. */
@@ -1099,7 +1113,7 @@ async function handleApi(request, env, url) {
 
     const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
     const target = new URL(`https://vault${forward}`, 'https://vault');
-    return limited(env, ROUTE_CLASS[forward], request, async () =>
+    return limited(env, classOfRoute(forward), request, async () =>
       forwardTo(stub, target, request, await sourceDigest(request))
     );
   }
