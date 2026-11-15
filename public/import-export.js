@@ -14,10 +14,16 @@
 import {
   MAX_BOOKMARKS,
   SCHEMA,
+  activityEvent,
   addBookmark,
+  appendActivity,
+  changedSlot,
   createDocument,
   mergeBookmark,
-  normalizeUrl
+  normaliseActivity,
+  normaliseUses,
+  normalizeUrl,
+  useCount
 } from './bookmarks.js';
 
 export const PLAIN_FORMAT = 'bookmarks-plain/1';
@@ -60,7 +66,9 @@ function legacySearch(entry) {
 }
 
 function legacyClicks(entry) {
-  const value = entry?.click_count;
+  /* A file from this app spells the field `clickCount`; the retired app spelled it `click_count`.
+     Reading only one of them turned an exported seven into an imported zero. */
+  const value = entry?.click_count ?? entry?.clickCount;
   return Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
@@ -75,8 +83,13 @@ function legacyColor(entry) {
  * `addBookmark` does the validation, the duplicate check and the limit, and then the record is
  * replaced with the same one carrying the original timestamps. Reusing that path is what keeps
  * an import from accepting something an add would refuse.
+ *
+ * A file that came from this app carries the per-device slots, so they cross with the record:
+ * an import that kept only `clickCount` would look like a count that fell, especially on a
+ * device that had no other copy. A file with counts leaves one line each, in the same sealed
+ * document, because a count arrived here from outside the vault.
  */
-function addImported(document, entry, now) {
+function addImported(document, entry, now, { device, cause }) {
   const createdMs = toMillis(entry.createdAt, now());
 
   const { document: added, bookmark } = addBookmark(
@@ -87,7 +100,9 @@ function addImported(document, entry, now) {
       search: entry.search,
       clickCount: entry.clickCount,
       color: entry.color,
-      hideLabel: entry.hideLabel
+      hideLabel: entry.hideLabel,
+      uses: entry.uses,
+      openCount: entry.openCount
     },
     () => createdMs
   );
@@ -100,7 +115,38 @@ function addImported(document, entry, now) {
 
   const bookmarks = [...added.bookmarks];
   bookmarks[bookmarks.length - 1] = record;
-  return { document: { ...added, bookmarks }, bookmark: record };
+  let next = { ...added, bookmarks };
+
+  if (useCount(record) > 0) {
+    next = appendActivity(
+      next,
+      [
+        activityEvent(
+          {
+            device,
+            bookmarkId: record.id,
+            url: record.url,
+            cause,
+            before: 0,
+            after: useCount(record),
+            slot: importedSlot(record)
+          },
+          now
+        )
+      ],
+      now
+    );
+  }
+
+  return { document: next, bookmark: record };
+}
+
+/** The one device slot a freshly imported record carries, when it carries exactly one. */
+function importedSlot(record) {
+  const uses = normaliseUses(record.uses);
+  const devices = Object.keys(uses);
+  if (devices.length !== 1) return null;
+  return { device: devices[0], before: 0, after: uses[devices[0]] };
 }
 
 /**
@@ -111,8 +157,10 @@ function addImported(document, entry, now) {
  *
  * @returns {{document: object, statistics: {imported: number, skipped: number, duplicates: number}}}
  */
-export function importPlain(payload, now = Date.now) {
+export function importPlain(payload, now = Date.now, options = {}) {
+  const settings = { device: options.device ?? 'unsettled', cause: options.cause ?? 'import' };
   let entries;
+  let carried = [];
 
   if (typeof payload === 'string') {
     try {
@@ -120,15 +168,18 @@ export function importPlain(payload, now = Date.now) {
     } catch {
       throw fail('INVALID_IMPORT', 'that file is not JSON');
     }
-    return importPlain(entries, now);
+    return importPlain(entries, now, settings);
   }
 
   if (Array.isArray(payload)) {
     entries = payload;
   } else if (payload?.format === PLAIN_FORMAT && payload.document) {
-    return importPlain(payload.document, now);
+    return importPlain(payload.document, now, settings);
   } else if (payload?.schema === SCHEMA) {
     entries = payload.bookmarks;
+    /* An export made by this app carries its own log. It is kept only for the bookmarks this
+       file really imports, so a line cannot outlive the record it describes. */
+    carried = normaliseActivity(payload.activity, now);
   } else {
     throw fail('INVALID_IMPORT', 'that file is not a bookmark export');
   }
@@ -142,6 +193,9 @@ export function importPlain(payload, now = Date.now) {
      how many. A clash with the vault's own bookmarks is not this file's business. */
   const statistics = { imported: 0, skipped: 0, duplicates: 0, repeats: [] };
   let document = createDocument();
+  /* The ids in a file are not the ids this vault gives its records, so a source line is carried
+     under the new id of the record it describes. */
+  const remappedIds = new Map();
 
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') {
@@ -150,8 +204,11 @@ export function importPlain(payload, now = Date.now) {
     }
 
     try {
-      const result = addImported(document, legacyEntry(entry), now);
+      const result = addImported(document, legacyEntry(entry), now, settings);
       document = result.document;
+      if (typeof entry.id === 'string' && entry.id !== '') {
+        remappedIds.set(entry.id, result.bookmark.id);
+      }
       statistics.imported += 1;
     } catch (error) {
       if (error.code === 'DUPLICATE') {
@@ -165,6 +222,20 @@ export function importPlain(payload, now = Date.now) {
       }
     }
   }
+
+  const carriedIds = new Set(remappedIds.keys());
+  document = {
+    ...document,
+    activity: normaliseActivity(
+      [
+        ...(document.activity ?? []),
+        ...carried
+          .filter((event) => carriedIds.has(event.bookmarkId))
+          .map((event) => ({ ...event, bookmarkId: remappedIds.get(event.bookmarkId) }))
+      ],
+      now
+    )
+  };
 
   return { document, statistics };
 }
@@ -187,6 +258,10 @@ function legacyEntry(entry) {
     clickCount: legacyClicks(entry),
     color: legacyColor(entry),
     hideLabel,
+    /* Present only in a file this app exported; older shapes have neither. Both are validated
+       by `addBookmark`, so a malformed slot is skipped like any other malformed record. */
+    uses: entry.uses,
+    openCount: entry.openCount,
     createdAt: entry.created_date ?? entry.createdAt,
     updatedAt: entry.last_updated ?? entry.updatedAt
   };
@@ -197,18 +272,56 @@ function legacyEntry(entry) {
  *
  * Matching is by URL, not by id: an import has never seen this device's ids. The field rules are
  * the same ones two synced devices use, so an import cannot produce a state sync would not.
+ *
+ * A count that arrives from the file is a change and leaves a line. The bookmarks the file adds
+ * keep the import line they were already given; a record whose URL is already here is merged
+ * under the local id, so the file's own line for that record is dropped rather than left
+ * pointing at an id this vault does not hold.
  */
-export function mergeInto(existing, incoming, now = Date.now) {
+export function mergeInto(existing, incoming, now = Date.now, options = {}) {
+  const device = options.device ?? 'unsettled';
+  const cause = options.cause ?? 'import';
   const byUrl = new Map(existing.bookmarks.map((bookmark) => [bookmark.url, bookmark]));
   const bookmarks = [...existing.bookmarks];
   const statistics = { added: 0, updated: 0, skipped: 0 };
+  const addedIds = new Set();
+  const events = [];
 
   for (const record of incoming.bookmarks) {
     const current = byUrl.get(record.url);
 
     if (current) {
       const at = bookmarks.findIndex((bookmark) => bookmark.id === current.id);
-      bookmarks[at] = mergeBookmark(current, record);
+      /* Matching is by URL, so the record this vault already holds keeps its id (and the URL it
+         was found under). Taking the file's id would leave every line already filed under the
+         local id pointing at a record that no longer exists. */
+      const merged = {
+        ...mergeBookmark(current, record),
+        id: current.id,
+        url: current.url,
+        hostname: current.hostname,
+        origin: current.origin
+      };
+      bookmarks[at] = merged;
+
+      const before = useCount(current);
+      const after = useCount(merged);
+      if (after > before) {
+        events.push(
+          activityEvent(
+            {
+              device,
+              bookmarkId: merged.id,
+              url: merged.url,
+              cause,
+              before,
+              after,
+              slot: changedSlot(current, merged, device)
+            },
+            now
+          )
+        );
+      }
       statistics.updated += 1;
       continue;
     }
@@ -219,10 +332,46 @@ export function mergeInto(existing, incoming, now = Date.now) {
     }
     bookmarks.push(record);
     byUrl.set(record.url, record);
+    addedIds.add(record.id);
     statistics.added += 1;
   }
 
-  return { document: { ...existing, bookmarks }, statistics };
+  const carried = normaliseActivity(incoming.activity, now).filter((event) =>
+    addedIds.has(event.bookmarkId)
+  );
+
+  /* A record added from a file that carried no log still arrived with a count; it gets the line
+     the import would have written. */
+  for (const record of bookmarks) {
+    if (!addedIds.has(record.id) || useCount(record) === 0) continue;
+    if (carried.some((event) => event.bookmarkId === record.id)) continue;
+    events.push(
+      activityEvent(
+        {
+          device,
+          bookmarkId: record.id,
+          url: record.url,
+          cause,
+          before: 0,
+          after: useCount(record),
+          slot: importedSlot(record)
+        },
+        now
+      )
+    );
+  }
+
+  return {
+    document: {
+      ...existing,
+      bookmarks,
+      activity: normaliseActivity(
+        [...events, ...carried, ...(Array.isArray(existing.activity) ? existing.activity : [])],
+        now
+      )
+    },
+    statistics
+  };
 }
 
 /**
@@ -231,7 +380,7 @@ export function mergeInto(existing, incoming, now = Date.now) {
  * Only the anchors matter. Folders are structure the vault does not model, and a bookmarklet
  * (`javascript:`) or a places query (`place:`) is not a page anyone can open from here.
  */
-export function importBrowserBookmarks(html, now = Date.now) {
+export function importBrowserBookmarks(html, now = Date.now, options = {}) {
   if (typeof html !== 'string' || html.trim() === '') {
     throw fail('INVALID_IMPORT', 'that file is empty');
   }
@@ -257,7 +406,7 @@ export function importBrowserBookmarks(html, now = Date.now) {
     });
   }
 
-  return importPlain(entries, now);
+  return importPlain(entries, now, { ...options, cause: options.cause ?? 'history-import' });
 }
 
 /** The portable plain export: the document, unchanged, in a named envelope. */
