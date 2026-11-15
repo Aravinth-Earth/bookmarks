@@ -32,6 +32,11 @@ There is no store listing yet, so the zip is the same unpacked install with one 
 2. `brave://extensions` (or `chrome://extensions`) → turn on **Developer mode**.
 3. **Load unpacked** → choose the unzipped folder.
 
+[`INSTALL.md`](INSTALL.md) is that guide written for the person receiving the zip rather than for a checkout:
+the same steps, plus the consent question the vault asks once, what each of the three permissions means, and
+how an update is applied (replace the folder's contents, press reload — an unpacked extension never updates
+itself).
+
 ## Install (unpacked, from a checkout)
 
 1. `brave://extensions` → turn on **Developer mode**.

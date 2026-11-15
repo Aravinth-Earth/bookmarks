@@ -37,7 +37,8 @@ The extension asks for `tabs` (the permission a browser describes as reading you
 
 A release carries `bookmarks-extension-<version>.zip`, built from `extension/` by `npm run package:extension`. Unzip it
 somewhere permanent and load that folder unpacked; `extension/README.md` has the steps, the permissions in full, and
-the uninstall path.
+the uninstall path. `extension/INSTALL.md` is the same thing written for the person receiving the zip, and
+`docs/friend-kit.md` is what an invitation consists of: one message, one code, and the first day's list.
 
 ## Layout
 
