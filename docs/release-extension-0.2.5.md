@@ -8,8 +8,8 @@ heading removed.
 |---|---|
 | Version | `0.2.5` (from `extension/manifest.json`) |
 | File | `bookmarks-extension-0.2.5.zip` |
-| Size | 54,914 bytes, 12 files, stored (uncompressed, fixed timestamps) |
-| SHA-256 | `1bbacac071c3f7a3245843acfec90ca3aeaef9a63a95b8f2213c5f2c48e647bb` |
+| Size | 54,921 bytes, 12 files, stored (uncompressed, fixed timestamps) |
+| SHA-256 | `ad6d4813a8b6ae73fbf6b92d89e7417c00426f49ffdcb2ae3d224c0fa26c3b1c` |
 | Built from | `extension/` on the branch `release/extension-0.2.5`, merged as `main` before publishing |
 | Browsers | Chromium 116 or newer, unpacked — tested on Brave and Chrome |
 

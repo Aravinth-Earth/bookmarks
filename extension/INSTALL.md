@@ -30,8 +30,8 @@ easier to keep.
    into the address bar; it is not a link.
 2. Turn on **Developer mode**: the switch at the top right.
 3. Press **Load unpacked** and choose the folder from step 1 — the one with `manifest.json` in it.
-4. A card appears: **Bookmarks — collected links**, version `0.2.5`. A toolkit or puzzle icon in the toolbar
-   holds it if no icon is pinned.
+4. A card appears: **Bookmarks — collected links**, version `0.2.5`. The card is where it is controlled; there
+   is nothing to press in the toolbar.
 
 Nothing has been recorded yet at this point. The next step is the one that turns it on.
 
