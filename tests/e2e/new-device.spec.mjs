@@ -15,6 +15,7 @@ import {
   closeSettings,
   createVault,
   expect,
+  expectSynced,
   launch,
   openSettings,
   openVault,
@@ -29,6 +30,9 @@ async function syncedVault(page) {
   const phrase = await createVault(page);
   await addBookmark(page, { url: 'https://e2e.local/carried', name: 'Carried' });
   await turnOnSyncPatiently(page, phrase);
+  /* A background sync can spend a window after the first one was waited out. One more
+     server-named wait is allowed here; a refusal after it is still the test's failure. */
+  await expectSynced(page, { attempts: 1 });
   await expect(page.locator('#vault-status')).toContainText(/Synced/i, { timeout: 30_000 });
   return phrase;
 }
@@ -55,6 +59,10 @@ test('loading the server copy brings the bookmarks across and turns sync on', as
   const { device, page: other, prompt } = await askOnDevice(phrase);
   try {
     await prompt.getByRole('button', { name: 'Load from server' }).click();
+
+    /* The click starts a sync with no control left to press. If the limiter answered it, press
+       Sync now once the server's window has passed; the row assertion below is unchanged. */
+    await expectSynced(other, { attempts: 1 });
 
     /* The pull is a real sync on a device that had nothing; the row arrives from the server. */
     await expect(other.locator('#vault-status')).toContainText(/Synced/i, { timeout: 60_000 });

@@ -22,6 +22,37 @@ export const SEARCH_CLEAR_DELAY_MS = 5000;
    against a tombstone list that grows forever. */
 export const TOMBSTONE_DAYS = 180;
 
+/* The audit log is a ring, not a history: the vault is small and sealed, and a line kept for
+   every count change since the beginning would grow without bound inside it. */
+export const MAX_ACTIVITY = 100;
+export const ACTIVITY_DAYS = 90;
+/* A log is a small part of the vault, not most of it. At roughly 280 characters for a full
+   line with a real address, 24,000 characters is about 80 lines; a shorter address holds more,
+   up to the 100-line cap. The oldest lines fall first. */
+export const MAX_ACTIVITY_CHARS = 24_000;
+/* The whole document, as JSON, that still seals inside the free hosted copy. The copy is
+   160,000 ciphertext characters (`FREE_MAX_CT_CHARS`); a 1 KiB-padded plaintext plus the GCM tag
+   becomes 4/3 as many base64url characters, so 120,000 plaintext bytes is the ceiling. The
+   envelope and the padding bucket need a little of that, and this leaves a margin. The size is
+   the whole document, not only the log: a large vault leaves the log less room, and `fitActivity`
+   drops the oldest lines until both fit. tests/activity.test.mjs checks this against the real
+   server cap. */
+export const FREE_DOCUMENT_BYTES = 117_000;
+export const ACTIVITY_CAUSES = Object.freeze([
+  'click',
+  'open',
+  'merge',
+  'restore',
+  'import',
+  'history-import'
+]);
+
+const ACTIVITY_MS = ACTIVITY_DAYS * 24 * 60 * 60 * 1000;
+const ACTIVITY_CAUSE_SET = new Set(ACTIVITY_CAUSES);
+/* The name a count change is filed under when the caller did not say who was looking. It is not
+   a device id and names nobody; it only keeps the event shape whole. */
+const UNSETTLED_DEVICE = 'unsettled';
+
 const TOMBSTONE_MS = TOMBSTONE_DAYS * 24 * 60 * 60 * 1000;
 const SORTS = new Set(['clicks', 'recent', 'name', 'lastClicked']);
 const PATCHABLE = new Set(['name', 'url', 'clickCount', 'pinned', 'hideLabel', 'icon', 'color']);
@@ -33,7 +64,7 @@ function fail(code, message) {
 }
 
 function iso(now) {
-  return new Date(now()).toISOString();
+  return new Date(typeof now === 'function' ? now() : now).toISOString();
 }
 
 function later(left, right) {
@@ -117,6 +148,7 @@ export function createDocument() {
     schema: SCHEMA,
     bookmarks: [],
     tombstones: [],
+    activity: [],
     prefs: { iconOnly: false }
   };
 }
@@ -268,9 +300,24 @@ export function recordUses(document, id, deviceId, count, now = Date.now) {
   const uses = usesOf(current);
   if ((uses[deviceId] ?? 0) >= count) return document;
 
+  const updated = { ...current, uses: { ...uses, [deviceId]: count }, updatedAt: iso(now) };
   const bookmarks = [...document.bookmarks];
-  bookmarks[at] = { ...current, uses: { ...uses, [deviceId]: count }, updatedAt: iso(now) };
-  return { ...document, bookmarks };
+  bookmarks[at] = updated;
+
+  const event = activityEvent(
+    {
+      device: deviceId,
+      bookmarkId: id,
+      url: current.url,
+      cause: 'open',
+      before: useCount(current),
+      after: useCount(updated),
+      slot: { device: deviceId, before: uses[deviceId] ?? 0, after: count }
+    },
+    now
+  );
+
+  return appendActivity({ ...document, bookmarks }, [event], now);
 }
 
 /**
@@ -284,7 +331,8 @@ export function setOpenCount(document, id, count, now = Date.now) {
 /** How many times a bookmark has been used: opened from this list, or opened in the browser. */
 export function useCount(bookmark) {
   const opened = Object.values(usesOf(bookmark)).reduce((total, count) => total + count, 0);
-  return (bookmark.clickCount ?? 0) + opened;
+  const clicks = Number.isInteger(bookmark?.clickCount) ? bookmark.clickCount : 0;
+  return clicks + opened;
 }
 
 /**
@@ -303,6 +351,193 @@ export function useSplit(bookmark, device) {
     else elsewhere += count;
   }
   return { here, elsewhere, total: here + elsewhere };
+}
+
+/* --------------------------------------------------------------- the activity log */
+
+/**
+ * One line about one count change.
+ *
+ * It is stored inside the sealed document, never beside it: `device` names the device that saw
+ * the change and `slot` names the device whose count moved where that is known, so a merge can
+ * say "another device counted this" without pretending the visit happened here. The two totals
+ * are the sum the person reads on the row, before and after.
+ *
+ * A URL is kept because a line without an address cannot be checked against anything. Nothing
+ * in this shape is written anywhere except the vault blob.
+ */
+function normaliseEvent(input) {
+  if (!input || typeof input !== 'object') return null;
+
+  const { id, at, device, bookmarkId, url, cause, before, after } = input;
+  if (typeof id !== 'string' || id === '') return null;
+  if (!isIso(at)) return null;
+  if (typeof device !== 'string' || device === '') return null;
+  if (typeof bookmarkId !== 'string' || bookmarkId === '') return null;
+  if (typeof url !== 'string') return null;
+  if (!ACTIVITY_CAUSE_SET.has(cause)) return null;
+  if (!Number.isInteger(before) || before < 0) return null;
+  if (!Number.isInteger(after) || after < 0) return null;
+
+  let slot = null;
+  if (input.slot && typeof input.slot === 'object') {
+    const moved = input.slot;
+    if (
+      typeof moved.device === 'string' &&
+      moved.device !== '' &&
+      Number.isInteger(moved.before) &&
+      moved.before >= 0 &&
+      Number.isInteger(moved.after) &&
+      moved.after >= 0
+    ) {
+      slot = { device: moved.device, before: moved.before, after: moved.after };
+    }
+  }
+
+  return { id, at, device, bookmarkId, url, cause, before, after, slot };
+}
+
+/**
+ * The log as the vault holds it: newest first, one entry per id, at most `MAX_ACTIVITY` lines,
+ * nothing older than `ACTIVITY_DAYS`, and no larger than the vault's room for it. A vault
+ * written before the log existed has no `activity`, which reads as no lines rather than an
+ * error.
+ */
+export function normaliseActivity(input, now = Date.now) {
+  if (!Array.isArray(input)) return [];
+
+  const stamp = typeof now === 'function' ? now() : now;
+  const cutoff = stamp - ACTIVITY_MS;
+  const kept = new Map();
+  for (const raw of input) {
+    const event = normaliseEvent(raw);
+    if (!event) continue;
+    if (Date.parse(event.at) < cutoff) continue;
+
+    /* The id is what makes a merge idempotent; when two copies disagree about one id, the later
+       observation is the one kept, and equal stamps keep the first seen. */
+    const seen = kept.get(event.id);
+    if (!seen || event.at > seen.at) kept.set(event.id, event);
+  }
+
+  const newest = [...kept.values()].sort(compareActivity).slice(0, MAX_ACTIVITY);
+
+  /* The size bound is applied newest first: an old line falls before a recent one, and the
+     newest line is kept even when it is the only one that would exceed the budget. */
+  const bounded = [];
+  let chars = 0;
+  for (const event of newest) {
+    const size = JSON.stringify(event).length + 1;
+    if (bounded.length > 0 && chars + size > MAX_ACTIVITY_CHARS) break;
+    bounded.push(event);
+    chars += size;
+  }
+  return bounded;
+}
+
+function compareActivity(left, right) {
+  return right.at.localeCompare(left.at) || right.id.localeCompare(left.id);
+}
+
+/** The document's size as the sealed envelope will carry it: UTF-8 bytes of its JSON. */
+function documentBytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/**
+ * Drop the oldest lines until the whole document fits the free hosted copy.
+ *
+ * The log budget above bounds the log on its own; this bounds it against everything else in the
+ * vault. A library already near the cap leaves little room, and a log is the part that can go —
+ * bookmarks are never cut. The newest line is kept as long as it fits at all; a document whose
+ * bookmarks alone are over the cap is returned with an empty log rather than pretending to fix
+ * something the log did not cause.
+ */
+export function fitActivity(document, { maxBytes = FREE_DOCUMENT_BYTES } = {}) {
+  const activity = Array.isArray(document.activity) ? document.activity : [];
+  if (activity.length === 0) return document;
+
+  let bytes = documentBytes(document);
+  if (bytes <= maxBytes) return document;
+
+  const kept = [...activity];
+  while (kept.length > 0 && bytes > maxBytes) {
+    /* One event plus the comma that separated it from the next; the oldest is last. */
+    bytes -= documentBytes(kept.pop()) + 1;
+  }
+  return { ...document, activity: kept };
+}
+
+/** Build one event for the log, refusing a shape that could not be read back. */
+export function activityEvent(input, now = Date.now) {
+  const event = normaliseEvent({
+    id: input?.id ?? nextId(),
+    at: input?.at ?? iso(now),
+    device: input?.device ?? UNSETTLED_DEVICE,
+    bookmarkId: input?.bookmarkId,
+    url: input?.url,
+    cause: input?.cause,
+    before: input?.before,
+    after: input?.after,
+    slot: input?.slot ?? null
+  });
+
+  if (!event) {
+    throw fail(
+      'INVALID_ACTIVITY',
+      'an activity event needs a device, a bookmark, a URL, a known cause and two totals'
+    );
+  }
+  return event;
+}
+
+/** Add lines to the ring, dropping duplicates, anything past the bound and anything past the document's room. */
+export function appendActivity(document, events, now = Date.now) {
+  assertDocument(document, 'the document');
+  const incoming = Array.isArray(events) ? events : [events];
+  const activity = normaliseActivity(
+    [...incoming, ...(Array.isArray(document.activity) ? document.activity : [])],
+    now
+  );
+  return fitActivity({ ...document, activity });
+}
+
+/**
+ * Which device's slot moved between two readings of one bookmark, when exactly one did.
+ *
+ * A merge can raise one device slot, both, or only the list-click number. The first case can
+ * name the device; the second cannot, and its event says nothing about a slot rather than
+ * guessing. The click number is not filed under a device, so an observer is named when it is
+ * the only thing that moved.
+ */
+export function changedSlot(before, after, observer = UNSETTLED_DEVICE) {
+  const beforeUses = before ? usesOf(before) : {};
+  const afterUses = after ? usesOf(after) : {};
+  const moved = [];
+
+  for (const device of new Set([...Object.keys(beforeUses), ...Object.keys(afterUses)])) {
+    const was = beforeUses[device] ?? 0;
+    const now = afterUses[device] ?? 0;
+    if (now > was) moved.push({ device, before: was, after: now });
+  }
+  if (moved.length === 1) return moved[0];
+
+  const beforeClicks = Number.isInteger(before?.clickCount) ? before.clickCount : 0;
+  const afterClicks = Number.isInteger(after?.clickCount) ? after.clickCount : 0;
+  if (moved.length === 0 && afterClicks > beforeClicks) {
+    return { device: observer, before: beforeClicks, after: afterClicks };
+  }
+  return null;
+}
+
+/**
+ * The deterministic id a merge line is filed under.
+ *
+ * Random ids would grow the log each time the same remote copy was merged; the same change seen
+ * twice must be the same line. The values that make the change are what name it.
+ */
+function mergeEventId(cause, bookmark, before, after, slot) {
+  return `${cause}:${bookmark.id}:${before}:${after}:${bookmark.updatedAt}:${slot?.device ?? '-'}`;
 }
 
 /** Change one bookmark. A URL change is re-normalised and re-checked for duplicates. */
@@ -340,7 +575,11 @@ export function updateBookmark(document, id, patch, now = Date.now) {
       if (!Number.isInteger(value) || value < 0) {
         throw fail('INVALID_CLICKS', 'a click count is a whole number, zero or more');
       }
-      changes.clickCount = value;
+      /* The edit sheet is drawn from a reading. A merge that raised the count while it was open,
+         or a number typed by hand, must not write a lower total back into the vault: the count
+         only moves up, exactly like a device slot. */
+      const currentClicks = Number.isInteger(current.clickCount) ? current.clickCount : 0;
+      changes.clickCount = Math.max(currentClicks, value);
       continue;
     }
 
@@ -392,19 +631,36 @@ export function deleteBookmark(document, id, now = Date.now) {
 }
 
 /** One click: the count and the moment are what the ordering uses. */
-export function recordClick(document, id, now = Date.now) {
+export function recordClick(document, id, now = Date.now, { device = UNSETTLED_DEVICE } = {}) {
   assertDocument(document, 'the document');
   const at = findIndex(document, id);
+  const current = document.bookmarks[at];
   const clickedAt = iso(now);
+  const beforeClicks = Number.isInteger(current.clickCount) ? current.clickCount : 0;
 
-  const bookmarks = [...document.bookmarks];
-  bookmarks[at] = {
-    ...bookmarks[at],
-    clickCount: bookmarks[at].clickCount + 1,
+  const updated = {
+    ...current,
+    clickCount: beforeClicks + 1,
     lastClickedAt: clickedAt,
     updatedAt: clickedAt
   };
-  return { ...document, bookmarks };
+
+  const event = activityEvent(
+    {
+      device,
+      bookmarkId: id,
+      url: current.url,
+      cause: 'click',
+      before: useCount(current),
+      after: useCount(updated),
+      slot: { device, before: beforeClicks, after: beforeClicks + 1 }
+    },
+    now
+  );
+
+  const bookmarks = [...document.bookmarks];
+  bookmarks[at] = updated;
+  return appendActivity({ ...document, bookmarks }, [event], now);
 }
 
 export function togglePin(document, id, now = Date.now) {
@@ -490,9 +746,15 @@ function isExpired(tombstone, now) {
  *
  * @returns {{document: object, statistics: {added: number, updated: number, removed: number}}}
  */
-export function mergeDocuments(local, remote, now = Date.now) {
+export function mergeDocuments(local, remote, now = Date.now, options = {}) {
   assertDocument(local, 'the local document');
   assertDocument(remote, 'the remote document');
+
+  const device = options.device ?? UNSETTLED_DEVICE;
+  const cause = options.cause ?? 'merge';
+  if (!ACTIVITY_CAUSE_SET.has(cause)) {
+    throw fail('INVALID_ACTIVITY', `"${cause}" is not a reason a count can change`);
+  }
 
   const localById = new Map(local.bookmarks.map((bookmark) => [bookmark.id, bookmark]));
   const remoteById = new Map(remote.bookmarks.map((bookmark) => [bookmark.id, bookmark]));
@@ -532,13 +794,44 @@ export function mergeDocuments(local, remote, now = Date.now) {
     else if (right && merged.updatedAt !== left.updatedAt) statistics.updated += 1;
   }
 
+  /* A merge that raised a total leaves one line per bookmark whose total moved. A merge that
+     changed only a name, a colour or a click's moment leaves none: the log is about counts. */
+  const events = [];
+  for (const merged of bookmarks) {
+    const before = localById.get(merged.id);
+    const was = before ? useCount(before) : 0;
+    const is = useCount(merged);
+    if (is <= was) continue;
+
+    const slot = changedSlot(before ?? null, merged, device);
+    events.push(
+      activityEvent(
+        {
+          id: mergeEventId(cause, merged, was, is, slot),
+          device,
+          bookmarkId: merged.id,
+          url: merged.url,
+          cause,
+          before: was,
+          after: is,
+          slot
+        },
+        now
+      )
+    );
+  }
+
   return {
-    document: {
+    document: fitActivity({
       schema: SCHEMA,
       bookmarks,
       tombstones: keptTombstones,
+      activity: normaliseActivity(
+        [...events, ...(local.activity ?? []), ...(remote.activity ?? [])],
+        now
+      ),
       prefs: newerPrefs(local.prefs, remote.prefs)
-    },
+    }),
     statistics
   };
 }

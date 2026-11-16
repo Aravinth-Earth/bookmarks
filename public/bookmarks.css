@@ -1090,6 +1090,65 @@ body.modal-open {
     font-size: var(--font-size-xs, 0.7rem);
 }
 
+/* Count activity: one line per change, read where the count is. No scroll box and no per-row
+   action — the list is capped at a score of lines, so it stays a reading and not a second list
+   to manage. */
+.activity-block {
+    display: grid;
+    gap: 0.3rem;
+}
+
+.activity-list {
+    display: grid;
+    gap: 0.3rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.activity-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.1rem 0.45rem;
+    padding: 0.45rem 0.6rem;
+    background: var(--bg-inset, #0d1117);
+    border: 1px solid var(--border, #21262d);
+    border-radius: var(--radius-lg, 8px);
+    color: var(--text-secondary, #8b949e);
+    font-size: var(--font-size-xs, 0.7rem);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.activity-bookmark {
+    flex-basis: 100%;
+    color: var(--text-primary, #c9d1d9);
+    font-weight: 600;
+}
+
+.activity-when {
+    color: var(--text-muted, #6e7681);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.activity-device,
+.activity-cause {
+    color: var(--text-secondary, #8b949e);
+}
+
+.activity-count {
+    color: var(--text-primary, #c9d1d9);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.activity-slot {
+    color: var(--text-muted, #6e7681);
+    font-variant-numeric: tabular-nums;
+}
+
 /* ----------------------------------------------------------------- status */
 
 .status {

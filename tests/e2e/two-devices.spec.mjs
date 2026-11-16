@@ -19,6 +19,7 @@ import {
   enableCollection,
   expect,
   launch,
+  lockVault,
   openSettings,
   openVault,
   settingsItem,
@@ -147,6 +148,33 @@ test('what each browser counted is added up, and nothing is counted twice', asyn
       other,
       '3 uses: 1 from this device, 2 from other devices',
       '3 uses in total: 1 counted on this device, 2 on other devices.'
+    );
+
+    /* The sheet also says when each contribution arrived. The first browser counted twice and
+       absorbed one visit from the second, so those are the causes it can name. */
+    await page.getByRole('button', { name: 'Edit Shared' }).click();
+    const sheet = page.getByRole('dialog', { name: 'Edit bookmark' });
+    const activity = sheet.getByRole('list', { name: 'Activity for Shared' });
+    await expect(activity).toContainText('Opened in the browser');
+    await expect(activity).toContainText('Merged from another device');
+    await sheet.getByRole('button', { name: 'Cancel' }).click();
+
+    /* ---- an older sealed backup cannot erase a visit taken after it ---- */
+    /* `backup` was written when the first browser read 2, before the second one counted anything.
+       Restoring it is a merge with the vault on this device, so the total stays 3. */
+    await lockVault(page);
+    await page.locator('#phrase').fill(phrase);
+    const restoreChooser = page.waitForEvent('filechooser');
+    await page.locator('#restore-button').click();
+    await (await restoreChooser).setFiles(backup);
+    await expect(page.locator('#app-view')).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('#status')).toContainText(/backup restored and merged/i);
+
+    await expectUses(page, 'Shared', 3);
+    await expectSplit(
+      page,
+      '3 uses: 2 from this device, 1 from another device',
+      '3 uses in total: 2 counted on this device, 1 on another device.'
     );
   } finally {
     await second.close();

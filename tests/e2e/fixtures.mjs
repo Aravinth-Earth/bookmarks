@@ -93,7 +93,7 @@ async function settledStatus(page, timeout = 25_000) {
  */
 export async function turnOnSyncPatiently(page, phrase) {
   await turnOnSync(page, phrase);
-  await settleThrottle(page, 'Sync now');
+  await settleSync(page);
 }
 
 /**
@@ -103,35 +103,98 @@ export async function turnOnSyncPatiently(page, phrase) {
  * run of legitimate creations inside a minute spends it. That is the limiter working, not the app
  * failing, so the suite waits the period the server named and presses once more. A third refusal is
  * something other than a limiter, and a test that swallowed it would be hiding a real fault.
+ *
+ * `attempts` is how many server-named windows this call may wait out after the action that was
+ * already taken. Two is the default for an action this helper did not start; a caller that has
+ * already spent one wait can ask for one more. A refusal that survives every attempt is left on
+ * the page for the test's own assertion, never reported as a success.
  */
-async function settleThrottle(page, label) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+export async function settleSync(page, { label = 'Sync now', attempts = 2 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const reading = await settledStatus(page);
-    if (!reading.startsWith(THROTTLED_LABEL)) return;
-
-    /* The page keeps the server's own number from the `retry-after` header, so the wait is the
-       server's and not a guess. A refusal that named no period gets the limiter's own minute. */
-    const named = Number(await page.locator('#vault-status').getAttribute('data-retry-after'));
-    const wait = Math.min(Number.isFinite(named) && named > 0 ? named * 1000 : 60_000, MAX_THROTTLE_WAIT_MS);
-
-    /* A second of slack: the window is counted from the refused request, which was sent a moment
-       before this line ran, and arriving one millisecond early spends an attempt for nothing. */
-    await page.waitForTimeout(wait + 1_000);
-    const modal = await openSettings(page);
-    const item = await settingsItem(modal, new RegExp(`^${label}`));
-    if (!(await item.count())) {
-      /* The switch itself is gone (sync was turned off): nothing to press, so stop waiting. */
-      return;
-    }
-    await item.click();
+    if (!reading.includes(THROTTLED_LABEL)) return;
+    if (!(await waitOutWindow(page, label))) return;
   }
+}
+
+/**
+ * Wait for the status to read Synced and stay there, waiting out a limiter that arrives late.
+ *
+ * A sync can be started without a control to press afterwards: the second device's "Load from
+ * server", or a scheduled sync that follows a save. A refusal from one of those changes the
+ * status after the action that started it, so checking once can see the refusal and a test that
+ * only asserted would fail on a legitimate wait. This waits the server's window and presses
+ * Sync now, at most `attempts` times; a refusal after the last wait is thrown, not swallowed.
+ *
+ * `quietMs` is how long Synced must stay on screen. It is what lets the scheduled sync a moment
+ * after a save show itself; the caller's own assertion still follows.
+ */
+export async function expectSynced(page, { attempts = 1, quietMs = 2_000, timeout = 30_000 } = {}) {
+  let remaining = attempts;
+  const deadline = Date.now() + timeout;
+
+  for (;;) {
+    const reading = await settledStatus(page, Math.max(1_000, deadline - Date.now()));
+
+    if (reading.includes(THROTTLED_LABEL)) {
+      if (remaining <= 0) {
+        throw new Error(`the sign-in limiter refused after the last wait: ${reading}`);
+      }
+      remaining -= 1;
+      if (!(await waitOutWindow(page, 'Sync now'))) {
+        throw new Error(`the limiter refused and Sync now is no longer available: ${reading}`);
+      }
+      continue;
+    }
+
+    if (/Synced/i.test(reading)) {
+      /* Give the save-made sync a moment to arrive; only a status that is still Synced after
+         the quiet period is a settled one. */
+      await page.waitForTimeout(quietMs);
+      const after = await settledStatus(page);
+      if (/Synced/i.test(after)) return;
+      continue;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(`sync did not settle on Synced: ${reading || 'no status'}`);
+    }
+    await page.waitForTimeout(250);
+  }
+}
+
+/** Read the server's own wait, then press a sync control. Returns whether there was one to press. */
+async function waitOutWindow(page, label) {
+  const named = Number(await page.locator('#vault-status').getAttribute('data-retry-after'));
+  const wait = Math.min(
+    Number.isFinite(named) && named > 0 ? named * 1000 : 60_000,
+    MAX_THROTTLE_WAIT_MS
+  );
+
+  /* A second of slack: the window is counted from the refused request, which was sent a moment
+     before this line ran, and arriving one millisecond early spends an attempt for nothing. */
+  await page.waitForTimeout(wait + 1_000);
+  const modal = await openSettings(page);
+  const item = await settingsItem(modal, new RegExp(`^${label}`));
+  if (!(await item.count())) {
+    /* The switch itself is gone (sync was turned off): nothing to press, so stop waiting. */
+    if (await page.locator('#modal-root .settings-list').count()) await closeSettings(page);
+    return false;
+  }
+  /* The control closes Settings itself before it starts the sync, so the next attempt opens it
+     again rather than pressing into a stale sheet. Give the new attempt a moment to replace the
+     old refusal on the status line; otherwise the next read sees the same "Not now" and counts a
+     refusal that has not happened yet. */
+  await item.click();
+  await page.waitForTimeout(2_000);
+  return true;
 }
 
 /** Ask the server for the other device's copy now, waiting out a limiter rather than failing on it. */
 export async function syncNow(page) {
   const modal = await openSettings(page);
   await (await settingsItem(modal, /^Sync now/)).click();
-  await settleThrottle(page, 'Sync now');
+  await settleSync(page);
 }
 
 /**
