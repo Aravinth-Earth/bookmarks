@@ -15,6 +15,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { shellProblems } from './shell-guard.mjs';
+
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const publicDir = join(root, 'public');
 
@@ -402,27 +404,19 @@ try {
   problems.push(`logs: ${error.message}`);
 }
 
-/* 7. Every module the page imports is in the offline shell. A new module that is left out of
-   SHELL works on the first visit and then fails once the page is offline, which is the one state
-   the page cannot report. Both lists are read from the files rather than written down again. */
+/* 7. The offline shell matches the files it ships. Every module in the page's import graph is
+   precached, every listed path really exists, and the cache version is the digest of those bytes.
+   A new module that is left out of SHELL works on the first visit and then fails once the page is
+   offline, which is the one state the page cannot report; a stale cache name does the same to a
+   returning visitor and hides a security fix behind a page that reports the new version. */
 try {
-  const page = readFileSync(join(publicDir, 'app.js'), 'utf8');
   const worker = readFileSync(join(publicDir, 'sw.js'), 'utf8');
-  const imported = [...page.matchAll(/from '\.\/([\w-]+\.js)'/g)].map((match) => match[1]);
-  /* The shell's entries are root-absolute now, so the prefix is one slash: `'/app.js'`. */
-  const shell = new Set([...worker.matchAll(/'\/([\w-]+\.js)'/g)].map((match) => match[1]));
+  const read = (name) => {
+    const file = join(publicDir, name);
+    return existsSync(file) ? readFileSync(file) : null;
+  };
 
-  if (imported.length === 0) problems.push('shell: no module imports found in app.js');
-
-  for (const name of imported) {
-    if (!shell.has(name)) problems.push(`shell: app.js imports ${name}, which sw.js does not cache`);
-  }
-
-  /* The two stylesheets are same-origin files now, so they belong in the same atomic install as the
-     modules: a page that loads offline without them renders as unstyled markup. */
-  for (const path of ['/css/tokens.css', '/css/themes.css']) {
-    if (!worker.includes(`'${path}'`)) problems.push(`shell: sw.js does not cache ${path}`);
-  }
+  for (const problem of shellProblems({ swSource: worker, read })) problems.push(`shell: ${problem}`);
 } catch (error) {
   problems.push(`shell: ${error.message}`);
 }
