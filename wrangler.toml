@@ -71,6 +71,17 @@ namespace_id = "3103"
   limit = 60
   period = 60
 
+# Every outbound fetch together — 300 per ten seconds per location, ten times one source's
+# ceiling. One key for the whole service, so a pool of addresses, or one address changing inside
+# its own /64, cannot spend the proxy without approaching a number that is still usable.
+[[ratelimits]]
+name = "FETCH_ALL_LIMIT"
+namespace_id = "3104"
+
+  [ratelimits.simple]
+  limit = 300
+  period = 10
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Vault"]

@@ -65,41 +65,88 @@ function methodNotAllowed(methods) {
 }
 
 /**
- * Has this source spent its class's budget?
+ * The ceiling every outbound fetch is counted against, whatever source asks for it.
  *
- * The counter is held against a digest of the class name and the caller's address, so no
- * address is stored and none is logged. A class whose binding is absent is not counted;
- * `npm run check` refuses that state in the configuration a deploy would ship.
+ * A counter held against one address is only as strong as the address it names: one IPv6
+ * allocation is a /64 of addresses, and a cheap pool is many addresses, so a caller who can
+ * change address spends a fresh budget each time. This second counter is held against one key
+ * for the whole service, so the total rate at which the proxy leaves this origin is bounded
+ * however many sources exist. It sits at ten times one source's ceiling: a single caller cannot
+ * spend the whole budget, and a location serving many genuine readers is not throttled by it.
+ */
+export const FETCH_CEILING = { binding: 'FETCH_ALL_LIMIT', limit: 300, period: 10 };
+
+/**
+ * The source a counter is held against.
+ *
+ * An IPv4 address is one source. An IPv6 address is one of the 2^64 addresses in a /64, which is
+ * what one allocation gets, so every address in a /64 is counted as that /64; otherwise a caller
+ * with one allocation spends a fresh budget from each address in it. An address that cannot be
+ * read is counted as itself.
+ */
+function sourceGroup(address) {
+  const text = String(address).trim();
+  if (!text.includes(':')) return text;
+
+  const bytes = ipv6Bytes(text);
+  if (!bytes) return text;
+
+  /* An IPv4-mapped address is its IPv4 address, so it groups with the same caller arriving over
+     IPv4 rather than with every other mapped address. */
+  if (bytes.slice(0, 10).every((byte) => byte === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
+    return bytes.slice(12).join('.');
+  }
+
+  const prefix = bytes.slice(0, 8).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${prefix}::/64`;
+}
+
+/**
+ * The counter a source has spent, or null when it has room.
+ *
+ * The counter is held against a digest of the class name and the source, so no address is
+ * stored and none is logged. A class whose binding is absent is not counted; `npm run check`
+ * refuses that state in the configuration a deploy would ship.
  */
 async function overLimit(env, className, request) {
   const rule = LIMITS[className];
   const binding = env?.[rule.binding];
-  if (!binding) return false;
+  if (!binding) return null;
 
   /* A laptop is not a source to defend against. The dev server rewrites the request to the route's
      own host, so there is no loopback address left to test; the dev machine instead says so in its
      own `.dev.vars`, which is not committed. Nothing in `[vars]` may carry the switch — check.mjs
      refuses a deploy that does — so the deployed Worker cannot be put in this state. */
-  if (String(env?.RATE_LIMIT_DISABLED ?? '').toLowerCase() === 'true') return false;
+  if (String(env?.RATE_LIMIT_DISABLED ?? '').toLowerCase() === 'true') return null;
 
-  const address = request.headers.get('cf-connecting-ip') ?? '';
+  /* Asked first, so a service that has spent its whole budget does not go on spending the
+     per-source counters it no longer needs. */
+  if (className === 'fetch') {
+    const ceiling = env?.[FETCH_CEILING.binding];
+    if (ceiling) {
+      const { success } = await ceiling.limit({ key: 'every-source' });
+      if (!success) return FETCH_CEILING;
+    }
+  }
+
+  const address = sourceGroup(request.headers.get('cf-connecting-ip') ?? '');
   const digest = await crypto.subtle.digest(
     'SHA-256',
     new TextEncoder().encode(`${className}\n${address}`)
   );
   const { success } = await binding.limit({ key: toBase64Url(new Uint8Array(digest)) });
-  return !success;
+  return success ? null : rule;
 }
 
 /* 429 and nothing else: the class is refused before its route runs, so the refusal writes
    nothing and fetches nothing on the caller's behalf. */
-function tooMany(className) {
+function tooMany(rule) {
   return new Response(JSON.stringify({ error: 'rate_limited' }), {
     status: 429,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
-      'retry-after': String(LIMITS[className].period)
+      'retry-after': String(rule.period)
     }
   });
 }
@@ -140,13 +187,14 @@ function forwardTo(stub, target, request, source) {
  * wait, and nothing about the caller: no address, no digest of one, no path.
  */
 async function limited(env, className, request, run) {
-  if (className && (await overLimit(env, className, request))) {
+  const spent = className ? await overLimit(env, className, request) : null;
+  if (spent) {
     await logEvent('rate_limited', {
       route: className,
       reason: 'over_limit',
-      retry_after: LIMITS[className].period
+      retry_after: spent.period
     });
-    return tooMany(className);
+    return tooMany(spent);
   }
   return run();
 }

@@ -327,7 +327,7 @@ try {
 /* 5. The request limits the Worker counts are the ones wrangler.toml declares. A binding renamed
    or a threshold edited in one file only would deploy, and would count nothing. */
 try {
-  const { LIMITS } = await import(join(root, 'src/index.js'));
+  const { LIMITS, FETCH_CEILING } = await import(join(root, 'src/index.js'));
   const config = readFileSync(join(root, 'wrangler.toml'), 'utf8');
   const blocks = config
     .split('[[ratelimits]]')
@@ -335,7 +335,7 @@ try {
     .map((part) => part.split('\n[[')[0]);
   const namespaces = new Set();
 
-  for (const rule of Object.values(LIMITS)) {
+  for (const rule of [...Object.values(LIMITS), FETCH_CEILING]) {
     const block = blocks.find((text) => text.includes(`name = "${rule.binding}"`));
     if (!block) {
       problems.push(`limits: wrangler.toml has no [[ratelimits]] binding named ${rule.binding}`);

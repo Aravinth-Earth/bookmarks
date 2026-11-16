@@ -13,7 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
-import worker, { LIMITS } from '../src/index.js';
+import worker, { FETCH_CEILING, LIMITS } from '../src/index.js';
 import { quiet } from './logs.mjs';
 import { withFetch } from './dns.mjs';
 
@@ -251,6 +251,81 @@ test('the counter is keyed by a digest of the class and the address, never the a
   assert.equal(hits[1].key, expected('fetch', SOURCE), 'the same address has a key per class');
   assert.equal(hits[2].key, expected('signin', OTHER_SOURCE));
   assert.notEqual(hits[0].key, hits[2].key);
+});
+
+test('one IPv6 allocation is one source, because a /64 is what an allocation gets', async () => {
+  const { env: limiters } = limits();
+  const { env } = harness(limiters);
+  const first = '2606:4700:4700:0:1:2:3:4';
+  const sameGroup = '2606:4700:4700:0:ffff::1';
+  const elsewhere = '2606:4700:4701::1';
+
+  await withFetch(upstreamMiss, async () => {
+    for (let at = 0; at < LIMITS.fetch.limit; at += 1) {
+      const response = await worker.fetch(
+        api(ICON.path, { headers: ICON.headers, source: first }),
+        env
+      );
+      assert.notEqual(response.status, 429, `request ${at + 1} from the first address`);
+    }
+
+    const shared = await worker.fetch(
+      api(ICON.path, { headers: ICON.headers, source: sameGroup }),
+      env
+    );
+    assert.equal(shared.status, 429, 'another address in the same /64 has spent that budget');
+
+    const other = await worker.fetch(
+      api(ICON.path, { headers: ICON.headers, source: elsewhere }),
+      env
+    );
+    assert.notEqual(other.status, 429, 'a different /64 is a different source');
+  });
+});
+
+test('one ceiling bounds every outbound fetch, whatever source asks', async () => {
+  const { env: limiters } = limits();
+  const seen = new Map();
+  const { env } = harness({
+    ...limiters,
+    [FETCH_CEILING.binding]: {
+      async limit({ key }) {
+        const count = (seen.get(key) ?? 0) + 1;
+        seen.set(key, count);
+        return { success: count <= FETCH_CEILING.limit };
+      }
+    }
+  });
+
+  let upstream = 0;
+  await withFetch(
+    async () => {
+      upstream += 1;
+      return upstreamMiss();
+    },
+    async () => {
+      /* A fresh address for every request, so no per-source budget is ever spent: only the
+         counter every source shares can refuse one. */
+      const source = (index) => `198.18.${Math.floor(index / 256)}.${index % 256}`;
+
+      for (let at = 0; at < FETCH_CEILING.limit; at += 1) {
+        const response = await worker.fetch(
+          api(ICON.path, { headers: ICON.headers, source: source(at) }),
+          env
+        );
+        assert.notEqual(response.status, 429, `request ${at + 1} is served`);
+      }
+
+      const before = upstream;
+      const refused = await worker.fetch(
+        api(ICON.path, { headers: ICON.headers, source: source(FETCH_CEILING.limit) }),
+        env
+      );
+      assert.equal(refused.status, 429, 'the ceiling refuses a source with its own budget intact');
+      assert.equal(refused.headers.get('retry-after'), String(FETCH_CEILING.period));
+      assert.equal(upstream, before, 'the refused request fetched nothing');
+    }
+  );
 });
 
 test('a window that has passed is budget again', async () => {
