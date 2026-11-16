@@ -82,6 +82,7 @@ function object(overrides = {}) {
   const env = {
     OWNER_ACCOUNT_ID: overrides.ownerId ?? '',
     ADMIN_SECRET: overrides.adminSecret ?? 'test-admin-secret-0123456789',
+    ...(overrides.invitesRequired ? { INVITES_REQUIRED: 'true' } : {}),
     REGISTRY: overrides.registry ?? {
       idFromName: (name) => ({ name }),
       get: (id) => ({
@@ -1127,8 +1128,10 @@ test('each sign-in is one place, and this one is marked', async () => {
       'createdAt',
       'current',
       'expiresAt',
+      'id',
       'lastSeenAt'
     ]);
+    assert.match(session.id, /^[A-Za-z0-9_-]{11}$/, 'a public id, not a token or a hash');
   }
   const text = JSON.stringify(listed.body);
   assert.ok(!text.includes(first.body.token), 'the other session token never comes back');
@@ -1393,4 +1396,358 @@ test('the operator can delete a vault and free its slot, and a second call is a 
   const missing = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
   assert.equal(missing.status, 404);
   assert.deepEqual(harness.released, [ACCOUNT.accountId, ACCOUNT.accountId], 'release is idempotent');
+});
+
+/* ------------------------------------------------------- deleting an account */
+
+/** The proof a destructive route asks for: one challenge, signed with the phrase's secret. */
+async function proofFor(harness) {
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  assert.equal(challenge.status, 200);
+  return proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+}
+
+function withToken(token) {
+  return { authorization: `Bearer ${token}` };
+}
+
+test('an account is deleted behind a live session and a fresh proof, leaving only a tombstone', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+  const token = session.body.token;
+
+  /* Something in every key family the deletion must clear: a vault, its history, a second
+     session, a live nonce, a creation nonce, the account's attempts and one source's failures. */
+  const first = await read(
+    await harness.vault.fetch(
+      request('/vault', { method: 'PUT', headers: withToken(token), body: { baseVersion: 0, iv: IV, ct: CT } })
+    )
+  );
+  assert.equal(first.status, 200);
+  const second = await read(
+    await harness.vault.fetch(
+      request('/vault', { method: 'PUT', headers: withToken(token), body: { baseVersion: 1, iv: IV, ct: `${CT}b` } })
+    )
+  );
+  assert.equal(second.status, 200);
+  await loginAs(harness, 'mobile');
+  /* One failed proof leaves the account's attempts key and a source key behind; the deletion
+     has to take both. */
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  await harness.vault.fetch(
+    request('/login', { body: { proof: await proveAuth('A'.repeat(43), ACCOUNT.accountId, challenge.body.nonce) } })
+  );
+  await blind(harness);
+
+  /* The proof the deletion will present brings the live nonce with it. */
+  const proof = await proofFor(harness);
+
+  const keysBefore = [...harness.storage.raw.keys()];
+  for (const prefix of ['account', 'vault', 'history:', 'session:', 'nonce', 'create-nonce', 'attempts']) {
+    assert.ok(
+      keysBefore.some((key) => key.startsWith(prefix)),
+      `the fixture left a ${prefix} key to remove`
+    );
+  }
+
+  const deleted = await read(
+    await harness.vault.fetch(request('/delete', { body: { proof }, headers: withToken(token) }))
+  );
+
+  assert.equal(deleted.status, 200);
+  assert.equal(deleted.body.ok, true);
+  assert.equal(typeof deleted.body.deletedAt, 'number');
+
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted'], 'only the tombstone remains');
+  assert.deepEqual(harness.storage.raw.get('deleted'), { at: deleted.body.deletedAt });
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the Registry slot is released');
+
+  /* The token died with the session, so the next request is refused rather than answered. */
+  const after = await read(
+    await harness.vault.fetch(request('/vault', { method: 'GET', headers: withToken(token) }))
+  );
+  assert.equal(after.status, 401);
+
+  /* A device that still holds the phrase is told the account is gone, not that it never
+     existed: a 404 is the answer that would send it down the register path. */
+  for (const [label, response] of [
+    ['challenge', await harness.vault.fetch(request('/challenge'))],
+    ['login', await harness.vault.fetch(request('/login', { body: { proof: 'x'.repeat(43) } }))],
+    ['status', await harness.vault.fetch(request('/status', { method: 'GET' }))]
+  ]) {
+    assert.equal(response.status, 410, label);
+    const body = await response.json();
+    assert.equal(body.error, 'account_deleted', label);
+    assert.equal(body.deletedAt, deleted.body.deletedAt, label);
+  }
+
+  /* A second delete is a no-op with the same answer, whether or not the session is still held. */
+  for (const headers of [withToken(token), {}]) {
+    const again = await read(await harness.vault.fetch(request('/delete', { body: { proof: 'x'.repeat(43) }, headers })));
+    assert.equal(again.status, 410);
+    assert.equal(again.body.error, 'account_deleted');
+  }
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted'], 'a second delete writes nothing');
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the slot is released once');
+});
+
+test('deletion needs a live session, a live nonce and the right phrase, and writes nothing without all three', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+  const token = session.body.token;
+
+  /* A proof with no session is refused before the nonce is spent. */
+  const proof = await proofFor(harness);
+  const anonymous = await read(await harness.vault.fetch(request('/delete', { body: { proof } })));
+  assert.equal(anonymous.status, 401);
+  assert.equal((await harness.storage.get('account')).accountId, ACCOUNT.accountId, 'nothing is deleted');
+
+  /* A session with no live challenge has nothing to check a proof against. */
+  await harness.storage.delete('nonce');
+  const noNonce = await read(
+    await harness.vault.fetch(request('/delete', { body: { proof }, headers: withToken(token) }))
+  );
+  assert.equal(noNonce.status, 401);
+  assert.equal(noNonce.body.error, 'challenge_expired');
+
+  /* A wrong phrase spends the nonce and counts like a failed sign-in. */
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const wrong = await read(
+    await harness.vault.fetch(
+      request('/delete', {
+        body: { proof: await proveAuth('A'.repeat(43), ACCOUNT.accountId, challenge.body.nonce) },
+        headers: withToken(token)
+      })
+    )
+  );
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.body.error, 'bad_proof');
+  assert.equal(await harness.storage.get('nonce'), undefined, 'the nonce is spent');
+  assert.equal((await harness.storage.get('account')).accountId, ACCOUNT.accountId, 'the account survives');
+
+  const live = await harness.storage.get(await harness.vault.failureKey(ACCOUNT.accountId, null));
+  assert.equal(live?.failures, 1, 'a failed deletion is counted against the source');
+
+  /* The right phrase still works on the next challenge, so five failures were not needed. */
+  const right = await read(
+    await harness.vault.fetch(
+      request('/delete', { body: { proof: await proofFor(harness) }, headers: withToken(token) })
+    )
+  );
+  assert.equal(right.status, 200);
+});
+
+test('a deleted account is not recreated by another sync, and only an invite or the operator brings it back', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+  const token = session.body.token;
+
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', { body: { proof: await proofFor(harness) }, headers: withToken(token) })
+    )
+  );
+  assert.equal(deleted.status, 200);
+  const before = harness.reserved.length;
+
+  /* The same phrase, proving itself again, is refused before a slot is asked for and before a
+     new nonce is written. This is the path a restore on a still-signed-in device takes. */
+  const blindAgain = await blind(harness);
+  assert.equal(blindAgain.status, 410);
+  assert.equal(blindAgain.body.error, 'account_deleted');
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted']);
+  assert.equal(harness.reserved.length, before, 'no slot is reserved for a tombstoned account');
+
+  const provedAgain = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: {
+          accountId: ACCOUNT.accountId,
+          authSecret: ACCOUNT.authSecret,
+          proof: await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, 'dead-nonce')
+        }
+      })
+    )
+  );
+  assert.equal(provedAgain.status, 428, 'no live challenge: the route offers one, and writes no account');
+
+  /* Even that fresh challenge cannot bring the account back without a code. */
+  const signedAgain = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: {
+          accountId: ACCOUNT.accountId,
+          authSecret: ACCOUNT.authSecret,
+          proof: await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, provedAgain.body.nonce)
+        }
+      })
+    )
+  );
+  assert.equal(signedAgain.status, 410);
+  assert.equal(signedAgain.body.error, 'account_deleted');
+  assert.equal(harness.reserved.length, before, 'still no slot');
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted'], 'the tombstone is still all that remains');
+
+  /* The operator's end-account route removes the tombstone as well, which is the documented
+     way back on a server that hands out no codes. */
+  const cleared = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
+  assert.equal(cleared.status, 200);
+  assert.deepEqual([...harness.storage.raw.keys()], []);
+
+  const nowPossible = await provision(harness);
+  assert.equal(nowPossible.status, 201, 'the id can be created again once the tombstone is gone');
+});
+
+test('a creation with an invite clears the tombstone on an invite-only server', async () => {
+  const harness = object({ invitesRequired: true });
+  assert.equal((await provision(harness)).status, 201);
+  const session = await loginAs(harness, 'desktop');
+  const token = session.body.token;
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', { body: { proof: await proofFor(harness) }, headers: withToken(token) })
+    )
+  );
+  assert.equal(deleted.status, 200);
+
+  /* The first request mints a creation nonce; the second proves and reserves with the code. */
+  const challenge = await blind(harness);
+  assert.equal(challenge.status, 428, 'an invite-only server asks for a proof first');
+  const again = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: {
+          accountId: ACCOUNT.accountId,
+          authSecret: ACCOUNT.authSecret,
+          proof: await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce),
+          invite: 'a-new-code'
+        }
+      })
+    )
+  );
+  assert.equal(again.status, 201);
+  assert.equal(again.body.created, true);
+  assert.equal(await harness.storage.get('deleted'), undefined, 'the tombstone is gone');
+  assert.equal((await harness.storage.get('account')).accountId, ACCOUNT.accountId);
+});
+
+/* --------------------------------------------------------- ending one sign-in */
+
+test('each sign-in carries a public id, and the list carries no token and no hash', async () => {
+  const harness = object();
+  await provision(harness);
+  const first = await loginAs(harness, 'desktop');
+  const second = await loginAs(harness, 'mobile');
+
+  const list = await places(harness, second.body.token);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.count, 2);
+
+  const ids = list.body.sessions.map((session) => session.id);
+  for (const id of ids) assert.match(id, /^[A-Za-z0-9_-]{11}$/, 'eight random bytes, base64url');
+  assert.equal(new Set(ids).size, 2, 'two sign-ins never share one id');
+
+  const raw = JSON.stringify(list.body);
+  for (const token of [first.body.token, second.body.token]) assert.equal(raw.includes(token), false);
+  assert.equal(raw.includes('hash'), false);
+  assert.equal(raw.includes('token'), false);
+  assert.equal(list.body.sessions.filter((session) => session.current).length, 1);
+});
+
+test('a place can be signed out from the list, and its token is refused on the next request', async () => {
+  const harness = object();
+  await provision(harness);
+  const phone = await loginAs(harness, 'mobile');
+  const computer = await loginAs(harness, 'desktop');
+
+  const list = await places(harness, computer.body.token);
+  const phoneId = list.body.sessions.find((session) => session.client === 'mobile').id;
+
+  const revoked = await read(
+    await harness.vault.fetch(
+      request(`/sessions/${phoneId}`, { method: 'DELETE', headers: withToken(computer.body.token) })
+    )
+  );
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.body.ok, true);
+  assert.equal(revoked.body.current, false);
+  assert.equal(revoked.body.count, 1);
+
+  const refused = await harness.vault.fetch(
+    request('/vault', { method: 'GET', headers: withToken(phone.body.token) })
+  );
+  assert.equal(refused.status, 401, 'the ended place is refused on its next request');
+
+  const after = await places(harness, computer.body.token);
+  assert.equal(after.body.count, 1);
+  assert.equal(after.body.sessions[0].client, 'desktop');
+  assert.equal(after.body.sessions[0].current, true);
+
+  /* The survivor still works: the account and its vault are untouched by ending one session. */
+  const write = await read(
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: withToken(computer.body.token),
+        body: { baseVersion: 0, iv: IV, ct: CT }
+      })
+    )
+  );
+  assert.equal(write.status, 200);
+});
+
+test('the last place, this one included, can be ended without touching the account or vault', async () => {
+  const harness = object();
+  await provision(harness);
+  const only = await loginAs(harness, 'desktop');
+  const list = await places(harness, only.body.token);
+
+  const revoked = await read(
+    await harness.vault.fetch(
+      request(`/sessions/${list.body.sessions[0].id}`, {
+        method: 'DELETE',
+        headers: withToken(only.body.token)
+      })
+    )
+  );
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.body.current, true, 'the caller is told this was this place');
+  assert.equal(revoked.body.count, 0);
+
+  const refused = await harness.vault.fetch(
+    request('/vault', { method: 'GET', headers: withToken(only.body.token) })
+  );
+  assert.equal(refused.status, 401);
+
+  /* The phrase still opens the account, which still holds its sealed blob. */
+  const again = await loginAs(harness, 'desktop');
+  assert.equal(again.status, 200);
+  const readBack = await harness.vault.fetch(
+    request('/vault', { method: 'GET', headers: withToken(again.body.token) })
+  );
+  assert.equal(readBack.status, 404, 'no blob was ever written; the account exists and answers');
+  assert.equal((await harness.vault.fetch(request('/status', { method: 'GET' }))).status, 200);
+});
+
+test('ending a place needs a session, and an unknown id is a 404 that changes nothing', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+
+  const anonymous = await harness.vault.fetch(request('/sessions/AAAAAAAAAAA', { method: 'DELETE' }));
+  assert.equal(anonymous.status, 401);
+
+  const unknown = await read(
+    await harness.vault.fetch(
+      request('/sessions/AAAAAAAAAAA', { method: 'DELETE', headers: withToken(session.body.token) })
+    )
+  );
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.body.error, 'not_found');
+
+  const still = await places(harness, session.body.token);
+  assert.equal(still.body.count, 1, 'the unknown id revoked nothing');
 });

@@ -65,6 +65,10 @@ export const ACCOUNT_RETRY_MAX_MS = 30_000;
 
 const SOURCE_PREFIX = 'source:';
 const ATTEMPTS_KEY = 'attempts';
+/* What is left after a person deletes their account: a date, and nothing else. It is the only
+   key in the object then, and it is what makes deletion stick against a device that is still
+   signed in — login answers `account_deleted`, not `no_account`. */
+const TOMBSTONE_KEY = 'deleted';
 /* The operator's switch. It lives beside the account, not inside the sealed blob: the server
    has to read it before any proof is checked, and it must survive the vault being replaced. */
 const ADMIN_DISABLED_KEY = 'admin-disabled';
@@ -78,6 +82,9 @@ const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
 const AUTH_SECRET = /^[A-Za-z0-9_-]{43}$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const SESSION_HASH = 43;
+/* Eight random bytes, base64url: an id a person may read and a route may name, never the token
+   and never its digest. */
+const SESSION_ID = /^[A-Za-z0-9_-]{11}$/;
 
 const encoder = new TextEncoder();
 
@@ -238,7 +245,11 @@ export class Vault {
     if (path === '/challenge') return this.challenge(request);
     if (path === '/login') return this.login(request);
     if (path === '/logout') return this.logout(request);
+    if (path === '/delete') return this.deleteAccount(request);
     if (path === '/sessions' && request.method === 'GET') return this.listSessions(request);
+    if (path.startsWith('/sessions/') && request.method === 'DELETE') {
+      return this.revokeSession(request, path.slice('/sessions/'.length));
+    }
     if (path === '/vault' && request.method === 'GET') return this.readVault(request);
     if (path === '/vault' && request.method === 'PUT') return this.writeVault(request);
 
@@ -260,6 +271,23 @@ export class Vault {
     const state = await this.storage.get(ADMIN_DISABLED_KEY);
     if (!state) return null;
     return json({ error: 'account_disabled', disabledAt: state.at ?? null }, 403);
+  }
+
+  /** The date this account was deleted, or null while it exists. */
+  async tombstone() {
+    const state = await this.storage.get(TOMBSTONE_KEY);
+    return state && typeof state.at === 'number' ? state : null;
+  }
+
+  /**
+   * The refusal a device that still holds a deleted account is owed.
+   *
+   * It is 410 and `account_deleted`, never 404: `404 no_account` is the answer that tells a
+   * client "never created", and the client's next step for that is to create it again. A
+   * deletion must not be undone by the next sync on another device.
+   */
+  deletedRefusal(tombstone) {
+    return json({ error: 'account_deleted', deletedAt: tombstone.at }, 410);
   }
 
   /**
@@ -309,7 +337,12 @@ export class Vault {
     const proof = body.value?.proof;
     if (typeof proof !== 'string' || proof === '') {
       /* Nothing is written yet: the caller has a secret but has not shown it knows the phrase
-         that secret belongs to. */
+         that secret belongs to. A tombstone is the exception: an id that was deleted is not
+         offered a new creation challenge unless this server hands out codes, because a challenge
+         is the first step of the path that would re-create it. */
+      const tombstone = await this.tombstone();
+      if (tombstone && !this.invitesRequired()) return this.deletedRefusal(tombstone);
+
       const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
       const expiresAt = this.now() + NONCE_TTL_MS;
       await this.storage.put('create-nonce', { value: nonce, expiresAt });
@@ -344,6 +377,12 @@ export class Vault {
     if (existing) {
       return json({ ok: true, created: false, plan: existing.plan ?? 'free' }, 200);
     }
+
+    /* A deleted id is not re-created unless this server hands out codes and the code passed the
+       Registry below. On a server without codes only the operator's route clears the tombstone;
+       that is the documented way back, and it is deliberate rather than an oversight. */
+    const tombstone = await this.tombstone();
+    if (tombstone && !this.invitesRequired()) return this.deletedRefusal(tombstone);
 
     /* The cap lives in one object, so creation is serialised against it. An existing account
        never reaches this point, so a full registry cannot lock out the person who already has
@@ -416,6 +455,9 @@ export class Vault {
       lastSeenAt: now,
       paidUntil: null
     });
+    /* A code passed the Registry, which is the explicit way back. The tombstone goes with the
+       creation it no longer describes. */
+    await this.storage.delete(TOMBSTONE_KEY);
 
     if (typeof this.storage.setAlarm === 'function') {
       /* The only deadline an account ever carries: the release of a slot that was reserved and
@@ -441,7 +483,12 @@ export class Vault {
     if (shut) return shut;
 
     const account = await this.storage.get('account');
-    if (!account) return json({ error: 'no_account' }, 404);
+    if (!account) {
+      /* A deleted account is not a missing one: the caller must not be told to register. */
+      const tombstone = await this.tombstone();
+      if (tombstone) return this.deletedRefusal(tombstone);
+      return json({ error: 'no_account' }, 404);
+    }
 
     const live = await this.storage.get('nonce');
     if (live && live.expiresAt > this.now()) return json({ nonce: live.value });
@@ -459,44 +506,18 @@ export class Vault {
 
     let account = await this.storage.get('account');
     if (!account) {
-      /* No account answers to this id, so there is no account reference to write either. */
+      /* No account answers to this id, so there is no account reference to write either. A
+         tombstone is still an answer, and it is not the one that leads to a registration. */
+      const tombstone = await this.tombstone();
+      if (tombstone) return this.deletedRefusal(tombstone);
       await logEvent('signin_failed', { route: 'signin', reason: 'no_account' });
       return json({ error: 'no_account' }, 404);
     }
 
     const now = this.now();
     const source = sourceOf(request);
-    /* Counted per source: the key is a digest of the account and the source, so a caller who
-       invents sources writes nothing that names one, and no source can spend another's budget. */
-    const failureKey = await this.failureKey(account.accountId, source);
-
-    const stored = await this.storage.get(failureKey);
-    const failures = this.sourceFailures(stored, now);
-    if (failures.until > now) {
-      const retryAfter = Math.ceil((failures.until - now) / 1000);
-      await logEvent('signin_locked', {
-        route: 'signin',
-        reason: 'locked',
-        account: account.accountId,
-        source,
-        retry_after: retryAfter
-      });
-      return json({ error: 'locked', retryAfter }, 429);
-    }
-
-    /* The account-level guard, which answers a wait and never a lock. A distributed attempt can
-       delay the owner by at most the cap below; it cannot keep him out. */
-    const attempts = await this.storage.get(ATTEMPTS_KEY);
-    const retryAfter = this.throttleOf(attempts, now);
-    if (retryAfter > 0) {
-      await logEvent('signin_locked', {
-        route: 'signin',
-        reason: 'throttled',
-        account: account.accountId,
-        retry_after: retryAfter
-      });
-      return json({ error: 'throttled', retryAfter }, 429);
-    }
+    const refused = await this.lockedOut(account, source, now);
+    if (refused) return refused;
 
     const nonce = await this.storage.get('nonce');
     if (!nonce || nonce.expiresAt <= now) {
@@ -539,23 +560,12 @@ export class Vault {
 
       /* Five from one source is that source's lock; a correct proof is what clears it, and the
          count also ages out on its own. */
-      const count = failures.failures + 1;
-      const locking = count >= MAX_FAILURES;
-      await this.recordSource(
-        failureKey,
-        {
-          failures: locking ? 0 : count,
-          lastAt: now,
-          until: locking ? now + LOCKOUT_MS : 0
-        },
-        stored === undefined
-      );
-      await this.storage.put(ATTEMPTS_KEY, this.nextAttempts(attempts, now));
+      await this.recordBadProof(account.accountId, source, now);
       return json({ error: 'bad_proof' }, 401);
     }
 
     /* A correct proof clears this source immediately, and the account's throttle with it. */
-    await this.storage.delete(failureKey);
+    await this.storage.delete(await this.failureKey(account.accountId, source));
     await this.storage.delete(ATTEMPTS_KEY);
 
     /* The flag can be set after the account already exists: the next login upgrades it. */
@@ -567,8 +577,12 @@ export class Vault {
     await this.pruneSessions();
 
     const token = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+    /* The public name of this sign-in: eight random bytes, never the token and never its hash.
+       It is what the place list shows and what "sign out this place" names. */
+    const id = toBase64Url(crypto.getRandomValues(new Uint8Array(8)));
     const expiresAt = now + SESSION_TTL_MS;
     await this.storage.put(`session:${await sessionHash(token)}`, {
+      id,
       expiresAt,
       createdAt: now,
       lastSeenAt: now,
@@ -668,6 +682,74 @@ export class Vault {
     return { failures, firstAt, until: now + ms };
   }
 
+  /**
+   * The refusal a locked source or a throttled account owes, or null.
+   *
+   * Signing in and deleting are both proofs of the phrase, so they share this guard: a route
+   * that checked a proof without it would be a second, unthrottled place to guess. It writes the
+   * same line the sign-in path writes, because it is the same event.
+   */
+  async lockedOut(account, source, now) {
+    /* Counted per source: the key is a digest of the account and the source, so a caller who
+       invents sources writes nothing that names one, and no source can spend another's budget. */
+    const failureKey = await this.failureKey(account.accountId, source);
+    const stored = await this.storage.get(failureKey);
+    const failures = this.sourceFailures(stored, now);
+    if (failures.until > now) {
+      const retryAfter = Math.ceil((failures.until - now) / 1000);
+      await logEvent('signin_locked', {
+        route: 'signin',
+        reason: 'locked',
+        account: account.accountId,
+        source,
+        retry_after: retryAfter
+      });
+      return json({ error: 'locked', retryAfter }, 429);
+    }
+
+    /* The account-level guard, which answers a wait and never a lock. A distributed attempt can
+       delay the owner by at most the cap; it cannot keep him out. */
+    const attempts = await this.storage.get(ATTEMPTS_KEY);
+    const retryAfter = this.throttleOf(attempts, now);
+    if (retryAfter > 0) {
+      await logEvent('signin_locked', {
+        route: 'signin',
+        reason: 'throttled',
+        account: account.accountId,
+        retry_after: retryAfter
+      });
+      return json({ error: 'throttled', retryAfter }, 429);
+    }
+
+    return null;
+  }
+
+  /**
+   * One more wrong proof from a source: five is that source's lock, and every failure after the
+   * account's twentieth inside a minute is a growing wait. The same arithmetic signs in and
+   * deletes, so a wrong phrase never has a cheaper route than the one it was tried on.
+   */
+  async recordBadProof(accountId, source, now) {
+    const failureKey = await this.failureKey(accountId, source);
+    const stored = await this.storage.get(failureKey);
+    const failures = this.sourceFailures(stored, now);
+    const count = failures.failures + 1;
+    const locking = count >= MAX_FAILURES;
+
+    await this.recordSource(
+      failureKey,
+      {
+        failures: locking ? 0 : count,
+        lastAt: now,
+        until: locking ? now + LOCKOUT_MS : 0
+      },
+      stored === undefined
+    );
+
+    const attempts = await this.storage.get(ATTEMPTS_KEY);
+    await this.storage.put(ATTEMPTS_KEY, this.nextAttempts(attempts, now));
+  }
+
   async logout(request) {
     const shut = await this.refuseDisabled();
     if (shut) return shut;
@@ -697,6 +779,9 @@ export class Vault {
 
     const sessions = [...(await this.storage.list({ prefix: 'session:' }))]
       .map(([key, session]) => ({
+        /* The public name of the sign-in. A session written before this id existed has none, and
+           the page offers no action for one: there is nothing to name it by. */
+        id: SESSION_ID.test(session.id ?? '') ? session.id : null,
         client: CLIENT_KINDS.has(session.client) ? session.client : 'unknown',
         createdAt: session.createdAt ?? 0,
         lastSeenAt: session.lastSeenAt ?? session.createdAt ?? 0,
@@ -706,6 +791,34 @@ export class Vault {
       .sort((left, right) => right.lastSeenAt - left.lastSeenAt);
 
     return json({ count: sessions.length, sessions });
+  }
+
+  /**
+   * End one place.
+   *
+   * The caller authorizes with its own live token; the place is named by its public id, which
+   * the list handed out and which is not the token or its hash. The account, the sealed vault
+   * and every other place are untouched. The last place may be ended, including this one: a
+   * person who has lost a device should be able to cut it off even when it is the only one.
+   */
+  async revokeSession(request, id) {
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
+
+    const auth = await this.authorize(request);
+    if (!auth) return json({ error: 'unauthorized' }, 401);
+
+    if (!SESSION_ID.test(id)) return json({ error: 'not_found' }, 404);
+
+    const sessions = await this.storage.list({ prefix: 'session:' });
+    for (const [key, session] of sessions) {
+      if (session.id !== id) continue;
+      await this.storage.delete(key);
+      const count = [...(await this.storage.list({ prefix: 'session:' }))].length;
+      return json({ ok: true, current: key === `session:${auth}`, count });
+    }
+
+    return json({ error: 'not_found' }, 404);
   }
 
   async readVault(request) {
@@ -775,6 +888,95 @@ export class Vault {
     return json(vault);
   }
 
+  /**
+   * Delete what the server holds, behind a session and a fresh proof of the phrase.
+   *
+   * A session alone is not enough for a destructive act, and a proof alone is not enough to
+   * show the caller is signed in. Both are required: the bearer token names the account's
+   * session, and the HMAC over the last unspent nonce proves the caller holds the phrase. A
+   * wrong proof is counted exactly as a failed sign-in is, so this route is not a cheaper way to
+   * guess.
+   *
+   * What remains is one key: the date. A device still holding the phrase is answered 410
+   * `account_deleted`, never 404 — `404` is the answer that makes a client create the account
+   * again. The Registry's slot goes back, and nothing else about the person stays here.
+   */
+  async deleteAccount(request) {
+    if (request.method !== 'POST') return json({ error: 'method' }, 405);
+
+    const account = await this.storage.get('account');
+    if (!account) {
+      /* A second submit, or a device that was told "deleted" and asked again: the tombstone is
+         the no-op answer, and it needs no session to give it. */
+      const gone = await this.tombstone();
+      if (gone) return this.deletedRefusal(gone);
+      return json({ error: 'unauthorized' }, 401);
+    }
+
+    const shut = await this.refuseDisabled();
+    if (shut) return shut;
+
+    const auth = await this.authorize(request);
+    if (!auth) return json({ error: 'unauthorized' }, 401);
+
+    const now = this.now();
+    const source = sourceOf(request);
+    const refused = await this.lockedOut(account, source, now);
+    if (refused) return refused;
+
+    const nonce = await this.storage.get('nonce');
+    if (!nonce || nonce.expiresAt <= now) {
+      await this.storage.delete('nonce');
+      await logEvent('signin_failed', {
+        route: 'signin',
+        reason: 'challenge_expired',
+        account: account.accountId
+      });
+      return json({ error: 'challenge_expired' }, 401);
+    }
+    /* Spent before it is compared, like every other proof: one nonce, one attempt. */
+    await this.storage.delete('nonce');
+
+    const body = await readJson(request, MAX_SMALL_BODY);
+    if (body.tooLarge) return json({ error: 'too_large' }, 413);
+
+    const proof = body.value?.proof;
+    const ok =
+      typeof proof === 'string' && proof.length > 0
+        ? await verifyProof(account.authSecret, account.accountId, nonce.value, proof)
+        : false;
+
+    if (!ok) {
+      await logEvent('signin_failed', {
+        route: 'signin',
+        reason: 'bad_proof',
+        account: account.accountId,
+        source
+      });
+      await this.recordBadProof(account.accountId, source, now);
+      return json({ error: 'bad_proof' }, 401);
+    }
+
+    const accountId = account.accountId;
+    const deletedAt = now;
+
+    /* Every key this object owns: the account, the vault, its history, every session, the live
+       nonces, the attempts and the per-source failures. The list is read once, before any of it
+       is deleted, because deleting while listing would skip entries. */
+    const keys = [...(await this.storage.list())].map(([key]) => key);
+    for (const key of keys) await this.storage.delete(key);
+    if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
+
+    await this.storage.put(TOMBSTONE_KEY, { at: deletedAt });
+    await this.releaseSlot(accountId);
+
+    /* The one served request in this file that writes a line: a deletion is not a refusal, but
+       it is the event an operator most needs to be able to count. */
+    await logEvent('account_deleted', { route: 'vault', account: accountId });
+
+    return json({ ok: true, deletedAt });
+  }
+
   /** The owner's flag is applied on login, so it can be configured after the account exists. */
   async claimOwner(account) {
     const owner = this.env?.OWNER_ACCOUNT_ID;
@@ -799,7 +1001,12 @@ export class Vault {
    */
   async status() {
     const account = await this.storage.get('account');
-    if (!account) return json({ exists: false, disabled: false }, 404);
+    if (!account) {
+      /* Deleted is an answer, and a different one from never-created. */
+      const tombstone = await this.tombstone();
+      if (tombstone) return this.deletedRefusal(tombstone);
+      return json({ exists: false, disabled: false }, 404);
+    }
     const disabled = await this.storage.get(ADMIN_DISABLED_KEY);
     return json({
       exists: true,
@@ -961,6 +1168,14 @@ export class Vault {
     } catch {
       /* The cap is a convenience; a failed release must not stop the deletion. */
     }
+  }
+
+  /**
+   * Whether this server hands out codes. It is the same variable the Registry reads, and it
+   * decides one thing here: a tombstone can only be cleared by a creation that presents one.
+   */
+  invitesRequired() {
+    return String(this.env?.INVITES_REQUIRED ?? '').toLowerCase() === 'true';
   }
 
   async authorize(request) {

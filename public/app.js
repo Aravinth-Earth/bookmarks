@@ -730,6 +730,40 @@ function whenTime(stamp) {
   });
 }
 
+function placesSummary(count) {
+  return `${count} ${count === 1 ? 'place is' : 'places are'} signed in to this account. Each signed in with the phrase; this list is account metadata — a session carries the sealed blob and nothing that opens it.`;
+}
+
+/** One row of the place list, with the action that ends that sign-in and nothing else. */
+function placeRow(session, { modal, refresh }) {
+  const name = placeName(session.client);
+  const label = `${name}${session.current ? ' · this device' : ''}`;
+  const row = el('li', { class: 'places-row' }, [
+    el('strong', { text: label }),
+    el('span', {
+      text: `signed in ${whenTime(session.createdAt)} · last active ${whenTime(session.lastSeenAt)}`
+    })
+  ]);
+
+  /* A place from before public ids existed has nothing to name it by, so it has no action. It
+     still expires on its own. */
+  if (!session.id) return row;
+
+  const button = el('button', {
+    class: 'button button-quiet places-signout',
+    type: 'button',
+    text: 'Sign out',
+    /* The row's own sentence names the place, so the button does too: "Sign out" alone would be
+       heard without saying which of several. */
+    'aria-label': `Sign out ${label}`
+  });
+  button.addEventListener('click', () => {
+    void revokePlace(session, { name, button, modal, refresh });
+  });
+  row.append(button);
+  return row;
+}
+
 async function openPlaces() {
   if (!syncEnabled()) {
     announce('Sync is off, so this vault is not signed in anywhere.');
@@ -749,35 +783,279 @@ async function openPlaces() {
       announce('The session expired. Try again.');
       return;
     }
+    if (error?.code === 'ACCOUNT_DELETED') {
+      announce(deletedNotice().message, { duration: 8000 });
+      return;
+    }
     announce('Could not read the connected places.');
     return;
   }
 
-  placesCount = data.count;
+  const note = el('p', { class: 'modal-note' });
+  const rows = el('ul', { class: 'places-list' });
+  const modal = openModal({ title: 'Connected places', body: [note, rows] });
 
-  openModal({
-    title: 'Connected places',
+  /* The list is painted from an answer, so the count, the rows and the "this device" mark always
+     come from one reading of the server rather than from an edit made here. */
+  const paint = (payload) => {
+    placesCount = payload.count;
+    note.textContent = placesSummary(payload.count);
+    rows.replaceChildren(
+      ...payload.sessions.map((session) => placeRow(session, { modal, refresh }))
+    );
+  };
+
+  async function refresh() {
+    try {
+      paint(await sync.sessions());
+    } catch {
+      modal.close();
+      announce('Could not read the connected places.');
+    }
+  }
+
+  paint(data);
+}
+
+async function revokePlace(session, { name, button, modal, refresh }) {
+  button.disabled = true;
+  let answer;
+  try {
+    answer = await sync.revokeSession(session.id);
+  } catch (error) {
+    const failure = describeSyncFailure(error);
+    announce(failure.message, { duration: 6000 });
+    button.disabled = false;
+    return;
+  }
+
+  if (answer.current) {
+    /* This place ended itself. There is no session left to use, so the page locks rather than
+       pretending it can still sync: the account and its vault are untouched. */
+    modal.close();
+    await lockVault();
+    announce('This place is signed out. Enter the phrase to sign in again.', { duration: 8000 });
+    return;
+  }
+
+  announce(`Signed out ${name}.`);
+  await refresh();
+}
+
+/**
+ * Delete the account: the server copy first, then everything this device holds.
+ *
+ * The modal asks for the phrase even when this device remembers the signing key, because a
+ * remembered device is not a person saying yes. The typed word is the second guard: one control
+ * for a destructive act is too easy to press. Neither value is stored, sent anywhere but to the
+ * delete route, or put in the page's status line.
+ */
+function deleteAccountSheet() {
+  if (!state.accountId) {
+    announce('There is no account open.');
+    return;
+  }
+
+  const phraseField = el('textarea', {
+    id: 'delete-phrase',
+    class: 'phrase-input',
+    rows: '3',
+    autocomplete: 'off',
+    autocapitalize: 'none',
+    autocorrect: 'off',
+    spellcheck: false,
+    'aria-describedby': 'delete-phrase-hint'
+  });
+
+  const confirmField = el('input', {
+    type: 'text',
+    id: 'delete-confirm',
+    autocomplete: 'off',
+    autocapitalize: 'none',
+    autocorrect: 'off',
+    spellcheck: false,
+    'aria-describedby': 'delete-confirm-hint'
+  });
+
+  const errorLine = el('p', { class: 'form-error', role: 'alert' });
+  errorLine.hidden = true;
+
+  const deleteButton = el('button', {
+    class: 'button button-danger',
+    type: 'button',
+    text: 'Delete account',
+    disabled: true
+  });
+
+  const check = () => {
+    deleteButton.disabled =
+      phraseField.value.trim() === '' || confirmField.value.trim().toUpperCase() !== 'DELETE';
+  };
+  phraseField.addEventListener('input', check);
+  confirmField.addEventListener('input', check);
+
+  const showError = (message) => {
+    errorLine.textContent = message;
+    errorLine.hidden = message === '';
+  };
+
+  const modal = openModal({
+    title: 'Delete this account?',
     body: [
       el('p', {
-        class: 'modal-note',
-        text: `${data.count} ${data.count === 1 ? 'place is' : 'places are'} signed in to this account. Each signed in with the phrase; this list is account metadata — a session carries the sealed blob and nothing that opens it.`
+        text: 'This deletes the account and the sealed copy on the server: its bookmarks, its history, every place signed in to it, and its slot on the server. The slot goes back to the server’s count.'
       }),
-      el(
-        'ul',
-        { class: 'places-list' },
-        data.sessions.map((session) =>
-          el('li', { class: 'places-row' }, [
-            el('strong', {
-              text: `${placeName(session.client)}${session.current ? ' · this device' : ''}`
-            }),
-            el('span', {
-              text: `signed in ${whenTime(session.createdAt)} · last active ${whenTime(session.lastSeenAt)}`
-            })
-          ])
-        )
-      )
-    ]
+      el('p', {
+        text: 'This device deletes its sealed vault, its local history, the remembered key and this page’s settings, turns sync off, and locks.'
+      }),
+      el('p', {
+        text: 'Other devices keep their own local copies. They cannot sync again: each will say the account was deleted. Do not turn sync on there.'
+      }),
+      el('p', {
+        text: 'There is no recovery. The phrase names the same account id, but it cannot bring the account back. A new account needs a new invite code.'
+      }),
+      el('label', { class: 'field' }, [
+        el('span', { class: 'field-label', text: 'Your 13-word phrase' }),
+        phraseField
+      ]),
+      el('p', {
+        class: 'field-hint',
+        id: 'delete-phrase-hint',
+        text: 'Asked again for this action, even when this device remembers the key. It is not kept.'
+      }),
+      el('label', { class: 'field' }, [
+        el('span', { class: 'field-label', text: 'Type DELETE to confirm' }),
+        confirmField
+      ]),
+      el('p', {
+        class: 'field-hint',
+        id: 'delete-confirm-hint',
+        text: 'The word DELETE, so this is not one tap away from an ordinary setting.'
+      }),
+      errorLine
+    ],
+    actions: [
+      el('button', {
+        class: 'button button-quiet',
+        type: 'button',
+        text: 'Cancel',
+        onclick: () => modal.close()
+      }),
+      deleteButton
+    ],
+    onClose: () => {
+      /* A phrase must not outlive the dialog, whichever way it was closed. */
+      clearPhraseField(phraseField);
+      clearPhraseField(confirmField);
+    }
   });
+
+  deleteButton.addEventListener('click', async () => {
+    showError('');
+    const phrase = phraseField.value;
+    clearPhraseField(phraseField);
+    clearPhraseField(confirmField);
+    check();
+
+    const problem = phraseProblem(phrase);
+    if (problem) {
+      showError(problem);
+      phraseField.focus();
+      return;
+    }
+
+    deleteButton.disabled = true;
+    deleteButton.textContent = 'Deleting…';
+
+    try {
+      const derived = await deriveAccount(phrase);
+      if (derived.accountId !== state.accountId) {
+        showError('That phrase does not open this account.');
+        phraseField.focus();
+        return;
+      }
+
+      await sync.deleteAccount(state.accountId, derived.authSecret);
+      modal.close();
+      await forgetDeletedVault('This account was deleted. Nothing is left on this device, and sync is off.');
+    } catch (error) {
+      if (error?.code === 'ACCOUNT_DELETED') {
+        modal.close();
+        await forgetDeletedVault(
+          'This account was already deleted. Nothing is left on this device, and sync is off.'
+        );
+        return;
+      }
+      if (error?.code === 'NO_ACCOUNT') {
+        modal.close();
+        await forgetDeletedVault('There was no server copy. This device has been cleared.');
+        return;
+      }
+      /* The phrase was wrong, the server asked to wait, or the network is gone: the dialog stays
+         open with the sentence, so the attempt can be repeated without losing the decision. */
+      showError(describeSyncFailure(error).message);
+      phraseField.focus();
+    } finally {
+      if (document.body.contains(deleteButton)) {
+        deleteButton.disabled = false;
+        deleteButton.textContent = 'Delete account';
+        check();
+      }
+    }
+  });
+}
+
+/**
+ * Run a vault as if it had signed out, the way a lock does, plus the wipe a deletion needs.
+ *
+ * The state goes first, before the first await: an edit that is already sealing checks
+ * `state.key`, and must not write one more snapshot on its way out. `store.clear()` removes the
+ * sealed document, its history and the remembered key in one pass, so the activity log that
+ * lives inside the document goes with it. Local settings are removed too — the icon index names
+ * sites in the clear, and "nothing is left" has to include it.
+ */
+async function forgetDeletedVault(message) {
+  clearTimeout(syncTimer);
+  state.accountId = null;
+  state.authKey = null;
+  state.authSecret = null;
+  forgetInvite();
+  state.key = null;
+  state.version = 0;
+  state.remoteVersion = 0;
+  state.sealed = null;
+  state.document = null;
+  state.lastDeleted = null;
+  saveStamp = '';
+  syncLabel = '';
+  lastSyncedAt = 0;
+  plan = null;
+  units = 0;
+  placesCount = null;
+  vaultCreatedAt = null;
+  lastActivityAt = null;
+  /* Nothing may use the dead session, and no tab may think sync is still on. */
+  sync.token = null;
+  sync.accountId = null;
+  list.replaceChildren();
+  clearStatus();
+
+  try {
+    await store.clear();
+  } catch {
+    /* The server copy is gone; a storage refusal leaves the seal behind, not the account. */
+  }
+  clearDeviceStorage();
+
+  /* Another tab still holds the key and would write the vault back to this device. */
+  lockSignal.broadcast();
+
+  showLock(message, { hasVault: false });
+  /* The generic empty-device note offers to load a synced copy; there is none to load. */
+  deviceNote.textContent =
+    'No vault on this device. The deleted account cannot be reopened here; a new vault starts a new account.';
+  deviceNote.hidden = false;
+  announce(message, { duration: 8000 });
 }
 
 function planLabel() {
@@ -837,6 +1115,16 @@ function handleSyncError(error) {
   }
   if (failure.kind === 'locked' || failure.kind === 'conflict') {
     setSyncStatus(failure.label);
+    return;
+  }
+  /* A deleted account is not a passing failure: say it once, at length, and stop there. */
+  if (failure.kind === 'deleted') {
+    sync.token = null;
+    setSyncStatus(failure.label);
+    if (failure.message !== lastSyncNotice) {
+      lastSyncNotice = failure.message;
+      announce(failure.message, { duration: 8000 });
+    }
     return;
   }
 
@@ -932,113 +1220,26 @@ async function syncNow() {
   }
 
   syncBusy = true;
-  let absorbed = false;
   try {
-    if (!sync.signedIn) {
-      setSyncStatus('Signing in…');
-      let session;
+    let absorbed = false;
+    let retried = false;
 
+    for (;;) {
       try {
-        session = await sync.login(state.accountId, authMaterial());
+        absorbed = await reconcile();
+        break;
       } catch (error) {
-        if (error.code !== 'NO_ACCOUNT') throw error;
-
-        /* First sync on a new phrase: the account is created from the same secrets the login
-           would have used, so there is nothing to provision and no token to hold. A remembered
-           device holds the signing key, not the secret the server is given, so it cannot create
-           the account without the phrase once. The code, when the server wants one, is the third
-           argument and is empty until a refusal asks for it. */
-        setSyncStatus('Creating the account…');
-        if (typeof state.authSecret !== 'string') {
-          throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
+        /* A token that died between two requests is not a dead end: the client has already
+           dropped it, and signing in again is what tells a deleted account (410) from an
+           expired session. One retry, then the error is reported. */
+        if (error?.code === 'UNAUTHORIZED' && !retried) {
+          retried = true;
+          continue;
         }
-        await sync.register(state.accountId, state.authSecret, state.invite);
-        /* The server now holds the secret, so this page does not: from here the session signs
-           with the non-extractable key and nothing else. */
-        state.authSecret = null;
-        /* The creation is done, so the code has no further use: it was spent on this account. */
-        forgetInvite();
-        session = await sync.login(state.accountId, authMaterial());
-      }
-
-      applyPlan(session);
-    }
-
-    const remote = await sync.pull();
-
-    if (remote) {
-      state.remoteVersion = remote.version;
-      let remoteDocument;
-      try {
-        remoteDocument = await openVault(state.key, remote, state.accountId, remote.version, {
-          allowLegacy: legacyBlobAllowed()
-        });
-      } catch {
-        /* The bytes arrived and this page could not open them. That is not a lost connection, and
-           the difference is the whole of why this error exists. */
-        throw new SyncError(
-          'REMOTE_UNREADABLE',
-          'The copy on the server could not be opened with this phrase.'
-        );
-      }
-      const { document: merged } = mergeDocuments(state.document, remoteDocument, Date.now, {
-        device: deviceId()
-      });
-
-      if (fingerprint(merged) !== fingerprint(state.document)) {
-        state.document = merged;
-        absorbed = true;
-        /* The merge may have carried a newer sort or view from the other device; the controls
-           have to show it before the list is built, or they show the state they replaced. */
-        applyPrefs();
-        render();
-        await saveNow({ push: false });
-      }
-      if (fingerprint(merged) === fingerprint(remoteDocument)) {
-        markSynced();
-        if (absorbed) announce('Merged changes from another device.');
-        return;
-      }
-    } else {
-      state.remoteVersion = 0;
-    }
-
-    let result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
-
-    if (result.conflict) {
-      state.remoteVersion = result.currentVersion;
-      if (result.current) {
-        let conflictDocument;
-        try {
-          conflictDocument = await openVault(
-            state.key,
-            result.current,
-            state.accountId,
-            result.current.version,
-            { allowLegacy: legacyBlobAllowed() }
-          );
-        } catch {
-          throw new SyncError(
-            'REMOTE_UNREADABLE',
-            'The copy on the server could not be opened with this phrase.'
-          );
-        }
-        const { document: merged } = mergeDocuments(state.document, conflictDocument, Date.now, {
-          device: deviceId()
-        });
-        state.document = merged;
-        absorbed = true;
-        applyPrefs();
-        render();
-        await saveNow({ push: false });
-      }
-      result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
-      if (result.conflict) {
-        throw new SyncError('CONFLICT', 'Another device is changing the vault.');
+        throw error;
       }
     }
 
-    state.remoteVersion = result.version;
     markSynced();
     if (absorbed) announce('Merged changes from another device.');
   } catch (error) {
@@ -1050,6 +1251,114 @@ async function syncNow() {
       syncNow();
     }
   }
+}
+
+/** The one pass over the server: sign in if needed, read, merge, push. */
+async function reconcile() {
+  let absorbed = false;
+
+  if (!sync.signedIn) {
+    setSyncStatus('Signing in…');
+    let session;
+
+    try {
+      session = await sync.login(state.accountId, authMaterial());
+    } catch (error) {
+      if (error.code !== 'NO_ACCOUNT') throw error;
+
+      /* First sync on a new phrase: the account is created from the same secrets the login
+         would have used, so there is nothing to provision and no token to hold. A remembered
+         device holds the signing key, not the secret the server is given, so it cannot create
+         the account without the phrase once. The code, when the server wants one, is the third
+         argument and is empty until a refusal asks for it. */
+      setSyncStatus('Creating the account…');
+      if (typeof state.authSecret !== 'string') {
+        throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
+      }
+      await sync.register(state.accountId, state.authSecret, state.invite);
+      /* The server now holds the secret, so this page does not: from here the session signs
+         with the non-extractable key and nothing else. */
+      state.authSecret = null;
+      /* The creation is done, so the code has no further use: it was spent on this account. */
+      forgetInvite();
+      session = await sync.login(state.accountId, authMaterial());
+    }
+
+    applyPlan(session);
+  }
+
+  const remote = await sync.pull();
+
+  if (remote) {
+    state.remoteVersion = remote.version;
+    let remoteDocument;
+    try {
+      remoteDocument = await openVault(state.key, remote, state.accountId, remote.version, {
+        allowLegacy: legacyBlobAllowed()
+      });
+    } catch {
+      /* The bytes arrived and this page could not open them. That is not a lost connection, and
+         the difference is the whole of why this error exists. */
+      throw new SyncError(
+        'REMOTE_UNREADABLE',
+        'The copy on the server could not be opened with this phrase.'
+      );
+    }
+    const { document: merged } = mergeDocuments(state.document, remoteDocument, Date.now, {
+      device: deviceId()
+    });
+
+    if (fingerprint(merged) !== fingerprint(state.document)) {
+      state.document = merged;
+      absorbed = true;
+      /* The merge may have carried a newer sort or view from the other device; the controls
+         have to show it before the list is built, or they show the state they replaced. */
+      applyPrefs();
+      render();
+      await saveNow({ push: false });
+    }
+    if (fingerprint(merged) === fingerprint(remoteDocument)) return absorbed;
+  } else {
+    state.remoteVersion = 0;
+  }
+
+  let result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
+
+  if (result.conflict) {
+    state.remoteVersion = result.currentVersion;
+    if (result.current) {
+      let conflictDocument;
+      try {
+        conflictDocument = await openVault(
+          state.key,
+          result.current,
+          state.accountId,
+          result.current.version,
+          { allowLegacy: legacyBlobAllowed() }
+        );
+      } catch {
+        throw new SyncError(
+          'REMOTE_UNREADABLE',
+          'The copy on the server could not be opened with this phrase.'
+        );
+      }
+      const { document: merged } = mergeDocuments(state.document, conflictDocument, Date.now, {
+        device: deviceId()
+      });
+      state.document = merged;
+      absorbed = true;
+      applyPrefs();
+      render();
+      await saveNow({ push: false });
+    }
+    result = await sync.push(state.remoteVersion, await sealedForPush(state.remoteVersion));
+    if (result.conflict) {
+      throw new SyncError('CONFLICT', 'Another device is changing the vault.');
+    }
+  }
+
+  state.remoteVersion = result.version;
+  return absorbed;
 }
 
 /* ------------------------------------------------------------------ screens */
@@ -1385,6 +1694,14 @@ async function offerServerVault() {
       announce(failure.message, { duration: 8000 });
       return;
     }
+    /* The phrase names an account that was deleted. It is not offered a server copy, because
+       there is none; the device stays local and the sentence says why. */
+    if (error?.code === 'ACCOUNT_DELETED') {
+      const failure = deletedNotice();
+      lastSyncNotice = failure.message;
+      announce(failure.message, { duration: 8000 });
+      return;
+    }
     /* Offline, throttled, or the question could not be asked. Stay local — but say so: an empty
        list with no explanation is the state this prompt exists to prevent, and a silent version of
        it is worse than the question never being asked. */
@@ -1422,9 +1739,14 @@ function disabledNotice() {
   return describeSyncFailure(new SyncError('ACCOUNT_DISABLED', 'disabled'));
 }
 
+/** The one sentence for an account that was deleted, wherever the page meets the answer. */
+function deletedNotice() {
+  return describeSyncFailure(new SyncError('ACCOUNT_DELETED', 'deleted', { status: 410 }));
+}
+
 /**
- * Ask the server whether this account is switched off, at unlock, without blocking the local
- * vault. A failure is silent: the next sync says the same thing if it matters.
+ * Ask the server whether this account is gone or switched off, at unlock, without blocking the
+ * local vault. A failure is silent: the next sync says the same thing if it matters.
  */
 async function noticeIfDisabled() {
   try {
@@ -1436,7 +1758,18 @@ async function noticeIfDisabled() {
       lastSyncNotice = failure.message;
       announce(failure.message, { duration: 8000 });
     }
-  } catch {
+  } catch (error) {
+    /* A deleted account is not silent: the local vault opens, and the person is told that the
+       server copy is gone and that this device's own copy is all there is. */
+    if (error?.code === 'ACCOUNT_DELETED') {
+      const failure = deletedNotice();
+      sync.token = null;
+      setSyncStatus(failure.label);
+      if (failure.message !== lastSyncNotice) {
+        lastSyncNotice = failure.message;
+        announce(failure.message, { duration: 8000 });
+      }
+    }
     /* Offline or throttled: the local vault opens, and sync will say it when it can. */
   }
 }
@@ -3913,6 +4246,17 @@ function openSettings() {
               announce(`Account id: ${state.accountId}`, { duration: 8000 });
             }
           }
+        ),
+        item(
+          'Delete account',
+          syncEnabled()
+            ? 'Erase the sealed copy, its history and every sign-in on the server, and clear this device.'
+            : 'This vault is not syncing; this clears this device and any copy the server still holds.',
+          () => {
+            modal.close();
+            deleteAccountSheet();
+          },
+          { danger: true }
         )
       ]),
       heading('This device'),
@@ -4055,6 +4399,7 @@ async function lockVault({ broadcast = true } = {}) {
   lastSyncedAt = 0;
   plan = null;
   units = 0;
+  placesCount = null;
   vaultCreatedAt = null;
   lastActivityAt = null;
   list.replaceChildren();

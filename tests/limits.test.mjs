@@ -299,3 +299,41 @@ test('health is answered without a counter, and no class binding means nothing t
     assert.equal(response.status, 200);
   }
 });
+
+test('deleting spends the sign-in budget, and ending a place spends the vault budget', async () => {
+  const { env: limiters } = limits();
+  const { env } = harness(limiters);
+
+  /* The deletion is a proof of the phrase, so it is counted with the routes that check one. */
+  for (let at = 0; at < LIMITS.signin.limit; at += 1) {
+    const response = await worker.fetch(api(`/a/${ACCOUNT}/delete`, { method: 'POST', body: {} }), env);
+    assert.equal(response.status, 200, `deletion ${at + 1} is served`);
+  }
+  const signinSpent = await worker.fetch(
+    api(`/a/${ACCOUNT}/delete`, { method: 'POST', body: {} }),
+    env
+  );
+  assert.equal(signinSpent.status, 429);
+  assert.equal(signinSpent.headers.get('retry-after'), '60');
+
+  /* A whole family named by an id is the same one budget: `/sessions` is the vault class. */
+  for (let at = 0; at < LIMITS.vault.limit; at += 1) {
+    const response = await worker.fetch(
+      api(`/a/${ACCOUNT}/sessions/ABCDEFGHIJK`, { method: 'DELETE' }),
+      env
+    );
+    assert.equal(response.status, 200, `place ${at + 1} is served`);
+  }
+  const vaultSpent = await worker.fetch(
+    api(`/a/${ACCOUNT}/sessions/ABCDEFGHIJK`, { method: 'DELETE' }),
+    env
+  );
+  assert.equal(vaultSpent.status, 429);
+  assert.equal(vaultSpent.headers.get('retry-after'), '60');
+
+  /* The two classes are apart: a spent sign-in budget does not take the place list with it. */
+  const stillListed = await worker.fetch(api(`/a/${ACCOUNT}/sessions`), env);
+  assert.equal(stillListed.status, 429, 'the same vault class is spent, as documented');
+  const challenge = await worker.fetch(api(`/a/${ACCOUNT}/challenge`, { method: 'POST' }), env);
+  assert.equal(challenge.status, 429, 'the sign-in class is spent by the deletions');
+});

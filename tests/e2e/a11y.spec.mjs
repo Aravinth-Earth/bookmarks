@@ -559,3 +559,37 @@ test('locking the vault returns the keyboard to the unlock field', async ({ page
   /* The locked page is still the lock screen, not a blank one, and its controls are still named. */
   expect(await unnamedControls(page)).toEqual([]);
 });
+
+test('the delete-account dialog names both fields, holds the action until both are filled, and gives focus back', async ({
+  page
+}) => {
+  await createVault(page);
+  await addBookmark(page, { url: 'https://example.com/one', name: 'One' });
+
+  const modal = await openSettings(page);
+  await (await settingsItem(modal, /^Delete account/)).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Delete this account?' });
+  await expect(dialog, 'the destructive action is a named dialog').toBeVisible();
+
+  const phrase = page.getByRole('textbox', { name: 'Your 13-word phrase' });
+  const typed = page.getByRole('textbox', { name: 'Type DELETE to confirm' });
+  const action = dialog.getByRole('button', { name: 'Delete account' });
+
+  await expect(phrase, 'the dialog starts on the phrase').toBeFocused();
+  await expect(typed, 'the typed confirmation is named').toBeVisible();
+  await expect(action, 'one control cannot delete by itself').toBeDisabled();
+
+  await phrase.fill('one two three');
+  await expect(action, 'the phrase alone is not enough').toBeDisabled();
+
+  await typed.fill('delete');
+  await expect(action, 'both fields filled enables it').toBeEnabled();
+
+  expect(await unnamedControls(page), 'unnamed controls in the delete dialog').toEqual([]);
+
+  /* Escape leaves it and puts the keyboard back on the Settings button that opened the sheet. */
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('#settings-button')).toBeFocused();
+});

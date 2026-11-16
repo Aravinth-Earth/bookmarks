@@ -357,3 +357,33 @@ test('a revoked code is gone, and a spent one cannot be revoked', async () => {
   );
   assert.equal(afterUse.status, 404, 'a spent code is not a code that can be revoked');
 });
+
+test('releasing an account frees its slot and stops the spent code naming it', async () => {
+  const { registry } = harness({ INVITES_REQUIRED: 'true', MAX_ACCOUNTS: '1' });
+  const minted = await mint(registry);
+  assert.equal((await spend(registry, minted.body.codes[0])).status, 200);
+
+  const before = await registry.storage.get('invites');
+  assert.equal(before[0].accountId, accountId(9));
+
+  const released = await json(await registry.fetch(release({ accountId: accountId(9) })));
+  assert.equal(released.status, 200);
+  assert.equal(released.body.count, 0, 'the slot is free again');
+
+  const after = await registry.storage.get('invites');
+  assert.equal(after[0].accountId, undefined, 'the code no longer names a deleted account');
+  assert.equal(typeof after[0].usedAt, 'number', 'the code stays spent');
+
+  /* The same code is still refused, and the free slot takes a new account. */
+  const { hashCode } = await import('../src/invites.js');
+  const refused = await json(
+    await registry.fetch(
+      reserve({ accountId: accountId(2), inviteHash: await hashCode(minted.body.codes[0]) })
+    )
+  );
+  assert.equal(refused.status, 422);
+
+  const fresh = await mint(registry);
+  assert.equal(fresh.status, 200);
+  assert.equal((await spend(registry, fresh.body.codes[0])).status, 200);
+});

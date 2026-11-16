@@ -1113,3 +1113,43 @@ test('a vault answers its own size without opening anything', async () => {
   assert.equal(JSON.stringify(stats).includes('a'.repeat(64)), false, 'the sealed bytes are counted, not copied');
   assert.equal(JSON.stringify(stats).includes('authSecret'), false, 'and no secret is in the answer');
 });
+
+test('a deletion is forwarded to the account, and the operator paths still are not', async () => {
+  const { env, calls } = harness({ doStatus: 200, doBody: { ok: true, deletedAt: 1 } });
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ proof: 'p'.repeat(43) })
+    }),
+    env
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, ACCOUNT);
+  assert.equal(calls[0].path, '/delete');
+  assert.equal(calls[0].method, 'POST');
+
+  /* The deletion route is not a door to the operator's: a `/delete` that names one is still a
+     404 before dispatch. */
+  const operator = await worker.fetch(api(`/a/${ACCOUNT}/admin-delete`, { method: 'POST' }), env);
+  assert.equal(operator.status, 404);
+  assert.equal(calls.length, 1);
+});
+
+test('ending one place is forwarded with its id and the caller’s method', async () => {
+  const { env, calls } = harness({ doStatus: 200 });
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/sessions/ABCDEFGHIJK`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${'x'.repeat(43)}` }
+    }),
+    env
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/sessions/ABCDEFGHIJK');
+  assert.equal(calls[0].method, 'DELETE');
+});

@@ -289,6 +289,19 @@ export class Registry {
     const remaining = accounts.filter((id) => id !== accountId);
     if (remaining.length !== accounts.length) await this.storage.put('accounts', remaining);
 
+    /* A spent code keeps its usedAt — it was used, and reusing it must stay refused — but it no
+       longer names an account that exists. Nothing is gained by keeping the id of a deleted
+       account beside a code. */
+    const invites = await this.invites();
+    let changed = false;
+    const cleared = invites.map((entry) => {
+      if (entry.accountId !== accountId) return entry;
+      changed = true;
+      const { accountId: _used, ...rest } = entry;
+      return rest;
+    });
+    if (changed) await this.storage.put('invites', cleared);
+
     return json({ ok: true, count: remaining.length, max: await this.max() });
   }
 }

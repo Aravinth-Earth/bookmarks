@@ -1090,6 +1090,16 @@ body.modal-open {
     font-size: var(--font-size-xs, 0.7rem);
 }
 
+/* The action belongs to its row: one place ends, not every place, so it sits under the name it
+   names rather than in a bar of its own. */
+.places-row .places-signout {
+    justify-self: start;
+    width: auto;
+    margin-top: 0.2rem;
+    padding: 0.15rem 0.5rem;
+    font-size: var(--font-size-xs, 0.7rem);
+}
+
 /* Count activity: one line per change, read where the count is. No scroll box and no per-row
    action — the list is capped at a score of lines, so it stays a reading and not a second list
    to manage. */

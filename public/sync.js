@@ -95,6 +95,16 @@ export function describeSyncFailure(error) {
         message:
           'This vault has been disabled by the administrator. Sync is off. Contact aravinth@332321.xyz. The local vault still works on this device.'
       };
+    /* Deletion is not a missing account. The sentence says what happened, that the local copy
+       is still here, and that a new account needs a new code — the three things a person needs
+       to decide what to do next. */
+    case 'ACCOUNT_DELETED':
+      return {
+        kind: 'deleted',
+        label: 'Account deleted',
+        message:
+          'This account was deleted, and the server no longer holds a copy. This device keeps its own local vault. A new account needs a new invite code.'
+      };
     case 'FULL':
       return { kind: 'cap', label: 'No new accounts' };
     /* A limiter is not a closed server: the same 429 means "not this second" here and "never
@@ -180,6 +190,24 @@ export function describeSyncFailure(error) {
         kind: 'server',
         label: 'Not synced',
         message: 'The server did not list the connected places.'
+      };
+    case 'SESSION_NOT_FOUND':
+      return {
+        kind: 'server',
+        label: 'Not signed out',
+        message: 'That place is no longer signed in.'
+      };
+    case 'REVOKE_FAILED':
+      return {
+        kind: 'server',
+        label: 'Not signed out',
+        message: 'The server did not sign that place out.'
+      };
+    case 'DELETE_FAILED':
+      return {
+        kind: 'server',
+        label: 'Not deleted',
+        message: 'The server did not delete the account. Nothing on this device has changed.'
       };
     default:
       /* A raw `fetch` rejection that did not pass through `request()` is still the network. Every
@@ -306,6 +334,14 @@ export class SyncClient {
        can say what happened and who to ask, instead of calling it a server refusal. */
     if (payload?.error === 'account_disabled') {
       throw new SyncError('ACCOUNT_DISABLED', 'This vault has been disabled by the administrator.', {
+        status: response.status
+      });
+    }
+
+    /* A deleted account answers 410 on every route that would otherwise look like "never
+       created". It is mapped here, before any caller can read a 404 as a reason to register. */
+    if (payload?.error === 'account_deleted') {
+      throw new SyncError('ACCOUNT_DELETED', 'This account was deleted.', {
         status: response.status
       });
     }
@@ -516,6 +552,95 @@ export class SyncClient {
       });
     }
     return { conflict: false, version: response.payload.version, updatedAt: response.payload.updatedAt };
+  }
+
+  /**
+   * End this sign-in, from the list of places.
+   *
+   * The current token authorizes the call; the place is named by the public id the list gave
+   * out. `current` in the answer says whether this place ended itself, which the page needs in
+   * order to lock rather than repaint. A revoked token is refused on its next request, and this
+   * client drops it here so the next sync signs in again instead of retrying with it.
+   */
+  async revokeSession(id) {
+    this.requireSession();
+    const response = await this.request(
+      `/a/${this.accountId}/sessions/${encodeURIComponent(id)}`,
+      { method: 'DELETE', token: this.token }
+    );
+
+    if (response.status === 401) {
+      this.token = null;
+      throw new SyncError('UNAUTHORIZED', 'The session expired.');
+    }
+    if (response.status === 404) {
+      throw new SyncError('SESSION_NOT_FOUND', 'That place is no longer signed in.', {
+        status: 404
+      });
+    }
+    if (!response.ok) {
+      throw new SyncError('REVOKE_FAILED', 'The server did not sign that place out.', {
+        status: response.status
+      });
+    }
+    return response.payload;
+  }
+
+  /**
+   * Delete the account and everything the server holds for it.
+   *
+   * Deletion is destructive, so the session token is not enough: the phrase's secret signs one
+   * fresh challenge, and the proof rides with the delete. A page that has no session signs in
+   * once first; either way the proof is spent and nothing keeps the secret or the proof here.
+   *
+   * The caller is left signed out, because the session it held is part of what was deleted.
+   */
+  async deleteAccount(accountId, authSecret) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!this.signedIn) await this.login(accountId, authSecret);
+
+      const challenge = await this.request(`/a/${accountId}/challenge`, { method: 'POST' });
+      if (challenge.status === 404) {
+        throw new SyncError('NO_ACCOUNT', 'This vault is not registered on the server.', {
+          status: 404
+        });
+      }
+      if (challenge.status === 429) throw throttle(challenge);
+      if (!challenge.ok || typeof challenge.payload.nonce !== 'string') {
+        throw new SyncError('CHALLENGE_FAILED', 'The server did not answer.', {
+          status: challenge.status
+        });
+      }
+
+      const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
+      const response = await this.request(`/a/${accountId}/delete`, {
+        method: 'POST',
+        token: this.token,
+        body: { proof }
+      });
+
+      if (response.status === 429) throw throttle(response);
+      if (response.status === 401) {
+        /* A 401 is two different answers: the proof was wrong, or the session this page held
+           had already died. Only the second is worth a fresh sign-in and one more try. */
+        const dead =
+          response.payload?.error === 'unauthorized' ||
+          response.payload?.error === 'challenge_expired';
+        this.token = null;
+        if (dead && attempt === 0) continue;
+        throw new SyncError('LOGIN_FAILED', 'The server refused the proof.', { status: 401 });
+      }
+      if (!response.ok) {
+        throw new SyncError('DELETE_FAILED', 'The server did not delete the account.', {
+          status: response.status
+        });
+      }
+
+      this.token = null;
+      return response.payload;
+    }
+
+    throw new SyncError('DELETE_FAILED', 'The server did not delete the account.');
   }
 
   async logout() {

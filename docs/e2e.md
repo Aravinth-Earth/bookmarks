@@ -29,9 +29,9 @@ Nothing in the suite names a path on the machine it was written on:
 
 `wrangler dev` writes into `.wrangler/e2e-state-<port>`, which is ignored by git and removed before each run: the
 registry allows one account on this machine, so a creation test would otherwise meet a full server on its second pass
-and fail for a reason that has nothing to do with the code. The account cap is raised to eight at the same time, because
-the deployed server takes one account and more than one test needs a server that will take one. Pointed at someone else's
-server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
+and fail for a reason that has nothing to do with the code. The account cap is raised to sixteen at the same time,
+because the suite's sync tests each create one account and four workers run several side by side; the deployed server
+takes one account. Pointed at someone else's server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
 
 ## What is covered
 
@@ -49,11 +49,13 @@ server (`E2E_BASE_URL`), nothing is removed and no cap is changed.
 | `invite.spec.mjs` | a server that needs a code: the field, the three refusals, the code never kept, a phone/monitor fit, and an account that already exists turning sync on without one |
 | `two-devices.spec.mjs` | two real profiles, one phrase: the sealed backup carried across, a visit counted in each, the total added in both directions and again without climbing, each side's own share in the bookmark's sheet, and restoring an older backup without losing the later visit |
 | `new-device.spec.mjs` | a device that holds nothing: the phrase, the server copy offered, loading it, starting empty, and what is said when the server cannot answer |
+| `account-deletion.spec.mjs` | deleting from Settings with the phrase and a typed word, the wipe and lock on this device, and a second profile refused with "account deleted" instead of creating it again |
+| `session-revocation.spec.mjs` | two profiles, one signs the other out from Connected places: the ended token is refused on its next request and the survivor keeps syncing; and a place that ends itself locks the page while the phrase still opens the local vault |
 | `legacy-copy.spec.mjs` | a server copy sealed before the version was bound, opened on a device that holds nothing |
 | `theme.spec.mjs` | dark regardless of the system setting, a light theme saved by an older build, and the picker |
 | `setup.spec.mjs` | the install link, the consent question, the defaults, "keep it off", and that the question is asked once |
 
-Ninety-three tests in fifteen files; a full run takes about eight minutes on four workers, about twenty on one
+Ninety-seven tests in seventeen files; a full run takes about eight minutes on four workers, about twenty on one
 (`E2E_WORKERS=1`). Every test opens its own browser profile, so running them side by side is safe; the performance
 budgets are the one thing to re-read on an idle machine.
 
