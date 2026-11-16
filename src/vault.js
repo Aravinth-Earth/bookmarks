@@ -88,7 +88,9 @@ const SESSION_ID = /^[A-Za-z0-9_-]{11}$/;
 
 const encoder = new TextEncoder();
 
-const MAX_SMALL_BODY = 4 * 1024;
+/* The two caps a body is read against. The Worker checks the declared length against them before
+   it forwards, so they are shared rather than restated there. */
+export const MAX_SMALL_BODY = 4 * 1024;
 export const MAX_VAULT_BODY = 4 * 1024 * 1024;
 
 /**

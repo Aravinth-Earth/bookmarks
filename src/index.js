@@ -11,6 +11,7 @@
  */
 
 import { digestHex, logEvent } from './events.js';
+import { MAX_SMALL_BODY, MAX_VAULT_BODY } from './vault.js';
 
 /* The app is the whole of its own origin: the page sits at `/`, so there is no prefix to strip and
    no path to redirect. The path it was first served under is an unknown path here now, and the
@@ -1132,6 +1133,16 @@ async function handleApi(request, env, url) {
 
     const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
     const target = new URL(`https://vault${forward}`, 'https://vault');
+
+    /* The caller's stream is forwarded untouched, so an upload over the cap is aborted by the
+       runtime somewhere in the middle and reaches the caller as a network fault rather than a
+       refusal — and a network fault is what makes a client retry the whole blob. The declared
+       length is therefore refused here, before anything is sent on. The object's own check stays
+       as the backstop, because a caller can omit the length or lie about it. */
+    const cap = forward === '/vault' ? MAX_VAULT_BODY : MAX_SMALL_BODY;
+    const declared = Number(request.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > cap) return json({ error: 'too_large' }, 413);
+
     return limited(env, classOfRoute(forward), request, async () =>
       forwardTo(stub, target, request, await sourceDigest(request))
     );

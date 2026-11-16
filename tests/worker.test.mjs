@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import worker from '../src/index.js';
+import { MAX_SMALL_BODY, MAX_VAULT_BODY } from '../src/vault.js';
 import { quiet } from './logs.mjs';
 import { withFetch, dnsQueries } from './dns.mjs';
 
@@ -1173,4 +1174,55 @@ test('ending one place is forwarded with its id and the caller’s method', asyn
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, '/sessions/ABCDEFGHIJK');
   assert.equal(calls[0].method, 'DELETE');
+});
+
+/* The Worker forwards the caller's stream, so an upload over the cap used to be aborted by the
+   runtime partway through: the caller saw a network fault for a request that should have been
+   refused, and a network fault is what makes it send the whole blob again. */
+test('a declared length over the cap is refused before the object is reached', async () => {
+  const { env, calls } = harness({ doStatus: 200 });
+
+  const overVault = await worker.fetch(
+    api(`/a/${ACCOUNT}/vault`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'content-length': String(MAX_VAULT_BODY + 1) },
+      body: '{}'
+    }),
+    env
+  );
+  assert.equal(overVault.status, 413);
+  assert.deepEqual(await overVault.json(), { error: 'too_large' }, 'the shape the object answers with');
+
+  /* A route that reads a small body has a small cap, whatever the account's plan allows. */
+  const overSmall = await worker.fetch(
+    api(`/a/${ACCOUNT}/delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': String(MAX_SMALL_BODY + 1) },
+      body: '{}'
+    }),
+    env
+  );
+  assert.equal(overSmall.status, 413);
+  assert.deepEqual(await overSmall.json(), { error: 'too_large' });
+
+  assert.equal(calls.length, 0, 'neither request reached the object');
+});
+
+test('a declared length within the cap is forwarded as it always was', async () => {
+  const { env, calls } = harness({ doStatus: 200, doBody: { version: 1 } });
+  const body = JSON.stringify({ baseVersion: 0, iv: 'a'.repeat(16), ct: 'abc' });
+
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/vault`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'content-length': String(body.length) },
+      body
+    }),
+    env
+  );
+
+  assert.equal(response.status, 200, 'the object decided, not the Worker');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/vault');
+  assert.equal(calls[0].body, body, 'the object saw the bytes the caller sent');
 });
