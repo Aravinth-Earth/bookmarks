@@ -7,10 +7,13 @@
  * the origin root.
  *
  * BUMP CACHE_NAME whenever any file below changes, or a returning visitor keeps the old copy.
+ * It is a digest of those files' bytes, checked by `npm run check`: a change to one of them fails
+ * the check and prints the name this line has to carry, so the bump is not a thing a person has
+ * to remember at deploy time.
  * The API is never cached: a stale vault read would be worse than no answer at all.
  */
 
-const CACHE_NAME = 'bookmarks-v91';
+const CACHE_NAME = 'bookmarks-f8404ab5af';
 const SHELL = [
   '/',
   '/index.html',
