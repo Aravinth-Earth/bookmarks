@@ -42,11 +42,25 @@ const SECURITY_HEADERS = {
   'strict-transport-security': 'max-age=15552000; includeSubDomains; preload'
 };
 
-function json(body, status = 200) {
+function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      ...headers
+    }
   });
+}
+
+/**
+ * The refusal for a verb a route does not answer.
+ *
+ * `allow` is what makes the 405 usable: the status alone tells a caller it was wrong and nothing
+ * about how to be right, and one that reads only the status retries the same verb.
+ */
+function methodNotAllowed(methods) {
+  return json({ error: 'method' }, 405, { allow: methods.join(', ') });
 }
 
 /**
@@ -885,7 +899,7 @@ async function proxyRefused(reason) {
  * No hostname is logged by this code.
  */
 async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
-  if (request.method !== 'GET') return json({ error: 'method' }, 405);
+  if (request.method !== 'GET') return methodNotAllowed(['GET']);
 
   const hostname = (request.headers.get('x-icon-host') ?? '').trim();
   if (!HOSTNAME.test(hostname)) return proxyRefused('bad_host');
@@ -1053,7 +1067,7 @@ async function fetchPageTitle(hostname, signal) {
  * hash, and nothing about the caller, an account or a vault is involved.
  */
 async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
-  if (request.method !== 'GET') return json({ error: 'method' }, 405);
+  if (request.method !== 'GET') return methodNotAllowed(['GET']);
 
   const hostname = (request.headers.get('x-page-host') ?? '').trim();
   if (!HOSTNAME.test(hostname)) return proxyRefused('bad_host');
@@ -1085,7 +1099,12 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
 async function handleApi(request, env, url) {
   const path = url.pathname.slice(API_PREFIX.length);
 
-  if (path === '/health') return json({ ok: true, version: VERSION });
+  if (path === '/health') {
+    /* Named rather than answered for every verb: a health check is a read, and a write to it is a
+       caller's mistake worth reporting instead of answering with the same JSON. */
+    if (request.method !== 'GET') return methodNotAllowed(['GET']);
+    return json({ ok: true, version: VERSION });
+  }
 
   if (path === ICON_PATH) {
     return limited(env, ROUTE_CLASS[ICON_PATH], request, () =>

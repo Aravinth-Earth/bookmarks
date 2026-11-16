@@ -802,6 +802,61 @@ test('a logout is a POST; a GET or any other verb is refused and ends nothing', 
   assert.equal(still.status, 200, 'the session a refused logout named is still signed in');
 });
 
+/* A route that answers every verb hides a caller's mistake, and a refusal that names no method
+   leaves the caller retrying the one it just used. */
+test('a verb a route does not answer is a 405 that names the ones it does', async () => {
+  const harness = object();
+
+  for (const [path, method, allow] of [
+    ['/status', 'POST', 'GET'],
+    ['/account', 'DELETE', 'POST'],
+    ['/challenge', 'GET', 'POST'],
+    ['/logout', 'PATCH', 'POST'],
+    ['/delete', 'GET', 'POST'],
+    ['/sessions', 'POST', 'GET'],
+    ['/sessions/AAAAAAAAAAA', 'POST', 'DELETE'],
+    ['/vault', 'DELETE', 'GET, PUT'],
+    ['/admin-stats', 'POST', 'GET']
+  ]) {
+    const refused = await harness.vault.fetch(request(path, { method, body: undefined }));
+    assert.equal(refused.status, 405, `${method} ${path}`);
+    assert.equal(refused.headers.get('allow'), allow, `${method} ${path}`);
+  }
+
+  /* A path nothing answers at is still a 404: there is no method list to give for a route that
+     does not exist, and a 405 there would claim one does. */
+  const missing = await harness.vault.fetch(request('/nothing', { method: 'POST' }));
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get('allow'), null);
+});
+
+/* A body is parsed as JSON, so a body that never said it was JSON is refused before it is read
+   rather than reported as malformed JSON. */
+test('a route that reads JSON refuses a body of another type', async () => {
+  const harness = object();
+
+  const form = new Request('https://vault/account', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: 'accountId=x'
+  });
+  const refused = await harness.vault.fetch(form);
+  assert.equal(refused.status, 415);
+  assert.equal((await refused.json()).error, 'unsupported_media_type');
+
+  /* The parameters after the type are not part of it: a charset does not change the format. */
+  const typed = new Request('https://vault/account', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret })
+  });
+  assert.equal((await harness.vault.fetch(typed)).status, 428, 'the creation opens on its challenge');
+
+  /* A route with no body at all is not a wrong media type, and is answered on its own terms. */
+  const noBody = await harness.vault.fetch(new Request('https://vault/delete', { method: 'POST' }));
+  assert.equal(noBody.status, 401, 'no body is a missing session, not a missing header');
+});
+
 test('an unknown route is a 404, not a crash', async () => {
   const harness = object();
   const response = await read(await harness.vault.fetch(request('/nothing')));

@@ -70,6 +70,15 @@ test('health answers without any credential', async () => {
   assert.equal(typeof body.version, 'string');
 });
 
+test('health is a read, and any other verb is told to use GET', async () => {
+  const { env, calls } = harness();
+  const response = await worker.fetch(api('/health', { method: 'POST' }), env);
+
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get('allow'), 'GET');
+  assert.equal(calls.length, 0, 'nothing behind the route was asked');
+});
+
 test('there is no admin route to create accounts', async () => {
   const { env, calls } = harness();
   const response = await worker.fetch(
@@ -247,8 +256,9 @@ test("an unknown path is the app's own 404 page, not redirected", async () => {
 const ICON_HOST = 'example.com';
 const ICON_HASH = createHash('sha256').update(ICON_HOST).digest('base64url');
 
-function iconRequest({ host = ICON_HOST, hash = ICON_HASH } = {}) {
+function iconRequest({ host = ICON_HOST, hash = ICON_HASH, method = 'GET' } = {}) {
   return new Request(`https://bookmarks.332321.xyz/api/icon?h=${hash}`, {
+    method,
     headers: host ? { 'x-icon-host': host } : {}
   });
 }
@@ -614,6 +624,17 @@ test('the title service refuses a missing host, a non-DNS host or a wrong hash',
 
   const wrongMethod = await worker.fetch(titleRequest({ method: 'POST' }), harness().env);
   assert.equal(wrongMethod.status, 405);
+});
+
+test('the two proxy routes name GET when another verb is used', async () => {
+  for (const [label, ask] of [
+    ['icon', iconRequest({ method: 'POST' })],
+    ['title', titleRequest({ method: 'POST' })]
+  ]) {
+    const response = await worker.fetch(ask, harness().env);
+    assert.equal(response.status, 405, label);
+    assert.equal(response.headers.get('allow'), 'GET', `${label} says which verb it answers`);
+  }
 });
 
 test('a title is read from the page head and answered with a cache lifetime', async () => {

@@ -188,6 +188,53 @@ test('signing in says which kind of device this is', async () => {
   assert.equal(sent.client, clientKind());
 });
 
+/* The server refuses a body whose type it was not told, so the client's own header is what keeps
+   creation, sign-in and saving working. Nothing else in these tests would notice it going
+   missing: the stub here answers whatever it is asked. */
+test('every request that carries a body declares it is JSON', async () => {
+  const base = '/api/a/';
+  const table = {
+    [`${base}${ACCOUNT.accountId}/challenge`]: [200, { nonce: 'nonce-value' }],
+    [`${base}${ACCOUNT.accountId}/login`]: [200, { token: 't'.repeat(43) }],
+    [`${base}${ACCOUNT.accountId}/vault`]: [200, { version: 1, updatedAt: 0 }]
+  };
+  /* Creation is two requests: the first is answered with a nonce, the second with the account.
+     Both are recorded, because both carry a body. */
+  const calls = [];
+  let creations = 0;
+  const fetch = async (url, options = {}) => {
+    const path = new URL(url, 'https://example.test').pathname;
+    calls.push({ path, method: options.method ?? 'GET', body: options.body, headers: options.headers });
+    const headers = { 'content-type': 'application/json' };
+    if (path.endsWith('/account')) {
+      creations += 1;
+      const body = creations === 1 ? { error: 'proof_required', nonce: 'n' } : { ok: true, created: true };
+      return new Response(JSON.stringify(body), { status: creations === 1 ? 428 : 201, headers });
+    }
+    const [status, payload] = table[path];
+    return new Response(JSON.stringify(payload), { status, headers });
+  };
+
+  const client = new SyncClient({ fetch });
+  await client.register(ACCOUNT.accountId, ACCOUNT.authSecret);
+  await client.login(ACCOUNT.accountId, ACCOUNT.authSecret);
+  await client.push(0, { iv: 'a'.repeat(16), ct: 'b'.repeat(8) });
+
+  const carrying = calls.filter((call) => call.body !== undefined);
+  assert.ok(carrying.length >= 4, 'creation twice, sign-in and a save each send a body');
+  for (const call of carrying) {
+    assert.equal(call.headers['content-type'], 'application/json', `${call.method} ${call.path}`);
+  }
+
+  /* A request with no body says nothing about a type, which is not the same as saying it is not
+     JSON: the challenge carries no body at all. */
+  const bare = calls.filter((call) => call.body === undefined);
+  assert.ok(bare.length >= 1, 'the challenge is asked with no body');
+  for (const call of bare) {
+    assert.equal(call.headers['content-type'], undefined, `${call.method} ${call.path}`);
+  }
+});
+
 test('the place list needs a session and is read with the token', async () => {
   const base = '/api/a/';
   const payload = { count: 1, sessions: [{ client: 'desktop', current: true, createdAt: 1, lastSeenAt: 2, expiresAt: 3 }] };
