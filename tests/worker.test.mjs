@@ -673,6 +673,36 @@ test('a page larger than the read cap still yields its title, and a page without
   assert.equal((await none.json()).error, 'no_title');
 });
 
+test('a title carries no character that can misrepresent it, and the cap counts characters', async () => {
+  /* A right-to-left override, a zero-width space and a control character: each is removed,
+     and the characters that spell the name are what is left. */
+  const marked = await withFetch(
+    async () =>
+      new Response('<html><head><title>Safe\u202Eevil\u200B\u0007 Name</title></head></html>', {
+        headers: { 'content-type': 'text/html' }
+      }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  const { title } = await marked.json();
+  assert.equal(title, 'Safeevil Name');
+  assert.doesNotMatch(title, /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/);
+
+  /* A hundred and twenty characters, not a hundred and twenty UTF-16 units: the name ends on a
+     whole emoji rather than half of one. */
+  const emoji = `a${'\u{1f600}'.repeat(150)}`;
+  const capped = await withFetch(
+    async () =>
+      new Response(`<html><head><title>${emoji}</title></head></html>`, {
+        headers: { 'content-type': 'text/html' }
+      }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  const cappedTitle = (await capped.json()).title;
+  assert.equal(Array.from(cappedTitle).length, 120);
+  assert.equal(cappedTitle, `a${'\u{1f600}'.repeat(119)}`);
+  assert.ok(cappedTitle.isWellFormed(), 'no half of a surrogate pair is stored');
+});
+
 /* ------------------------------------------------- destinations both proxies refuse */
 
 const sha256 = (value) => createHash('sha256').update(value).digest('base64url');

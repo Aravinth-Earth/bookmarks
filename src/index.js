@@ -1028,6 +1028,38 @@ function decodeEntities(text) {
 }
 
 /**
+ * The characters a stored name must not carry.
+ *
+ * The C0 and C1 controls, the soft hyphen, the Arabic letter mark, the bidi overrides and
+ * isolates, the zero-width marks, the deprecated format characters and a byte-order mark: each
+ * of them can make a name render as something other than its characters, and none of them is
+ * part of a page's name.
+ */
+const TITLE_UNSAFE =
+  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g;
+
+/**
+ * A title as a name the vault can hold.
+ *
+ * Entities are decoded first, so an escape cannot smuggle in a character the raw form does not
+ * name. Then the characters above are removed, every run of whitespace becomes one space, the
+ * text is normalised, and the cap counts characters rather than UTF-16 units: a name that ends
+ * in an emoji is not cut through the middle of it, and an unpaired surrogate — a code unit
+ * without its partner, which is what a truncated match leaves behind — is dropped rather than
+ * stored.
+ */
+function cleanTitle(text) {
+  const chars = Array.from(
+    decodeEntities(text).replace(TITLE_UNSAFE, '').replace(/\s+/g, ' ').normalize('NFC')
+  ).filter((char) => {
+    const code = char.codePointAt(0);
+    return code < 0xd800 || code > 0xdfff;
+  });
+
+  return chars.slice(0, TITLE_MAX_CHARS).join('').trim();
+}
+
+/**
  * The page's own title, read from the same document the icon discovery already reads.
  *
  * Only the origin is fetched, never a path a caller names, so this cannot be pointed at an
@@ -1060,8 +1092,8 @@ async function fetchPageTitle(hostname, signal) {
   const match = html.match(/<title[^>]*>([\s\S]{0,400}?)<\/title>/i);
   if (!match) return null;
 
-  const title = decodeEntities(match[1]).replace(/\s+/g, ' ').trim();
-  return title === '' ? null : title.slice(0, TITLE_MAX_CHARS);
+  const title = cleanTitle(match[1]);
+  return title === '' ? null : title;
 }
 
 /**
