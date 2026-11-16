@@ -223,6 +223,32 @@ test('a file of unclosed anchors is scanned in linear time', () => {
   assert.ok(elapsed < 1000, `the scan took ${elapsed}ms`);
 });
 
+test('a wrapper inside a wrapper is refused, and one wrapper still imports', () => {
+  const document = importPlain(LEGACY, now).document;
+  const refused = (error) =>
+    error.code === 'INVALID_IMPORT' && /wrapped more than once/.test(error.message);
+
+  assert.throws(
+    () => importPlain({ format: PLAIN_FORMAT, document: exportPlain(document, now) }, now),
+    refused
+  );
+
+  /* A file can nest its own envelope as deep as it likes, and following them all used to spend
+     the stack until the tab gave up. The second envelope is refused where it is found. */
+  let nested = document;
+  for (let depth = 0; depth < 50_000; depth += 1) {
+    nested = { format: PLAIN_FORMAT, document: nested };
+  }
+  assert.throws(() => importPlain(nested, now), refused);
+
+  const fromOneWrapper = importPlain(exportPlain(document, now), now);
+  assert.equal(fromOneWrapper.statistics.imported, 3);
+  assert.deepEqual(
+    fromOneWrapper.document.bookmarks.map((bookmark) => bookmark.url).sort(),
+    document.bookmarks.map((bookmark) => bookmark.url).sort()
+  );
+});
+
 test('a browser export re-imports to the same two bookmarks', () => {
   const original = importPlain(LEGACY, now).document;
   const html = exportBrowserBookmarks(original);

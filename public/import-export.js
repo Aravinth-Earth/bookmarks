@@ -46,6 +46,21 @@ function fail(code, message) {
   return error;
 }
 
+/**
+ * The one place a file's text becomes a value, so its length is refused once and before
+ * `JSON.parse` spends the tab's time on syntax it was never going to accept.
+ */
+function importText(text) {
+  if (text.length > MAX_IMPORT_BYTES) {
+    throw fail('INVALID_IMPORT', 'that file is too large to import');
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw fail('INVALID_IMPORT', 'that file is not JSON');
+  }
+}
+
 function decodeEntities(text) {
   return text.replace(/&(#?\w+);/g, (whole, name) => ENTITIES[name] ?? whole);
 }
@@ -160,40 +175,35 @@ function importedSlot(record) {
 /**
  * Turn a payload into a document.
  *
- * Accepts an array (the old `sites.json`), a plain export wrapper, or a document that was
- * exported without the wrapper.
+ * Accepts an array (the old `sites.json`), a plain export wrapper around a document, or a
+ * document that was exported without the wrapper. One envelope is the whole allowance: a
+ * wrapper that holds another wrapper is refused, because a file can nest envelopes as deep as
+ * its writer wants and following them to the bottom spends the tab's stack on a shape no
+ * exporter here produces.
  *
  * @returns {{document: object, statistics: {imported: number, skipped: number, duplicates: number}}}
  */
 export function importPlain(payload, now = Date.now, options = {}) {
   const settings = { device: options.device ?? 'unsettled', cause: options.cause ?? 'import' };
-  let entries;
   let carried = [];
 
-  if (typeof payload === 'string') {
-    /* The whole file is in memory before this call, so the size that matters is the one already
-       held: refuse it before JSON.parse so a hostile file cannot spend the tab's time on syntax
-       it was never going to accept. */
-    if (payload.length > MAX_IMPORT_BYTES) {
-      throw fail('INVALID_IMPORT', 'that file is too large to import');
+  let body = typeof payload === 'string' ? importText(payload) : payload;
+
+  if (body?.format === PLAIN_FORMAT) {
+    body = typeof body.document === 'string' ? importText(body.document) : body.document;
+    if (body?.format === PLAIN_FORMAT) {
+      throw fail('INVALID_IMPORT', 'that file is wrapped more than once');
     }
-    try {
-      entries = JSON.parse(payload);
-    } catch {
-      throw fail('INVALID_IMPORT', 'that file is not JSON');
-    }
-    return importPlain(entries, now, settings);
   }
 
-  if (Array.isArray(payload)) {
-    entries = payload;
-  } else if (payload?.format === PLAIN_FORMAT && payload.document) {
-    return importPlain(payload.document, now, settings);
-  } else if (payload?.schema === SCHEMA) {
-    entries = payload.bookmarks;
+  let entries;
+  if (Array.isArray(body)) {
+    entries = body;
+  } else if (body?.schema === SCHEMA) {
+    entries = body.bookmarks;
     /* An export made by this app carries its own log. It is kept only for the bookmarks this
        file really imports, so a line cannot outlive the record it describes. */
-    carried = normaliseActivity(payload.activity, now);
+    carried = normaliseActivity(body.activity, now);
   } else {
     throw fail('INVALID_IMPORT', 'that file is not a bookmark export');
   }
