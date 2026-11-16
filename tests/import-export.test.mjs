@@ -14,6 +14,7 @@ import {
   createDocument
 } from '../public/bookmarks.js';
 import {
+  MAX_IMPORT_BYTES,
   PLAIN_FORMAT,
   SEALED_FORMAT,
   exportBrowserBookmarks,
@@ -200,6 +201,52 @@ test('a name with a formed tag inside it loses every tag, not only the first pas
   const html = '<DL><DT><A HREF="https://nested.example/"><<b>Nested</b></A></DL>';
   const { document } = importBrowserBookmarks(html, now);
   assert.equal(document.bookmarks[0].name, 'Nested');
+});
+
+test('an import larger than the limit is refused before it is parsed', () => {
+  const huge = 'x'.repeat(MAX_IMPORT_BYTES + 1);
+
+  assert.throws(() => importPlain(huge, now), /too large/);
+  assert.throws(() => importBrowserBookmarks(huge, now), /too large/);
+});
+
+test('a file of unclosed anchors is scanned in linear time', () => {
+  /* The old expression rescanned the rest of the file from every `<a`, which is quadratic: this
+     input took seconds and a larger one froze the tab. The scan has to finish without revisiting
+     the tail, and an anchor with no closing tag is not an entry. */
+  const html = '<a href="https://example.com/">'.repeat(30_000);
+  const started = Date.now();
+  const { document } = importBrowserBookmarks(html, now);
+  const elapsed = Date.now() - started;
+
+  assert.equal(document.bookmarks.length, 0);
+  assert.ok(elapsed < 1000, `the scan took ${elapsed}ms`);
+});
+
+test('a wrapper inside a wrapper is refused, and one wrapper still imports', () => {
+  const document = importPlain(LEGACY, now).document;
+  const refused = (error) =>
+    error.code === 'INVALID_IMPORT' && /wrapped more than once/.test(error.message);
+
+  assert.throws(
+    () => importPlain({ format: PLAIN_FORMAT, document: exportPlain(document, now) }, now),
+    refused
+  );
+
+  /* A file can nest its own envelope as deep as it likes, and following them all used to spend
+     the stack until the tab gave up. The second envelope is refused where it is found. */
+  let nested = document;
+  for (let depth = 0; depth < 50_000; depth += 1) {
+    nested = { format: PLAIN_FORMAT, document: nested };
+  }
+  assert.throws(() => importPlain(nested, now), refused);
+
+  const fromOneWrapper = importPlain(exportPlain(document, now), now);
+  assert.equal(fromOneWrapper.statistics.imported, 3);
+  assert.deepEqual(
+    fromOneWrapper.document.bookmarks.map((bookmark) => bookmark.url).sort(),
+    document.bookmarks.map((bookmark) => bookmark.url).sort()
+  );
 });
 
 test('a browser export re-imports to the same two bookmarks', () => {

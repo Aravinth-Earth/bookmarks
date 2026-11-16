@@ -30,6 +30,13 @@ import {
 export const PLAIN_FORMAT = 'bookmarks-plain/1';
 export const SEALED_FORMAT = 'bookmarks-sealed/1';
 
+/* An import is a file a person chose, not a stream: the whole text has to be in memory anyway,
+   so it is refused before it is parsed or scanned. Eight mebibytes is far beyond a real bookmark
+   file (the vault holds at most 500 records) and small enough that a hostile one cannot freeze
+   the tab. A JavaScript string's length counts UTF-16 units, each at least one byte in UTF-8, so
+   the character check is never looser than the byte check the caller makes before reading. */
+export const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
+
 const COLOR = /^#[0-9a-f]{6}$/i;
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", apos: "'" };
 
@@ -37,6 +44,21 @@ function fail(code, message) {
   const error = new Error(`bookmarks: ${message}`);
   error.code = code;
   return error;
+}
+
+/**
+ * The one place a file's text becomes a value, so its length is refused once and before
+ * `JSON.parse` spends the tab's time on syntax it was never going to accept.
+ */
+function importText(text) {
+  if (text.length > MAX_IMPORT_BYTES) {
+    throw fail('INVALID_IMPORT', 'that file is too large to import');
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw fail('INVALID_IMPORT', 'that file is not JSON');
+  }
 }
 
 function decodeEntities(text) {
@@ -153,34 +175,35 @@ function importedSlot(record) {
 /**
  * Turn a payload into a document.
  *
- * Accepts an array (the old `sites.json`), a plain export wrapper, or a document that was
- * exported without the wrapper.
+ * Accepts an array (the old `sites.json`), a plain export wrapper around a document, or a
+ * document that was exported without the wrapper. One envelope is the whole allowance: a
+ * wrapper that holds another wrapper is refused, because a file can nest envelopes as deep as
+ * its writer wants and following them to the bottom spends the tab's stack on a shape no
+ * exporter here produces.
  *
  * @returns {{document: object, statistics: {imported: number, skipped: number, duplicates: number}}}
  */
 export function importPlain(payload, now = Date.now, options = {}) {
   const settings = { device: options.device ?? 'unsettled', cause: options.cause ?? 'import' };
-  let entries;
   let carried = [];
 
-  if (typeof payload === 'string') {
-    try {
-      entries = JSON.parse(payload);
-    } catch {
-      throw fail('INVALID_IMPORT', 'that file is not JSON');
+  let body = typeof payload === 'string' ? importText(payload) : payload;
+
+  if (body?.format === PLAIN_FORMAT) {
+    body = typeof body.document === 'string' ? importText(body.document) : body.document;
+    if (body?.format === PLAIN_FORMAT) {
+      throw fail('INVALID_IMPORT', 'that file is wrapped more than once');
     }
-    return importPlain(entries, now, settings);
   }
 
-  if (Array.isArray(payload)) {
-    entries = payload;
-  } else if (payload?.format === PLAIN_FORMAT && payload.document) {
-    return importPlain(payload.document, now, settings);
-  } else if (payload?.schema === SCHEMA) {
-    entries = payload.bookmarks;
+  let entries;
+  if (Array.isArray(body)) {
+    entries = body;
+  } else if (body?.schema === SCHEMA) {
+    entries = body.bookmarks;
     /* An export made by this app carries its own log. It is kept only for the bookmarks this
        file really imports, so a line cannot outlive the record it describes. */
-    carried = normaliseActivity(payload.activity, now);
+    carried = normaliseActivity(body.activity, now);
   } else {
     throw fail('INVALID_IMPORT', 'that file is not a bookmark export');
   }
@@ -376,6 +399,45 @@ export function mergeInto(existing, incoming, now = Date.now, options = {}) {
 }
 
 /**
+ * Every anchor in a browser export, scanned once from left to right.
+ *
+ * The expression this replaced had to rescan the tail from every `<a` that never closed, so a
+ * file could take seconds to refuse. This walks forward by index instead. An anchor with no
+ * closing tag ends the scan, because everything after it would be part of its text.
+ */
+function anchors(html) {
+  const lower = html.toLowerCase();
+  const found = [];
+  let at = 0;
+
+  while ((at = lower.indexOf('<a', at)) !== -1) {
+    const after = lower[at + 2];
+    if (after === undefined || !/\s/.test(after)) {
+      at += 2;
+      continue;
+    }
+
+    const tagEnd = lower.indexOf('>', at + 2);
+    if (tagEnd === -1) break;
+
+    const tag = html.slice(at, tagEnd + 1);
+    const href = tag.match(/\shref\s*=\s*"([^"]*)"/i);
+    if (!href) {
+      at = tagEnd + 1;
+      continue;
+    }
+
+    const close = lower.indexOf('</a>', tagEnd + 1);
+    if (close === -1) break;
+
+    found.push({ href: href[1], tag, text: html.slice(tagEnd + 1, close) });
+    at = close + 4;
+  }
+
+  return found;
+}
+
+/**
  * Read a browser's "bookmarks.html".
  *
  * Only the anchors matter. Folders are structure the vault does not model, and a bookmarklet
@@ -385,17 +447,19 @@ export function importBrowserBookmarks(html, now = Date.now, options = {}) {
   if (typeof html !== 'string' || html.trim() === '') {
     throw fail('INVALID_IMPORT', 'that file is empty');
   }
+  if (html.length > MAX_IMPORT_BYTES) {
+    throw fail('INVALID_IMPORT', 'that file is too large to import');
+  }
 
-  const pattern = /<a\s[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
   const entries = [];
-  for (const match of html.matchAll(pattern)) {
-    const url = decodeEntities(match[1].trim());
+  for (const { href, tag, text } of anchors(html)) {
+    const url = decodeEntities(href.trim());
     if (!/^https?:\/\//i.test(url)) continue;
 
-    const addDate = match[0].match(/add_date\s*=\s*"(\d+)"/i);
+    const addDate = tag.match(/add_date\s*=\s*"(\d+)"/i);
     /* Anchor text may hold nested tags, and one pass can leave a tag behind (`<<a>>` -> `<a>`); strip until the
        string stops changing, then decode what is left. */
-    let name = match[2];
+    let name = text;
     for (let previous = null; previous !== name;) {
       previous = name;
       name = name.replace(/<[^>]*>/g, '');

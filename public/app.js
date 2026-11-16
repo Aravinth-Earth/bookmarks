@@ -48,6 +48,7 @@ import {
 } from './device-store.js';
 import { createVault, indexedDbAdapter } from './vault.js';
 import {
+  MAX_IMPORT_BYTES,
   exportBrowserBookmarks,
   exportPlain,
   exportSealed,
@@ -3485,6 +3486,14 @@ function exportBrowserFile() {
 async function handleImport() {
   const file = await pickFile('.json,.html,.htm,application/json,text/html');
   if (!file) return;
+
+  /* The size is known before the file is read, so a hostile or mistaken file is refused without
+     ever being held in the tab as text. The module refuses the same length again once it has a
+     string, because this check is the one a caller can forget. */
+  if (file.size > MAX_IMPORT_BYTES) {
+    announce('That file is too large to import; nothing was read.', { duration: 6000 });
+    return;
+  }
 
   const text = await file.text();
   let parsed;
