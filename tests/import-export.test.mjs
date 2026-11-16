@@ -11,7 +11,11 @@ import assert from 'node:assert/strict';
 
 import {
   MAX_BOOKMARKS,
-  createDocument
+  addBookmark,
+  createDocument,
+  deleteBookmark,
+  recordClick,
+  updateBookmark
 } from '../public/bookmarks.js';
 import {
   MAX_IMPORT_BYTES,
@@ -286,6 +290,87 @@ test('the plain export names its format and carries the document untouched', () 
   assert.equal(envelope.document, document);
   assert.equal(envelope.exported_at, new Date(NOW).toISOString());
   assert.deepEqual(createDocument().bookmarks, []);
+});
+
+test('a plain export brought back into an empty vault is the vault it was taken from', () => {
+  /* Every field the model defines is set to something other than its default, so a field the
+     import drops cannot pass by looking like one that was never there. */
+  const T0 = Date.UTC(2025, 5, 1, 9, 0, 0);
+  const T1 = Date.UTC(2025, 5, 2, 9, 0, 0);
+  const T2 = Date.UTC(2025, 5, 3, 9, 0, 0);
+  const T3 = Date.UTC(2025, 5, 4, 9, 0, 0);
+  const at = (moment) => () => moment;
+
+  const added = addBookmark(
+    createDocument(),
+    {
+      url: 'https://example.com/deep',
+      name: 'Example',
+      search: 'Hidden Title',
+      clickCount: 7,
+      uses: { 'device-one': 4 },
+      hideLabel: true
+    },
+    at(T0)
+  );
+  const clickedId = added.bookmark.id;
+
+  let document = updateBookmark(
+    added.document,
+    clickedId,
+    { pinned: true, icon: 'data:image/png;base64,AAAA', color: '#ff0000' },
+    at(T1)
+  );
+  document = recordClick(document, clickedId, at(T2), { device: 'device-one' });
+
+  const gone = addBookmark(document, { url: 'https://gone.example/', name: 'Gone' }, at(T0));
+  document = deleteBookmark(gone.document, gone.bookmark.id, at(T3));
+  document = { ...document, prefs: { ...document.prefs, iconOnly: true, sort: 'recent' } };
+
+  /* The fields the equality below is about, named once so a later edit that stops setting one
+     cannot make the test pass by comparing two defaults. */
+  const exported = document.bookmarks[0];
+  assert.equal(exported.pinned, true);
+  assert.equal(exported.icon, 'data:image/png;base64,AAAA');
+  assert.equal(exported.color, '#ff0000');
+  assert.equal(exported.lastClickedAt, new Date(T2).toISOString());
+  assert.equal(document.tombstones.length, 1);
+  assert.equal(document.prefs.iconOnly, true);
+
+  const file = JSON.stringify(exportPlain(document, at(T3)));
+  const { document: back, statistics } = importPlain(file, at(T3));
+
+  assert.equal(statistics.imported, 1);
+  assert.deepEqual(back.bookmarks, document.bookmarks, 'every field of every record crosses');
+  assert.deepEqual(back.tombstones, document.tombstones, 'the deletion crosses with it');
+  assert.deepEqual(back.prefs, document.prefs, 'the view it was taken from crosses too');
+
+  /* A count that arrives from a file still leaves one line, and the line the file carried for
+     the record it describes is still filed under that record. */
+  assert.ok(
+    back.activity.some((event) => event.bookmarkId === clickedId && event.cause === 'click'),
+    'the click the file recorded is still filed under the bookmark'
+  );
+  assert.ok(
+    back.activity.some((event) => event.bookmarkId === clickedId && event.cause === 'import'),
+    'the count that arrived from the file left a line'
+  );
+});
+
+test('a file that repeats an id still gives each record its own', () => {
+  /* Identity crosses with the record, so a file naming one id twice must not produce two
+     records that answer to it: every later lookup would find the first. */
+  const { document, statistics } = importPlain(
+    [
+      { id: 'same', url: 'https://one.example/', name: 'One' },
+      { id: 'same', url: 'https://two.example/', name: 'Two' }
+    ],
+    now
+  );
+
+  assert.equal(statistics.imported, 2);
+  assert.equal(document.bookmarks[0].id, 'same', 'the first keeps the id the file gave it');
+  assert.equal(new Set(document.bookmarks.map((bookmark) => bookmark.id)).size, 2);
 });
 
 test('a document round-trip keeps the label choice it was exported with', () => {
