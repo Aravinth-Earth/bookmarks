@@ -703,6 +703,33 @@ test('a title carries no character that can misrepresent it, and the cap counts 
   assert.ok(cappedTitle.isWellFormed(), 'no half of a surrogate pair is stored');
 });
 
+test('a title is taken from the head, with comments and script bodies left out', async () => {
+  /* Each of the first two is a `<title>` a browser never shows as the page's name, and each
+     comes before the real one. */
+  const page = `<html><head>
+    <script>document.title = '<title>From a script</title>';</script>
+    <!-- <title>From a comment</title> -->
+    <title>The real name</title>
+  </head><body><title>From the body</title></body></html>`;
+
+  const response = await withFetch(
+    async () => new Response(page, { headers: { 'content-type': 'text/html' } }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  assert.deepEqual(await response.json(), { title: 'The real name' });
+
+  /* A title that appears only outside the head is not the page's name. */
+  const bodyOnly = await withFetch(
+    async () =>
+      new Response('<html><head></head><body><title>Later</title></body></html>', {
+        headers: { 'content-type': 'text/html' }
+      }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  assert.equal(bodyOnly.status, 404);
+  assert.equal((await bodyOnly.json()).error, 'no_title');
+});
+
 /* ------------------------------------------------- destinations both proxies refuse */
 
 const sha256 = (value) => createHash('sha256').update(value).digest('base64url');

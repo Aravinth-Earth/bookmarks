@@ -1060,6 +1060,26 @@ function cleanTitle(text) {
 }
 
 /**
+ * The head of a document: everything before `</head>` or the body, whichever comes first.
+ *
+ * A document that names neither is read whole, because a fragment has no head to point at.
+ */
+function headOf(html) {
+  const end = html.search(/<\/head\s*>|<body\b/i);
+  return end === -1 ? html : html.slice(0, end);
+}
+
+/**
+ * A document with its comments and its script and style bodies removed.
+ *
+ * A host can write `<title>` inside any of them, and the first one in the file would otherwise
+ * be taken as the name of a page that never renders it.
+ */
+function withoutBodies(html) {
+  return html.replace(/<!--[\s\S]*?-->/g, ' ').replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, ' ');
+}
+
+/**
  * The page's own title, read from the same document the icon discovery already reads.
  *
  * Only the origin is fetched, never a path a caller names, so this cannot be pointed at an
@@ -1089,7 +1109,9 @@ async function fetchPageTitle(hostname, signal) {
   const bytes = await readPrefix(page, ICON_PAGE_MAX_BYTES, signal);
 
   const html = new TextDecoder().decode(bytes);
-  const match = html.match(/<title[^>]*>([\s\S]{0,400}?)<\/title>/i);
+  /* Only the head is read, and only after the parts a browser never renders as a title are
+     gone: a host otherwise dictates the name a page displays. */
+  const match = withoutBodies(headOf(html)).match(/<title[^>]*>([\s\S]{0,400}?)<\/title>/i);
   if (!match) return null;
 
   const title = cleanTitle(match[1]);
