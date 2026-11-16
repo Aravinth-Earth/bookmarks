@@ -88,7 +88,9 @@ const SESSION_ID = /^[A-Za-z0-9_-]{11}$/;
 
 const encoder = new TextEncoder();
 
-const MAX_SMALL_BODY = 4 * 1024;
+/* The two caps a body is read against. The Worker checks the declared length against them before
+   it forwards, so they are shared rather than restated there. */
+export const MAX_SMALL_BODY = 4 * 1024;
 export const MAX_VAULT_BODY = 4 * 1024 * 1024;
 
 /**
@@ -135,11 +137,76 @@ async function readJson(request, max) {
   }
 }
 
-function json(body, status = 200) {
+function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      ...headers
+    }
   });
+}
+
+/**
+ * The refusal for a verb a route does not answer.
+ *
+ * `allow` is the part that makes a 405 useful: without it the caller is told it was wrong and
+ * nothing about how to be right, and a caller reading only the status retries the same verb.
+ */
+function methodNotAllowed(methods) {
+  return json({ error: 'method' }, 405, { allow: methods.join(', ') });
+}
+
+/**
+ * Whether the caller says its body is JSON.
+ *
+ * Parameters after the type are ignored, because `application/json; charset=utf-8` is still
+ * JSON. Anything else is refused before it is parsed: a body the parser was never promised is a
+ * fault in the request, not in its contents, so answering "invalid JSON" would blame the wrong
+ * thing.
+ */
+function isJson(request) {
+  const type = (request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+  return type === 'application/json';
+}
+
+/* 415 rather than 405: the verb is allowed on this route, the representation is not. */
+function unsupportedMediaType() {
+  return json({ error: 'unsupported_media_type' }, 415);
+}
+
+/* Ending one place is `/sessions/<id>`, whose tail names an id rather than a route. */
+const SESSION_ONE = '/sessions/';
+
+/**
+ * What each route answers, and whether it reads a body.
+ *
+ * Naming the methods here instead of testing for the one a handler wants is what makes a wrong
+ * verb a 405 that says which ones work: a route that answers every verb hides the caller's
+ * mistake, and a route that answers none of them silently is a 404 that hides the route. `json`
+ * marks the routes that parse a body, so the media type is checked in one place rather than at
+ * each of the six handlers that read one.
+ */
+const ROUTES = {
+  '/admin-stats': { methods: ['GET'] },
+  '/admin-disable': { methods: ['POST'], json: true },
+  '/admin-enable': { methods: ['POST'] },
+  '/admin-delete': { methods: ['POST'], json: true },
+  '/status': { methods: ['GET'] },
+  '/account': { methods: ['POST'], json: true },
+  '/challenge': { methods: ['POST'] },
+  '/login': { methods: ['POST'], json: true },
+  '/logout': { methods: ['POST'] },
+  '/delete': { methods: ['POST'], json: true },
+  '/sessions': { methods: ['GET'] },
+  [SESSION_ONE]: { methods: ['DELETE'] },
+  '/vault': { methods: ['GET', 'PUT'], json: true }
+};
+
+/** The route a path names, or null when nothing answers there. */
+function routeOf(path) {
+  return ROUTES[path] ?? (path.startsWith(SESSION_ONE) ? ROUTES[SESSION_ONE] : null);
 }
 
 /* Constant-time comparison for the operator secret, so a wrong guess learns nothing from timing. */
@@ -236,26 +303,34 @@ export class Vault {
   async fetch(request) {
     const path = new URL(request.url).pathname;
 
-    if (path === '/admin-stats' && request.method === 'GET') return this.adminStats();
-    if (path === '/admin-disable' && request.method === 'POST') return this.adminDisable(request);
-    if (path === '/admin-enable' && request.method === 'POST') return this.adminEnable(request);
-    if (path === '/admin-delete' && request.method === 'POST') return this.adminDelete(request);
-    if (path === '/status' && request.method === 'GET') return this.status();
+    const route = routeOf(path);
+    if (!route) return json({ error: 'not_found' }, 404);
+    if (!route.methods.includes(request.method)) return methodNotAllowed(route.methods);
+    /* A body has to say it is JSON before it is read. A request with no body is still answered,
+       because `/challenge` and `/logout` take a token and nothing else. */
+    if (route.json && request.body && !isJson(request)) return unsupportedMediaType();
+
+    if (path === '/admin-stats') return this.adminStats();
+    if (path === '/admin-disable') return this.adminDisable(request);
+    if (path === '/admin-enable') return this.adminEnable(request);
+    if (path === '/admin-delete') return this.adminDelete(request);
+    if (path === '/status') return this.status();
     if (path === '/account') return this.createAccount(request);
     if (path === '/challenge') return this.challenge(request);
     if (path === '/login') return this.login(request);
+    /* Ending a session is the one write a URL alone must not cause: it used to be dispatched on
+       the path, so a prefetcher or an image tag could sign a person out with a plain GET. It is
+       in the table above as POST for that reason. */
     if (path === '/logout') return this.logout(request);
     if (path === '/delete') return this.deleteAccount(request);
-    if (path === '/sessions' && request.method === 'GET') return this.listSessions(request);
-    if (path.startsWith('/sessions/') && request.method === 'DELETE') {
-      return this.revokeSession(request, path.slice('/sessions/'.length));
+    if (path === '/sessions') return this.listSessions(request);
+    if (path.startsWith(SESSION_ONE)) {
+      return this.revokeSession(request, path.slice(SESSION_ONE.length));
     }
-    if (path === '/vault' && request.method === 'GET') return this.readVault(request);
-    if (path === '/vault' && request.method === 'PUT') return this.writeVault(request);
-
-    /* Operator route: read by a Worker bound to this object, never by a browser. The public
-       API refuses any `/a/<id>/admin-` path, so this is reachable only through a binding. */
-    if (path === '/admin-stats' && request.method === 'GET') return this.adminStats();
+    /* `/vault` is the one path with two verbs, and the check above has already refused the rest. */
+    if (path === '/vault') {
+      return request.method === 'PUT' ? this.writeVault(request) : this.readVault(request);
+    }
 
     return json({ error: 'not_found' }, 404);
   }
@@ -303,8 +378,6 @@ export class Vault {
    * this route cannot be used to re-claim an id with a different secret.
    */
   async createAccount(request) {
-    if (request.method !== 'POST') return json({ error: 'method' }, 405);
-
     const shut = await this.refuseDisabled();
     if (shut) return shut;
 
@@ -477,8 +550,6 @@ export class Vault {
    * minted; the next request after either mints a new one.
    */
   async challenge(request) {
-    if (request.method !== 'POST') return json({ error: 'method' }, 405);
-
     const shut = await this.refuseDisabled();
     if (shut) return shut;
 
@@ -499,8 +570,6 @@ export class Vault {
   }
 
   async login(request) {
-    if (request.method !== 'POST') return json({ error: 'method' }, 405);
-
     const shut = await this.refuseDisabled();
     if (shut) return shut;
 
@@ -902,8 +971,6 @@ export class Vault {
    * again. The Registry's slot goes back, and nothing else about the person stays here.
    */
   async deleteAccount(request) {
-    if (request.method !== 'POST') return json({ error: 'method' }, 405);
-
     const account = await this.storage.get('account');
     if (!account) {
       /* A second submit, or a device that was told "deleted" and asked again: the tombstone is

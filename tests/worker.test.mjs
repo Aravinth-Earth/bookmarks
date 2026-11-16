@@ -15,7 +15,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import worker from '../src/index.js';
-import { quiet } from './logs.mjs';
+import { MAX_SMALL_BODY, MAX_VAULT_BODY } from '../src/vault.js';
+import { parsed, quiet, withEvents } from './logs.mjs';
 import { withFetch, dnsQueries } from './dns.mjs';
 
 /* The proxy refusals here are about routing and destinations; their event lines are tested in
@@ -68,6 +69,15 @@ test('health answers without any credential', async () => {
   const body = await response.json();
   assert.equal(body.ok, true);
   assert.equal(typeof body.version, 'string');
+});
+
+test('health is a read, and any other verb is told to use GET', async () => {
+  const { env, calls } = harness();
+  const response = await worker.fetch(api('/health', { method: 'POST' }), env);
+
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get('allow'), 'GET');
+  assert.equal(calls.length, 0, 'nothing behind the route was asked');
 });
 
 test('there is no admin route to create accounts', async () => {
@@ -247,8 +257,9 @@ test("an unknown path is the app's own 404 page, not redirected", async () => {
 const ICON_HOST = 'example.com';
 const ICON_HASH = createHash('sha256').update(ICON_HOST).digest('base64url');
 
-function iconRequest({ host = ICON_HOST, hash = ICON_HASH } = {}) {
+function iconRequest({ host = ICON_HOST, hash = ICON_HASH, method = 'GET' } = {}) {
   return new Request(`https://bookmarks.332321.xyz/api/icon?h=${hash}`, {
+    method,
     headers: host ? { 'x-icon-host': host } : {}
   });
 }
@@ -614,6 +625,17 @@ test('the title service refuses a missing host, a non-DNS host or a wrong hash',
 
   const wrongMethod = await worker.fetch(titleRequest({ method: 'POST' }), harness().env);
   assert.equal(wrongMethod.status, 405);
+});
+
+test('the two proxy routes name GET when another verb is used', async () => {
+  for (const [label, ask] of [
+    ['icon', iconRequest({ method: 'POST' })],
+    ['title', titleRequest({ method: 'POST' })]
+  ]) {
+    const response = await worker.fetch(ask, harness().env);
+    assert.equal(response.status, 405, label);
+    assert.equal(response.headers.get('allow'), 'GET', `${label} says which verb it answers`);
+  }
 });
 
 test('a title is read from the page head and answered with a cache lifetime', async () => {
@@ -1152,4 +1174,116 @@ test('ending one place is forwarded with its id and the caller’s method', asyn
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, '/sessions/ABCDEFGHIJK');
   assert.equal(calls[0].method, 'DELETE');
+});
+
+/* The Worker forwards the caller's stream, so an upload over the cap used to be aborted by the
+   runtime partway through: the caller saw a network fault for a request that should have been
+   refused, and a network fault is what makes it send the whole blob again. */
+test('a declared length over the cap is refused before the object is reached', async () => {
+  const { env, calls } = harness({ doStatus: 200 });
+
+  const overVault = await worker.fetch(
+    api(`/a/${ACCOUNT}/vault`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'content-length': String(MAX_VAULT_BODY + 1) },
+      body: '{}'
+    }),
+    env
+  );
+  assert.equal(overVault.status, 413);
+  assert.deepEqual(await overVault.json(), { error: 'too_large' }, 'the shape the object answers with');
+
+  /* A route that reads a small body has a small cap, whatever the account's plan allows. */
+  const overSmall = await worker.fetch(
+    api(`/a/${ACCOUNT}/delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': String(MAX_SMALL_BODY + 1) },
+      body: '{}'
+    }),
+    env
+  );
+  assert.equal(overSmall.status, 413);
+  assert.deepEqual(await overSmall.json(), { error: 'too_large' });
+
+  assert.equal(calls.length, 0, 'neither request reached the object');
+});
+
+test('a declared length within the cap is forwarded as it always was', async () => {
+  const { env, calls } = harness({ doStatus: 200, doBody: { version: 1 } });
+  const body = JSON.stringify({ baseVersion: 0, iv: 'a'.repeat(16), ct: 'abc' });
+
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/vault`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'content-length': String(body.length) },
+      body
+    }),
+    env
+  );
+
+  assert.equal(response.status, 200, 'the object decided, not the Worker');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/vault');
+  assert.equal(calls[0].body, body, 'the object saw the bytes the caller sent');
+});
+
+/* The fetch API refuses to construct this request at all — `new Request(url, { method: 'GET',
+   body })` throws "Request with GET/HEAD method cannot have body" — while the wire can still
+   deliver a body on a read, so a plain object carrying the same fields is the only honest way to
+   reach the branch under test. */
+test('a GET or HEAD that carries a body is refused as a caller mistake, not answered as a fault', async () => {
+  for (const method of ['GET', 'HEAD']) {
+    const { env, calls } = harness({ doStatus: 200 });
+
+    const carried = {
+      method,
+      url: `https://bookmarks.332321.xyz/api/a/${ACCOUNT}/vault`,
+      headers: new Headers({ 'content-type': 'application/octet-stream', 'content-length': '1' }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('x'));
+          controller.close();
+        }
+      })
+    };
+
+    const { result: response, lines } = await withEvents(() => worker.fetch(carried, env));
+
+    assert.equal(response.status, 400, method);
+    assert.deepEqual(await response.json(), { error: 'unexpected_body' }, method);
+    assert.equal(calls.length, 0, `${method} never reached the object`);
+    assert.equal(
+      parsed(lines).some((line) => line.event === 'server_error'),
+      false,
+      `${method} wrote no internal fault`
+    );
+  }
+});
+
+/* The neighbouring path the fetch API can build: a verb that may carry a body, carrying none. The
+   forwarded request is read directly rather than through the harness, because the thing being
+   checked is that no body and no duplex flag were attached at all. */
+test('a POST with no body is forwarded with no body, so nothing says it is sent once', async () => {
+  let forwarded = null;
+  const env = {
+    VAULTS: {
+      idFromName: (name) => ({ name }),
+      get: () => ({
+        fetch: async (request) => {
+          forwarded = request;
+          return new Response(JSON.stringify({ nonce: 'abc' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+      })
+    }
+  };
+
+  const response = await worker.fetch(api(`/a/${ACCOUNT}/challenge`, { method: 'POST' }), env);
+
+  assert.equal(response.status, 200, 'the object answered, so the request was constructible');
+  assert.equal(forwarded.method, 'POST');
+  assert.equal(forwarded.body, null, 'no body and no duplex flag were attached');
+  assert.equal(forwarded.headers.get('x-vault-source')?.length, 64, 'the source still travels');
 });

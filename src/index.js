@@ -11,6 +11,7 @@
  */
 
 import { digestHex, logEvent } from './events.js';
+import { MAX_SMALL_BODY, MAX_VAULT_BODY } from './vault.js';
 
 /* The app is the whole of its own origin: the page sits at `/`, so there is no prefix to strip and
    no path to redirect. The path it was first served under is an unknown path here now, and the
@@ -42,11 +43,25 @@ const SECURITY_HEADERS = {
   'strict-transport-security': 'max-age=15552000; includeSubDomains; preload'
 };
 
-function json(body, status = 200) {
+function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      ...headers
+    }
   });
+}
+
+/**
+ * The refusal for a verb a route does not answer.
+ *
+ * `allow` is what makes the 405 usable: the status alone tells a caller it was wrong and nothing
+ * about how to be right, and one that reads only the status retries the same verb.
+ */
+function methodNotAllowed(methods) {
+  return json({ error: 'method' }, 405, { allow: methods.join(', ') });
 }
 
 /**
@@ -107,7 +122,10 @@ function forwardTo(stub, target, request, source) {
   headers.set('x-vault-source', source);
 
   const init = { method: request.method, headers };
-  if (request.body) {
+  /* A verb that is defined as body-less cannot be given one: the constructor refuses to build
+     the request, so attaching a body to a GET or HEAD turns the caller's mistake into an
+     exception here. The body belongs only to the verbs whose method allows it. */
+  if (request.body && request.method !== 'GET' && request.method !== 'HEAD') {
     init.body = request.body;
     /* A body that arrives as a stream has to say it is sent once. */
     init.duplex = 'half';
@@ -885,7 +903,7 @@ async function proxyRefused(reason) {
  * No hostname is logged by this code.
  */
 async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
-  if (request.method !== 'GET') return json({ error: 'method' }, 405);
+  if (request.method !== 'GET') return methodNotAllowed(['GET']);
 
   const hostname = (request.headers.get('x-icon-host') ?? '').trim();
   if (!HOSTNAME.test(hostname)) return proxyRefused('bad_host');
@@ -1053,7 +1071,7 @@ async function fetchPageTitle(hostname, signal) {
  * hash, and nothing about the caller, an account or a vault is involved.
  */
 async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
-  if (request.method !== 'GET') return json({ error: 'method' }, 405);
+  if (request.method !== 'GET') return methodNotAllowed(['GET']);
 
   const hostname = (request.headers.get('x-page-host') ?? '').trim();
   if (!HOSTNAME.test(hostname)) return proxyRefused('bad_host');
@@ -1085,7 +1103,12 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
 async function handleApi(request, env, url) {
   const path = url.pathname.slice(API_PREFIX.length);
 
-  if (path === '/health') return json({ ok: true, version: VERSION });
+  if (path === '/health') {
+    /* Named rather than answered for every verb: a health check is a read, and a write to it is a
+       caller's mistake worth reporting instead of answering with the same JSON. */
+    if (request.method !== 'GET') return methodNotAllowed(['GET']);
+    return json({ ok: true, version: VERSION });
+  }
 
   if (path === ICON_PATH) {
     return limited(env, ROUTE_CLASS[ICON_PATH], request, () =>
@@ -1111,8 +1134,26 @@ async function handleApi(request, env, url) {
     const forward = rest.slice(slash);
     if (forward.startsWith('/admin-')) return json({ error: 'not_found' }, 404);
 
+    /* A body on a verb whose method is defined as body-less is the caller's mistake, not a fault
+       of this server: no read in this API takes one, so nothing that arrives with it is meant for
+       any route here. Named as such rather than forwarded, because forwarding it fails inside the
+       fetch API and would be answered as an internal error. */
+    if ((request.method === 'GET' || request.method === 'HEAD') && request.body) {
+      return json({ error: 'unexpected_body' }, 400);
+    }
+
     const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
     const target = new URL(`https://vault${forward}`, 'https://vault');
+
+    /* The caller's stream is forwarded untouched, so an upload over the cap is aborted by the
+       runtime somewhere in the middle and reaches the caller as a network fault rather than a
+       refusal — and a network fault is what makes a client retry the whole blob. The declared
+       length is therefore refused here, before anything is sent on. The object's own check stays
+       as the backstop, because a caller can omit the length or lie about it. */
+    const cap = forward === '/vault' ? MAX_VAULT_BODY : MAX_SMALL_BODY;
+    const declared = Number(request.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > cap) return json({ error: 'too_large' }, 413);
+
     return limited(env, classOfRoute(forward), request, async () =>
       forwardTo(stub, target, request, await sourceDigest(request))
     );
