@@ -615,9 +615,15 @@ export function updateBookmark(document, id, patch, now = Date.now) {
 /** Remove one bookmark and leave a tombstone, so the removal reaches the other device. */
 export function deleteBookmark(document, id, now = Date.now) {
   assertDocument(document, 'the document');
-  findIndex(document, id);
+  const at = findIndex(document, id);
+  const current = document.bookmarks[at];
 
-  const deletedAt = iso(now);
+  /* The tombstone has to outrank the record it removes. A stamp ahead of this device's clock — from
+     a file, or a device whose clock runs fast — would otherwise win the merge that follows its own
+     deletion, and the record would come back each time it synced. */
+  const stamp = typeof now === 'function' ? now() : now;
+  const edited = Date.parse(current.updatedAt);
+  const deletedAt = new Date(Number.isNaN(edited) || edited <= stamp ? stamp : edited).toISOString();
   const tombstones = [
     ...document.tombstones.filter((tombstone) => tombstone.id !== id),
     { id, deletedAt }

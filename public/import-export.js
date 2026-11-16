@@ -40,6 +40,8 @@ export const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
 /* An icon in a file is a data URI, and this is the same ceiling the page applies before it keeps
    one it fetched: a file must not smuggle a megabyte of base64 into every record it names. */
 const MAX_ICON_CHARS = 64 * 1024;
+/* Stated here so a test can name the boundary before the reader is. */
+export const MAX_IMPORT_SKEW_MS = 10 * 60 * 1000;
 
 const COLOR = /^#[0-9a-f]{6}$/i;
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", apos: "'" };
@@ -70,14 +72,23 @@ function decodeEntities(text) {
   return text.replace(/&(#?\w+);/g, (whole, name) => ENTITIES[name] ?? whole);
 }
 
-function isoOr(value, fallbackMs) {
-  return new Date(toMillis(value, fallbackMs)).toISOString();
-}
-
-function toMillis(value, fallbackMs) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN;
-  return Number.isNaN(parsed) ? fallbackMs : parsed;
+/**
+ * Where a stamp from a file lands, in milliseconds.
+ *
+ * `at` is when the file arrived. A stamp more than `MAX_IMPORT_SKEW_MS` past it is a mistake
+ * rather than a time — a file from a device whose clock is wrong, or one written to make a
+ * record outrank every later edit — and is read as the arrival itself. A stamp a little ahead
+ * is believed, because another device's clock really can be a little fast.
+ */
+function importedMillis(value, at, fallback) {
+  const parsed =
+    typeof value === 'number' && Number.isFinite(value)
+      ? value
+      : typeof value === 'string'
+        ? Date.parse(value)
+        : Number.NaN;
+  if (Number.isNaN(parsed)) return fallback;
+  return parsed > at + MAX_IMPORT_SKEW_MS ? at : parsed;
 }
 
 function legacyName(entry) {
@@ -119,13 +130,6 @@ function legacyIcon(entry) {
   const value = entry?.icon;
   if (typeof value !== 'string' || !value.startsWith('data:image/')) return null;
   return value.length <= MAX_ICON_CHARS ? value : null;
-}
-
-/** A moment the model stores, normalised, or null for a value that is not one. */
-function legacyStamp(value) {
-  if (typeof value !== 'string') return null;
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
 }
 
 /**
@@ -181,7 +185,10 @@ function legacyTombstones(value, stamp) {
  * document, because a count arrived here from outside the vault.
  */
 function addImported(document, entry, now, { device, cause, id }) {
-  const createdMs = toMillis(entry.createdAt, now());
+  const at = typeof now === 'function' ? now() : now;
+  const createdMs = importedMillis(entry.createdAt, at, at);
+  const updatedMs = importedMillis(entry.updatedAt, at, createdMs);
+  const clickedMs = importedMillis(entry.lastClickedAt, at, null);
 
   const { document: added, bookmark } = addBookmark(
     document,
@@ -203,9 +210,11 @@ function addImported(document, entry, now, { device, cause, id }) {
   const record = {
     ...bookmark,
     id: id ?? bookmark.id,
-    createdAt: new Date(createdMs).toISOString(),
-    updatedAt: isoOr(entry.updatedAt, createdMs),
-    lastClickedAt: entry.lastClickedAt
+    /* A record cannot be created after it was last edited; a file that says so is read with the
+       later of the two dates as the earlier one. */
+    createdAt: new Date(Math.min(createdMs, updatedMs)).toISOString(),
+    updatedAt: new Date(updatedMs).toISOString(),
+    lastClickedAt: clickedMs === null ? null : new Date(clickedMs).toISOString()
   };
 
   const bookmarks = [...added.bookmarks];
@@ -378,7 +387,7 @@ function legacyEntry(entry) {
        by `addBookmark`, so a malformed slot is skipped like any other malformed record. */
     uses: entry.uses,
     openCount: entry.openCount,
-    lastClickedAt: legacyStamp(entry.lastClickedAt),
+    lastClickedAt: entry.lastClickedAt,
     createdAt: entry.created_date ?? entry.createdAt,
     updatedAt: entry.last_updated ?? entry.updatedAt
   };

@@ -14,11 +14,13 @@ import {
   addBookmark,
   createDocument,
   deleteBookmark,
+  mergeDocuments,
   recordClick,
   updateBookmark
 } from '../public/bookmarks.js';
 import {
   MAX_IMPORT_BYTES,
+  MAX_IMPORT_SKEW_MS,
   PLAIN_FORMAT,
   SEALED_FORMAT,
   exportBrowserBookmarks,
@@ -371,6 +373,77 @@ test('a file that repeats an id still gives each record its own', () => {
   assert.equal(statistics.imported, 2);
   assert.equal(document.bookmarks[0].id, 'same', 'the first keeps the id the file gave it');
   assert.equal(new Set(document.bookmarks.map((bookmark) => bookmark.id)).size, 2);
+});
+
+test('a file stamped past this device clock arrives at the import time, and stays deletable', () => {
+  /* A file can be written by anything: an old export, another app, or a person with an editor.
+     A record stamped in the year 9999 outranks every later edit, so the next merge puts back a
+     bookmark that was just deleted, and keeps doing it. */
+  const iso = (moment) => new Date(moment).toISOString();
+  const envelope = (record) =>
+    JSON.stringify(
+      exportPlain(
+        { schema: 1, bookmarks: [record], tombstones: [], activity: [], prefs: { iconOnly: false } },
+        now
+      )
+    );
+  const record = (overrides) => ({
+    id: 'future-1',
+    url: 'https://future.example/',
+    hostname: 'future.example',
+    origin: 'https://future.example',
+    name: 'Future',
+    search: '',
+    clickCount: 0,
+    uses: {},
+    pinned: false,
+    hideLabel: false,
+    icon: null,
+    color: null,
+    createdAt: iso(NOW),
+    updatedAt: iso(NOW),
+    lastClickedAt: null,
+    ...overrides
+  });
+
+  /* A clock a little fast is believed: a restore from a device a minute ahead keeps its dates. */
+  const near = importPlain(
+    envelope(
+      record({
+        createdAt: iso(NOW + 60_000),
+        updatedAt: iso(NOW + 60_000),
+        lastClickedAt: iso(NOW + 60_000)
+      })
+    ),
+    now
+  ).document;
+  assert.ok(60_000 < MAX_IMPORT_SKEW_MS, 'a minute is inside the allowance');
+  assert.equal(near.bookmarks[0].updatedAt, iso(NOW + 60_000));
+  assert.equal(near.bookmarks[0].lastClickedAt, iso(NOW + 60_000));
+
+  /* A stamp past the allowance is a mistake rather than a time, and is read as the arrival. */
+  const far = importPlain(
+    envelope(
+      record({
+        createdAt: '+033658-09-27T01:46:40.000Z',
+        updatedAt: iso(Date.UTC(9999, 0, 1)),
+        lastClickedAt: iso(Date.UTC(9999, 0, 1))
+      })
+    ),
+    now
+  ).document;
+  const landed = far.bookmarks[0];
+  assert.equal(landed.createdAt, iso(NOW), 'a creation past the clock reads as the import');
+  assert.equal(landed.updatedAt, iso(NOW), 'an edit past the clock reads as the import');
+  assert.equal(landed.lastClickedAt, iso(NOW));
+
+  /* The deletion, then the copy another device still holds. The record must not come back. */
+  const deleted = deleteBookmark(far, landed.id, () => NOW + 60_000);
+  assert.equal(deleted.bookmarks.length, 0);
+
+  const merged = mergeDocuments(deleted, far, () => NOW + 120_000);
+  assert.equal(merged.document.bookmarks.length, 0, 'the deletion holds against that copy');
+  assert.equal(merged.document.tombstones.length, 1, 'and the tombstone survives the merge');
 });
 
 test('a document round-trip keeps the label choice it was exported with', () => {
