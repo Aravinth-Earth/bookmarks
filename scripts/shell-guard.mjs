@@ -35,6 +35,28 @@ export function importedModules(source) {
 }
 
 /**
+ * Every module the page can reach from its entry, following the relative imports each one makes.
+ * A shell built from the entry's direct imports only leaves the second hop out: the page boots
+ * online because the missing file is fetched, and then fails offline where it cannot say why.
+ */
+export function reachableModules(entry, read) {
+  const seen = new Set();
+  const queue = [entry];
+
+  while (queue.length > 0) {
+    const name = queue.pop();
+    if (seen.has(name)) continue;
+    seen.add(name);
+
+    const source = read(name);
+    if (source === null) continue;
+    for (const next of importedModules(source.toString('utf8'))) queue.push(next);
+  }
+
+  return seen;
+}
+
+/**
  * The digest of the shell's bytes. The path is hashed with its contents, so renaming a file or
  * changing one byte changes the name. `read` returns a Buffer or null for a file that is missing.
  */
@@ -73,6 +95,18 @@ export function shellProblems({ swSource, read }) {
   for (const path of entries) {
     const name = path === '/' ? 'index.html' : path.replace(/^\//, '');
     if (read(name) === null) problems.push(`sw.js caches ${path}, which is not in public/`);
+  }
+
+  /* The list has to cover the whole graph, not only what the entry imports directly. A module
+     reached through another module is fetched on the first visit and missing on the next offline
+     one, which is the failure this list exists to prevent. */
+  const cachedModules = new Set(
+    entries.map((path) => path.replace(/^\//, '')).filter((name) => name.endsWith('.js'))
+  );
+  for (const name of reachableModules('app.js', read)) {
+    if (!cachedModules.has(name)) {
+      problems.push(`sw.js does not cache ${name}, which the page reaches from app.js`);
+    }
   }
 
   const declared = cacheName(swSource);

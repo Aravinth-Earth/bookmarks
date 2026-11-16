@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import {
   cacheName,
   expectedCacheName,
+  reachableModules,
   shellEntries,
   shellProblems
 } from '../scripts/shell-guard.mjs';
@@ -50,4 +51,19 @@ test('a shell entry with no file behind it is refused', () => {
   });
 
   assert.match(problems.join('\n'), /\/views\.js/);
+});
+
+test('the module graph is followed through every import, not only the entry', () => {
+  const files = new Map([
+    ['app.js', "import { a } from './views.js';"],
+    ['views.js', "import { b } from './tiles.js';"],
+    ['tiles.js', 'export const b = 1;']
+  ]);
+  const source = "const CACHE_NAME = 'bookmarks-test';\nconst SHELL = [\n  '/app.js',\n  '/views.js'\n];";
+
+  const reachable = reachableModules('app.js', (name) => files.get(name) ?? null);
+  assert.deepEqual([...reachable].sort(), ['app.js', 'tiles.js', 'views.js']);
+
+  const problems = shellProblems({ swSource: source, read: (name) => files.get(name) ?? null });
+  assert.match(problems.join('\n'), /tiles\.js/);
 });
