@@ -69,6 +69,23 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+/* Only a successful same-origin document is this app. A 404, a refusal from the edge, or a
+   redirect that ended on another origin is not a copy of this page, and storing one under `/`
+   would replace the offline app with that answer until a new worker installs. */
+function storesShell(response) {
+  if (!response.ok) return false;
+  if (response.type === 'opaque' || response.type === 'opaqueredirect') return false;
+
+  const type = response.headers.get('content-type') ?? '';
+  if (!type.toLowerCase().includes('text/html')) return false;
+
+  try {
+    return new URL(response.url).origin === self.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET') return;
@@ -80,9 +97,12 @@ self.addEventListener('fetch', (event) => {
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request)
-        .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put('/', copy));
+        .then(async (response) => {
+          if (storesShell(response)) {
+            const copy = response.clone();
+            const cache = await caches.open(CACHE_NAME);
+            await cache.put('/', copy);
+          }
           return response;
         })
         .catch(() => caches.match('/'))
