@@ -135,11 +135,25 @@ async function readJson(request, max) {
   }
 }
 
-function json(body, status = 200) {
+function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      ...headers
+    }
   });
+}
+
+/**
+ * The refusal for a verb a route does not answer.
+ *
+ * `allow` is the part that makes a 405 useful: without it the caller is told it was wrong and
+ * nothing about how to be right, and a caller reading only the status retries the same verb.
+ */
+function methodNotAllowed(methods) {
+  return json({ error: 'method' }, 405, { allow: methods.join(', ') });
 }
 
 /* Constant-time comparison for the operator secret, so a wrong guess learns nothing from timing. */
@@ -244,7 +258,14 @@ export class Vault {
     if (path === '/account') return this.createAccount(request);
     if (path === '/challenge') return this.challenge(request);
     if (path === '/login') return this.login(request);
-    if (path === '/logout') return this.logout(request);
+    /* Ending the session is a POST and only a POST. It used to be dispatched on the path alone,
+       so a prefetcher, a cache, an image tag or a third-party script could end an operator's
+       session with a plain GET — a read that anyone able to put a URL in front of the page can
+       cause. Answering 405 here is what keeps that class of URL unable to write. */
+    if (path === '/logout') {
+      if (request.method !== 'POST') return methodNotAllowed(['POST']);
+      return this.logout(request);
+    }
     if (path === '/delete') return this.deleteAccount(request);
     if (path === '/sessions' && request.method === 'GET') return this.listSessions(request);
     if (path.startsWith('/sessions/') && request.method === 'DELETE') {

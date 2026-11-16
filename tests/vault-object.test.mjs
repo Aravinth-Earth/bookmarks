@@ -780,6 +780,28 @@ test('logout ends the session, and an expired one is refused', async () => {
   assert.equal(expired.status, 401);
 });
 
+/* A prefetcher, a cache, an image tag or a third-party script can put a URL in front of a
+   browser, and a GET it causes must not end the session the page is holding. */
+test('a logout is a POST; a GET or any other verb is refused and ends nothing', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  const auth = { authorization: `Bearer ${session.body.token}` };
+
+  for (const method of ['GET', 'HEAD', 'PUT', 'DELETE']) {
+    const refused = await harness.vault.fetch(
+      request('/logout', { method, headers: auth, body: undefined })
+    );
+    assert.equal(refused.status, 405, method);
+    assert.equal(refused.headers.get('allow'), 'POST', `${method} is told what to send instead`);
+  }
+
+  const still = await read(
+    await harness.vault.fetch(request('/sessions', { method: 'GET', headers: auth }))
+  );
+  assert.equal(still.status, 200, 'the session a refused logout named is still signed in');
+});
+
 test('an unknown route is a 404, not a crash', async () => {
   const harness = object();
   const response = await read(await harness.vault.fetch(request('/nothing')));
