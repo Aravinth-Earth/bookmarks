@@ -122,7 +122,10 @@ function forwardTo(stub, target, request, source) {
   headers.set('x-vault-source', source);
 
   const init = { method: request.method, headers };
-  if (request.body) {
+  /* A verb that is defined as body-less cannot be given one: the constructor refuses to build
+     the request, so attaching a body to a GET or HEAD turns the caller's mistake into an
+     exception here. The body belongs only to the verbs whose method allows it. */
+  if (request.body && request.method !== 'GET' && request.method !== 'HEAD') {
     init.body = request.body;
     /* A body that arrives as a stream has to say it is sent once. */
     init.duplex = 'half';
@@ -1130,6 +1133,14 @@ async function handleApi(request, env, url) {
        they do not exist. */
     const forward = rest.slice(slash);
     if (forward.startsWith('/admin-')) return json({ error: 'not_found' }, 404);
+
+    /* A body on a verb whose method is defined as body-less is the caller's mistake, not a fault
+       of this server: no read in this API takes one, so nothing that arrives with it is meant for
+       any route here. Named as such rather than forwarded, because forwarding it fails inside the
+       fetch API and would be answered as an internal error. */
+    if ((request.method === 'GET' || request.method === 'HEAD') && request.body) {
+      return json({ error: 'unexpected_body' }, 400);
+    }
 
     const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
     const target = new URL(`https://vault${forward}`, 'https://vault');

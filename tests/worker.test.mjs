@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 import worker from '../src/index.js';
 import { MAX_SMALL_BODY, MAX_VAULT_BODY } from '../src/vault.js';
-import { quiet } from './logs.mjs';
+import { parsed, quiet, withEvents } from './logs.mjs';
 import { withFetch, dnsQueries } from './dns.mjs';
 
 /* The proxy refusals here are about routing and destinations; their event lines are tested in
@@ -1225,4 +1225,65 @@ test('a declared length within the cap is forwarded as it always was', async () 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, '/vault');
   assert.equal(calls[0].body, body, 'the object saw the bytes the caller sent');
+});
+
+/* The fetch API refuses to construct this request at all — `new Request(url, { method: 'GET',
+   body })` throws "Request with GET/HEAD method cannot have body" — while the wire can still
+   deliver a body on a read, so a plain object carrying the same fields is the only honest way to
+   reach the branch under test. */
+test('a GET or HEAD that carries a body is refused as a caller mistake, not answered as a fault', async () => {
+  for (const method of ['GET', 'HEAD']) {
+    const { env, calls } = harness({ doStatus: 200 });
+
+    const carried = {
+      method,
+      url: `https://bookmarks.332321.xyz/api/a/${ACCOUNT}/vault`,
+      headers: new Headers({ 'content-type': 'application/octet-stream', 'content-length': '1' }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('x'));
+          controller.close();
+        }
+      })
+    };
+
+    const { result: response, lines } = await withEvents(() => worker.fetch(carried, env));
+
+    assert.equal(response.status, 400, method);
+    assert.deepEqual(await response.json(), { error: 'unexpected_body' }, method);
+    assert.equal(calls.length, 0, `${method} never reached the object`);
+    assert.equal(
+      parsed(lines).some((line) => line.event === 'server_error'),
+      false,
+      `${method} wrote no internal fault`
+    );
+  }
+});
+
+/* The neighbouring path the fetch API can build: a verb that may carry a body, carrying none. The
+   forwarded request is read directly rather than through the harness, because the thing being
+   checked is that no body and no duplex flag were attached at all. */
+test('a POST with no body is forwarded with no body, so nothing says it is sent once', async () => {
+  let forwarded = null;
+  const env = {
+    VAULTS: {
+      idFromName: (name) => ({ name }),
+      get: () => ({
+        fetch: async (request) => {
+          forwarded = request;
+          return new Response(JSON.stringify({ nonce: 'abc' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+      })
+    }
+  };
+
+  const response = await worker.fetch(api(`/a/${ACCOUNT}/challenge`, { method: 'POST' }), env);
+
+  assert.equal(response.status, 200, 'the object answered, so the request was constructible');
+  assert.equal(forwarded.method, 'POST');
+  assert.equal(forwarded.body, null, 'no body and no duplex flag were attached');
+  assert.equal(forwarded.headers.get('x-vault-source')?.length, 64, 'the source still travels');
 });
