@@ -463,7 +463,8 @@ test('a valid icon request asks that host only for its favicon', async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
   assert.equal(response.headers.get('content-type'), 'image/png');
-  assert.match(response.headers.get('cache-control'), /max-age=2592000/);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.doesNotMatch(response.headers.get('cache-control'), /public|max-age/);
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
   assert.deepEqual(asked, ['https://example.com/favicon.ico']);
 });
@@ -795,7 +796,7 @@ test('the two proxy routes name GET when another verb is used', async () => {
   }
 });
 
-test('a title is read from the page head and answered with a cache lifetime', async () => {
+test('a title is read from the page head and answered without a stored copy', async () => {
   const asked = [];
   const response = await withFetch(
     async (url) => {
@@ -809,7 +810,8 @@ test('a title is read from the page head and answered with a cache lifetime', as
 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { title: 'Example & Co' });
-  assert.match(response.headers.get('cache-control'), /max-age=604800/);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.doesNotMatch(response.headers.get('cache-control'), /public|max-age/);
   assert.deepEqual(asked, ['https://example.com/'], 'only the origin is asked, never a path');
 });
 
@@ -1145,7 +1147,8 @@ test('ordinary public hosts still get their icon and title, unchanged', async ()
     const icon = await withFetch(implementation, () => worker.fetch(iconFor(host), harness().env));
     assert.equal(icon.status, 200, host);
     assert.equal(icon.headers.get('content-type'), 'image/png');
-    assert.equal(icon.headers.get('cache-control'), 'public, max-age=2592000, immutable');
+    assert.equal(icon.headers.get('cache-control'), 'no-store');
+    assert.doesNotMatch(icon.headers.get('cache-control'), /public|max-age/);
     assert.equal(icon.headers.get('x-content-type-options'), 'nosniff');
     assert.equal((await icon.arrayBuffer()).byteLength, 4);
 
@@ -1154,10 +1157,35 @@ test('ordinary public hosts still get their icon and title, unchanged', async ()
     );
     assert.equal(title.status, 200, host);
     assert.deepEqual(await title.json(), { title: 'Example & Co' });
-    assert.match(title.headers.get('cache-control'), /max-age=604800/);
+    assert.equal(title.headers.get('cache-control'), 'no-store');
+    assert.doesNotMatch(title.headers.get('cache-control'), /public|max-age/);
 
     assert.deepEqual(asked, [`https://${host}/favicon.ico`, `https://${host}/`]);
   }
+});
+
+test('an icon or a title fetched for a named host is not stored by the browser', async () => {
+  /* The URL carries only a hash of the hostname, so a page the browser keeps is a list of hosts
+     for anyone who can read that store. Clearing the app does not reach it, and nothing else in
+     the app invalidates it. */
+  const { implementation } = stubFetch({
+    [`https://${ICON_HOST}/favicon.ico`]: pngResponse(),
+    [`https://${ICON_HOST}/`]: htmlResponse(
+      '<html><head><title>Example &amp; Co</title></head></html>'
+    )
+  });
+
+  const icon = await withFetch(implementation, () => worker.fetch(iconFor(ICON_HOST), harness().env));
+  assert.equal(icon.status, 200);
+  assert.equal(icon.headers.get('cache-control'), 'no-store');
+  assert.doesNotMatch(icon.headers.get('cache-control'), /public|max-age/);
+
+  const title = await withFetch(implementation, () =>
+    worker.fetch(titleFor(ICON_HOST), harness().env)
+  );
+  assert.equal(title.status, 200);
+  assert.equal(title.headers.get('cache-control'), 'no-store');
+  assert.doesNotMatch(title.headers.get('cache-control'), /public|max-age/);
 });
 
 test('a redirect to another public host, by name or by address, is still followed', async () => {
@@ -1246,7 +1274,8 @@ test('a host whose answers are all public is fetched exactly as before', async (
   );
   assert.equal(icon.status, 200);
   assert.equal(icon.headers.get('content-type'), 'image/png');
-  assert.equal(icon.headers.get('cache-control'), 'public, max-age=2592000, immutable');
+  assert.equal(icon.headers.get('cache-control'), 'no-store');
+  assert.doesNotMatch(icon.headers.get('cache-control'), /public|max-age/);
 
   const title = await withFetch(
     implementation,

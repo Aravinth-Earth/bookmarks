@@ -11,6 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  COLLECTED_ICON_KEY,
   DEVICE_ID_KEY,
   DEVICE_KEYS,
   ICON_TRIES_KEY,
@@ -67,6 +68,7 @@ test('clearing a device removes every key the page writes', () => {
     [VIEW_KEY]: 'list',
     [SIZE_KEY]: 'large',
     [THEME_KEY]: 'nord',
+    [COLLECTED_ICON_KEY]: '{"itsfoss.com":"data:image/png;base64,AAAA"}',
     'unrelated-key': 'kept'
   });
 
@@ -76,8 +78,32 @@ test('clearing a device removes every key the page writes', () => {
   assert.equal(storage.getItem('unrelated-key'), 'kept', 'only the page’s own keys are removed');
 });
 
+test('a clear reaches the collected icons, which the vault does not hold', () => {
+  /* The icons the page shows for collected links are copies of what a proxied response carried.
+     They look like part of the vault but are not in it, so a clear that skipped this key would
+     leave the one trace the icon route's `no-store` exists to prevent: a copy "Clear this device"
+     cannot reach. */
+  const storage = fakeStorage({
+    [COLLECTED_ICON_KEY]: JSON.stringify({ 'itsfoss.com': 'data:image/png;base64,iVBORw0KGgo=' })
+  });
+
+  clearDeviceStorage(storage);
+
+  assert.equal(storage.getItem(COLLECTED_ICON_KEY), null);
+  assert.deepEqual(Object.keys(storage.kept), []);
+});
+
+test('the collected icons keep the key earlier versions wrote, so a device needs no migration', () => {
+  assert.equal(COLLECTED_ICON_KEY, 'collected-icons');
+  assert.equal(DEVICE_KEYS.includes(COLLECTED_ICON_KEY), true);
+});
+
 test('the page lists the keys it writes, and the icon index is one of them', () => {
-  assert.deepEqual([...DEVICE_KEYS], [ICON_TRIES_KEY, VIEW_KEY, SIZE_KEY, THEME_KEY]);
+  assert.deepEqual(
+    [...DEVICE_KEYS],
+    [ICON_TRIES_KEY, VIEW_KEY, SIZE_KEY, THEME_KEY, COLLECTED_ICON_KEY],
+    'a key absent from this list is a key a clear cannot reach'
+  );
   assert.equal(
     DEVICE_KEYS.includes(DEVICE_ID_KEY),
     false,
