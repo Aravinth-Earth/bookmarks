@@ -699,19 +699,23 @@ export class Vault {
   /**
    * Store one source's state, keeping the table bounded.
    *
-   * A new key is admitted only after the oldest entry has gone, so a caller who invents sources
-   * cannot grow the object. Evicting can only forget failures: a lock lives inside its entry and
-   * nowhere else, so the worst an eviction does is let a source try again.
+   * A new key is admitted only after an entry has gone, so a caller who invents sources cannot
+   * grow the object. Only an entry that holds no live lock may go: a lock lives inside its entry
+   * and nowhere else, so evicting one hands that source a fresh budget, and enough paced failures
+   * from invented sources would undo a lock earned minutes earlier. When every entry is a live
+   * lock the table is full and the new source is not admitted — it loses its own count, which is
+   * the same thing an entry that aged out costs.
    */
   async recordSource(key, state, isNew) {
     if (isNew) {
+      const now = this.now();
       const entries = [...(await this.storage.list({ prefix: SOURCE_PREFIX }))].sort(
         (left, right) => (left[1].lastAt ?? 0) - (right[1].lastAt ?? 0)
       );
-      for (const [oldest] of entries.slice(
-        0,
-        Math.max(0, entries.length - MAX_TRACKED_SOURCES + 1)
-      )) {
+      const room = Math.max(0, entries.length - MAX_TRACKED_SOURCES + 1);
+      const evictable = entries.filter(([, entry]) => (entry.until ?? 0) <= now);
+      if (evictable.length < room) return;
+      for (const [oldest] of evictable.slice(0, room)) {
         await this.storage.delete(oldest);
       }
     }

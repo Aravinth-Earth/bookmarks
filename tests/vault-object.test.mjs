@@ -580,6 +580,33 @@ test('the source table keeps sixty-four entries and evicts the oldest rather tha
   assert.equal(keys.includes(newest), true, 'the newest is the one kept');
 });
 
+test('a live lock is never the entry that makes room for a new source', async () => {
+  const harness = object();
+  await provision(harness);
+
+  /* One source earns its lock. */
+  for (let attempt = 1; attempt <= MAX_FAILURES; attempt += 1) {
+    assert.equal((await failedLoginFrom(harness, SOURCE_A)).status, 401, `failure ${attempt}`);
+  }
+  assert.equal((await failedLoginFrom(harness, SOURCE_A)).body.error, 'locked');
+
+  /* Enough invented sources to push the table past its cap, each recorded a moment after the
+     last, so the locked entry is the oldest one in it. */
+  for (let index = 0; index < MAX_TRACKED_SOURCES; index += 1) {
+    await harness.vault.recordBadProof(ACCOUNT.accountId, sourceOf(index), 1_000_001 + index);
+  }
+
+  const keys = [...harness.storage.raw.keys()].filter((key) => key.startsWith('source:'));
+  assert.equal(keys.length, MAX_TRACKED_SOURCES, 'the table is still capped');
+
+  const lockedKey = await harness.vault.failureKey(ACCOUNT.accountId, SOURCE_A);
+  assert.equal(keys.includes(lockedKey), true, 'the locked source kept its entry');
+
+  const stillLocked = await failedLoginFrom(harness, SOURCE_A);
+  assert.equal(stillLocked.status, 429);
+  assert.equal(stillLocked.body.error, 'locked', 'the churn did not clear the lock');
+});
+
 test('a distributed attempt earns a wait that grows to a cap and never a lock', async () => {
   const harness = object();
   await provision(harness);

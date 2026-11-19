@@ -673,6 +673,63 @@ test('a page larger than the read cap still yields its title, and a page without
   assert.equal((await none.json()).error, 'no_title');
 });
 
+test('a title carries no character that can misrepresent it, and the cap counts characters', async () => {
+  /* A right-to-left override, a zero-width space and a control character: each is removed,
+     and the characters that spell the name are what is left. */
+  const marked = await withFetch(
+    async () =>
+      new Response('<html><head><title>Safe\u202Eevil\u200B\u0007 Name</title></head></html>', {
+        headers: { 'content-type': 'text/html' }
+      }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  const { title } = await marked.json();
+  assert.equal(title, 'Safeevil Name');
+  assert.doesNotMatch(title, /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/);
+
+  /* A hundred and twenty characters, not a hundred and twenty UTF-16 units: the name ends on a
+     whole emoji rather than half of one. */
+  const emoji = `a${'\u{1f600}'.repeat(150)}`;
+  const capped = await withFetch(
+    async () =>
+      new Response(`<html><head><title>${emoji}</title></head></html>`, {
+        headers: { 'content-type': 'text/html' }
+      }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  const cappedTitle = (await capped.json()).title;
+  assert.equal(Array.from(cappedTitle).length, 120);
+  assert.equal(cappedTitle, `a${'\u{1f600}'.repeat(119)}`);
+  assert.ok(cappedTitle.isWellFormed(), 'no half of a surrogate pair is stored');
+});
+
+test('a title is taken from the head, with comments and script bodies left out', async () => {
+  /* Each of the first two is a `<title>` a browser never shows as the page's name, and each
+     comes before the real one. */
+  const page = `<html><head>
+    <script>document.title = '<title>From a script</title>';</script>
+    <!-- <title>From a comment</title> -->
+    <title>The real name</title>
+  </head><body><title>From the body</title></body></html>`;
+
+  const response = await withFetch(
+    async () => new Response(page, { headers: { 'content-type': 'text/html' } }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  assert.deepEqual(await response.json(), { title: 'The real name' });
+
+  /* A title that appears only outside the head is not the page's name. */
+  const bodyOnly = await withFetch(
+    async () =>
+      new Response('<html><head></head><body><title>Later</title></body></html>', {
+        headers: { 'content-type': 'text/html' }
+      }),
+    () => worker.fetch(titleRequest(), harness().env)
+  );
+  assert.equal(bodyOnly.status, 404);
+  assert.equal((await bodyOnly.json()).error, 'no_title');
+});
+
 /* ------------------------------------------------- destinations both proxies refuse */
 
 const sha256 = (value) => createHash('sha256').update(value).digest('base64url');
