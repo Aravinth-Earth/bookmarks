@@ -657,11 +657,7 @@ test('a well-formed id is not reported as a probe refusal', async () => {
   );
 
   assert.notEqual(result.status, 400, 'a routable id reaches the route');
-  assert.deepEqual(
-    parsed(lines).filter((event) => event.event === 'account_refused'),
-    [],
-    'a request that names a real account is not a probe refusal'
-  );
+  assert.deepEqual(lines, [], 'a request that names a real account is not a probe refusal');
 });
 
 test('a proxy refusal names the route and the reason, never the host', async () => {
