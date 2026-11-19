@@ -255,15 +255,19 @@ test('nothing in the page asks a bookmarked site for its icon', () => {
   for (const name of publicSources) {
     const text = readPublic(name);
 
-    for (const match of text.matchAll(/(^|[^.\w$])fetch\s*\(/g)) {
+    for (const match of text.matchAll(/(^|[^\w$])((?:this\.)?fetch)\s*\(/g)) {
       inspected += 1;
+      const callee = match[2];
       const rest = text.slice(match.index + match[0].length).trimStart();
       const bare = rest.replace(/^['"`]/, '');
       const sameOrigin = /^\/api\//.test(bare) || /^\$\{(API|TITLE_API)\}/.test(bare);
+      /* The sync client's own fetch is handed a base that defaults to `/api`, on this origin; it
+         is never the host of a bookmark. */
+      const clientBase = callee === 'this.fetch' && /^\$\{this\.base\}/.test(bare);
       /* sw.js hands its own handler the request it was given, which is same-origin by
          construction and never built from anything a bookmark holds. */
       const workerRequest = name === 'sw.js' && /^request\b/.test(bare);
-      if (!sameOrigin && !workerRequest) offenders.push(`${name}: fetch(${bare.slice(0, 40)}`);
+      if (!sameOrigin && !clientBase && !workerRequest) offenders.push(`${name}: ${callee}(${bare.slice(0, 40)}`);
     }
   }
 
