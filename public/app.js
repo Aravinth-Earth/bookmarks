@@ -1512,6 +1512,12 @@ function showLockError(message) {
  * screen is the same; the sentence under the field is not.
  */
 function showLock(message = '', { hasVault = null } = {}) {
+  /* The dialog is appended to `#modal-root`, a sibling of `#app-view`, so hiding the app leaves an
+     open editor or the phrase sheet painted over the lock screen with a bookmark's address and
+     name — or the recovery phrase — still readable, and the global Escape handler stands aside
+     while a dialog is open. Every route onto this screen comes through here, so the dialog is
+     closed here rather than at each caller that remembers to. */
+  closeModal();
   appView.hidden = true;
   lockView.hidden = false;
   if (hasVault !== null) {
