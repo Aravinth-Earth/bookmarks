@@ -14,6 +14,7 @@
 import {
   MAX_BOOKMARKS,
   SCHEMA,
+  TOMBSTONE_DAYS,
   activityEvent,
   addBookmark,
   appendActivity,
@@ -36,9 +37,15 @@ export const SEALED_FORMAT = 'bookmarks-sealed/1';
    the tab. A JavaScript string's length counts UTF-16 units, each at least one byte in UTF-8, so
    the character check is never looser than the byte check the caller makes before reading. */
 export const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
+/* An icon in a file is a data URI, and this is the same ceiling the page applies before it keeps
+   one it fetched: a file must not smuggle a megabyte of base64 into every record it names. */
+const MAX_ICON_CHARS = 64 * 1024;
+/* Stated here so a test can name the boundary before the reader is. */
+export const MAX_IMPORT_SKEW_MS = 10 * 60 * 1000;
 
 const COLOR = /^#[0-9a-f]{6}$/i;
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", apos: "'" };
+const TOMBSTONE_MS = TOMBSTONE_DAYS * 24 * 60 * 60 * 1000;
 
 function fail(code, message) {
   const error = new Error(`bookmarks: ${message}`);
@@ -65,14 +72,23 @@ function decodeEntities(text) {
   return text.replace(/&(#?\w+);/g, (whole, name) => ENTITIES[name] ?? whole);
 }
 
-function isoOr(value, fallbackMs) {
-  return new Date(toMillis(value, fallbackMs)).toISOString();
-}
-
-function toMillis(value, fallbackMs) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN;
-  return Number.isNaN(parsed) ? fallbackMs : parsed;
+/**
+ * Where a stamp from a file lands, in milliseconds.
+ *
+ * `at` is when the file arrived. A stamp more than `MAX_IMPORT_SKEW_MS` past it is a mistake
+ * rather than a time — a file from a device whose clock is wrong, or one written to make a
+ * record outrank every later edit — and is read as the arrival itself. A stamp a little ahead
+ * is believed, because another device's clock really can be a little fast.
+ */
+function importedMillis(value, at, fallback) {
+  const parsed =
+    typeof value === 'number' && Number.isFinite(value)
+      ? value
+      : typeof value === 'string'
+        ? Date.parse(value)
+        : Number.NaN;
+  if (Number.isNaN(parsed)) return fallback;
+  return parsed > at + MAX_IMPORT_SKEW_MS ? at : parsed;
 }
 
 function legacyName(entry) {
@@ -96,8 +112,64 @@ function legacyClicks(entry) {
 }
 
 function legacyColor(entry) {
-  const value = entry?.button_color;
+  /* The same split as the count above: a file from this app spells it `color`, the retired app
+     spelled it `button_color`, and reading one name lost the colour written under the other. */
+  const value = entry?.color ?? entry?.button_color;
   return typeof value === 'string' && COLOR.test(value) ? value : null;
+}
+
+/**
+ * The icon a file carries, kept only as a data URI of a sane size.
+ *
+ * The retired app's icons were addresses on someone else's server, and those are deliberately
+ * dropped: an icon that named a third party would make this page announce every bookmark in the
+ * file to that host, which is the opposite of storing them here. Anything that is not an image
+ * already in the file is fetched later, from the same endpoint every other icon comes from.
+ */
+function legacyIcon(entry) {
+  const value = entry?.icon;
+  if (typeof value !== 'string' || !value.startsWith('data:image/')) return null;
+  return value.length <= MAX_ICON_CHARS ? value : null;
+}
+
+/**
+ * The id a file gives its record, when this import can keep it.
+ *
+ * A restore is only a restore if identity crosses too: the file's tombstones and its log name
+ * records by id, so minting fresh ones on the way in leaves both of them pointing at nothing. A
+ * file that repeats an id, or names one that is not a name, gets a new id for the later record.
+ */
+function keptId(value, used) {
+  if (typeof value !== 'string' || value === '') return undefined;
+  return used.has(value) ? undefined : value;
+}
+
+/** The view a file was exported from, or null when it carries none this app can read. */
+function legacyPrefs(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return { ...value };
+}
+
+/**
+ * The deletions a file carries, so a restored vault does not bring them back.
+ *
+ * A tombstone is only worth keeping while it can still outrank a record: one past the tombstone
+ * window is dropped exactly as a merge would drop it, and one whose deleted record the same file
+ * also carries is dropped too — the record being there is the later word.
+ */
+function legacyTombstones(value, stamp) {
+  if (!Array.isArray(value)) return [];
+  const cutoff = stamp - TOMBSTONE_MS;
+  const kept = [];
+
+  for (const tombstone of value) {
+    if (!tombstone || typeof tombstone !== 'object') continue;
+    const { id, deletedAt } = tombstone;
+    const at = typeof deletedAt === 'string' ? Date.parse(deletedAt) : Number.NaN;
+    if (typeof id !== 'string' || id === '' || Number.isNaN(at) || at < cutoff) continue;
+    kept.push({ id, deletedAt: new Date(at).toISOString() });
+  }
+  return kept;
 }
 
 /**
@@ -112,8 +184,11 @@ function legacyColor(entry) {
  * device that had no other copy. A file with counts leaves one line each, in the same sealed
  * document, because a count arrived here from outside the vault.
  */
-function addImported(document, entry, now, { device, cause }) {
-  const createdMs = toMillis(entry.createdAt, now());
+function addImported(document, entry, now, { device, cause, id }) {
+  const at = typeof now === 'function' ? now() : now;
+  const createdMs = importedMillis(entry.createdAt, at, at);
+  const updatedMs = importedMillis(entry.updatedAt, at, createdMs);
+  const clickedMs = importedMillis(entry.lastClickedAt, at, null);
 
   const { document: added, bookmark } = addBookmark(
     document,
@@ -123,6 +198,8 @@ function addImported(document, entry, now, { device, cause }) {
       search: entry.search,
       clickCount: entry.clickCount,
       color: entry.color,
+      pinned: entry.pinned,
+      icon: entry.icon,
       hideLabel: entry.hideLabel,
       uses: entry.uses,
       openCount: entry.openCount
@@ -132,8 +209,12 @@ function addImported(document, entry, now, { device, cause }) {
 
   const record = {
     ...bookmark,
-    createdAt: new Date(createdMs).toISOString(),
-    updatedAt: isoOr(entry.updatedAt, createdMs)
+    id: id ?? bookmark.id,
+    /* A record cannot be created after it was last edited; a file that says so is read with the
+       later of the two dates as the earlier one. */
+    createdAt: new Date(Math.min(createdMs, updatedMs)).toISOString(),
+    updatedAt: new Date(updatedMs).toISOString(),
+    lastClickedAt: clickedMs === null ? null : new Date(clickedMs).toISOString()
   };
 
   const bookmarks = [...added.bookmarks];
@@ -186,6 +267,8 @@ function importedSlot(record) {
 export function importPlain(payload, now = Date.now, options = {}) {
   const settings = { device: options.device ?? 'unsettled', cause: options.cause ?? 'import' };
   let carried = [];
+  let prefs = null;
+  let tombstones = [];
 
   let body = typeof payload === 'string' ? importText(payload) : payload;
 
@@ -204,6 +287,11 @@ export function importPlain(payload, now = Date.now, options = {}) {
     /* An export made by this app carries its own log. It is kept only for the bookmarks this
        file really imports, so a line cannot outlive the record it describes. */
     carried = normaliseActivity(body.activity, now);
+    /* The rest of the document crosses too: the deletions it holds, and the view it was taken
+       from. A restore that dropped them brought deleted bookmarks back on the next merge and
+       opened on a list the person had already arranged. */
+    prefs = legacyPrefs(body.prefs);
+    tombstones = legacyTombstones(body.tombstones, now());
   } else {
     throw fail('INVALID_IMPORT', 'that file is not a bookmark export');
   }
@@ -217,9 +305,10 @@ export function importPlain(payload, now = Date.now, options = {}) {
      how many. A clash with the vault's own bookmarks is not this file's business. */
   const statistics = { imported: 0, skipped: 0, duplicates: 0, repeats: [] };
   let document = createDocument();
-  /* The ids in a file are not the ids this vault gives its records, so a source line is carried
-     under the new id of the record it describes. */
+  /* The ids in a file are kept where this import can: a record's identity is what the file's
+     tombstones and its log name, so a fresh id would leave both pointing at nothing. */
   const remappedIds = new Map();
+  const usedIds = new Set();
 
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') {
@@ -228,7 +317,11 @@ export function importPlain(payload, now = Date.now, options = {}) {
     }
 
     try {
-      const result = addImported(document, legacyEntry(entry), now, settings);
+      const result = addImported(document, legacyEntry(entry), now, {
+        ...settings,
+        id: keptId(entry.id, usedIds)
+      });
+      usedIds.add(result.bookmark.id);
       document = result.document;
       if (typeof entry.id === 'string' && entry.id !== '') {
         remappedIds.set(entry.id, result.bookmark.id);
@@ -248,8 +341,13 @@ export function importPlain(payload, now = Date.now, options = {}) {
   }
 
   const carriedIds = new Set(remappedIds.keys());
+  const present = new Set(document.bookmarks.map((bookmark) => bookmark.id));
   document = fitActivity({
     ...document,
+    /* A tombstone that names a record this file also carries is dropped: the record being here
+       is the later word, and no file gets to delete what it brings. */
+    tombstones: tombstones.filter((tombstone) => !present.has(tombstone.id)),
+    prefs: prefs ?? document.prefs,
     activity: normaliseActivity(
       [
         ...(document.activity ?? []),
@@ -276,16 +374,20 @@ function legacyEntry(entry) {
       : Boolean(entry.hide_label) || Boolean(entry.is_familiar) || name === '';
 
   return {
+    id: entry.id,
     url: entry.url,
     name,
     search: legacySearch(entry),
     clickCount: legacyClicks(entry),
     color: legacyColor(entry),
+    pinned: entry.pinned === true,
+    icon: legacyIcon(entry),
     hideLabel,
     /* Present only in a file this app exported; older shapes have neither. Both are validated
        by `addBookmark`, so a malformed slot is skipped like any other malformed record. */
     uses: entry.uses,
     openCount: entry.openCount,
+    lastClickedAt: entry.lastClickedAt,
     createdAt: entry.created_date ?? entry.createdAt,
     updatedAt: entry.last_updated ?? entry.updatedAt
   };

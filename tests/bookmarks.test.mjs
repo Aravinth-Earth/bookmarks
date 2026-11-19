@@ -325,6 +325,24 @@ test('an edit after a deletion survives, because it is strictly newer', () => {
   assert.deepEqual(document.tombstones, [], 'the resolved tombstone is dropped');
 });
 
+test('a deletion outranks a record that is stamped in the future', () => {
+  /* A record whose stamp is ahead of this device — from a file, or a device whose clock runs
+     fast — used to win the merge that followed its own deletion, so it came back every time. */
+  const future = iso(T3 + 365 * 24 * 60 * 60 * 1000);
+  const stamped = record({ id: 'a', updatedAt: future });
+
+  const deleted = deleteBookmark(doc([stamped]), 'a', at(T1));
+  assert.deepEqual(
+    deleted.tombstones,
+    [{ id: 'a', deletedAt: future }],
+    'the deletion is stamped so it outranks the record it removes'
+  );
+
+  const { document } = mergeDocuments(deleted, doc([stamped]), at(T2));
+  assert.equal(document.bookmarks.length, 0, 'the record does not come back');
+  assert.equal(document.tombstones.length, 1, 'and the tombstone is kept');
+});
+
 test('a tombstone older than the limit is pruned', () => {
   const old = new Date(T1 - (TOMBSTONE_DAYS + 1) * 24 * 60 * 60 * 1000).toISOString();
   const { document } = mergeDocuments(doc(), doc([], [{ id: 'gone', deletedAt: old }]), at(T1));

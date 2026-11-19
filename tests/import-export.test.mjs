@@ -11,10 +11,16 @@ import assert from 'node:assert/strict';
 
 import {
   MAX_BOOKMARKS,
-  createDocument
+  addBookmark,
+  createDocument,
+  deleteBookmark,
+  mergeDocuments,
+  recordClick,
+  updateBookmark
 } from '../public/bookmarks.js';
 import {
   MAX_IMPORT_BYTES,
+  MAX_IMPORT_SKEW_MS,
   PLAIN_FORMAT,
   SEALED_FORMAT,
   exportBrowserBookmarks,
@@ -286,6 +292,158 @@ test('the plain export names its format and carries the document untouched', () 
   assert.equal(envelope.document, document);
   assert.equal(envelope.exported_at, new Date(NOW).toISOString());
   assert.deepEqual(createDocument().bookmarks, []);
+});
+
+test('a plain export brought back into an empty vault is the vault it was taken from', () => {
+  /* Every field the model defines is set to something other than its default, so a field the
+     import drops cannot pass by looking like one that was never there. */
+  const T0 = Date.UTC(2025, 5, 1, 9, 0, 0);
+  const T1 = Date.UTC(2025, 5, 2, 9, 0, 0);
+  const T2 = Date.UTC(2025, 5, 3, 9, 0, 0);
+  const T3 = Date.UTC(2025, 5, 4, 9, 0, 0);
+  const at = (moment) => () => moment;
+
+  const added = addBookmark(
+    createDocument(),
+    {
+      url: 'https://example.com/deep',
+      name: 'Example',
+      search: 'Hidden Title',
+      clickCount: 7,
+      uses: { 'device-one': 4 },
+      hideLabel: true
+    },
+    at(T0)
+  );
+  const clickedId = added.bookmark.id;
+
+  let document = updateBookmark(
+    added.document,
+    clickedId,
+    { pinned: true, icon: 'data:image/png;base64,AAAA', color: '#ff0000' },
+    at(T1)
+  );
+  document = recordClick(document, clickedId, at(T2), { device: 'device-one' });
+
+  const gone = addBookmark(document, { url: 'https://gone.example/', name: 'Gone' }, at(T0));
+  document = deleteBookmark(gone.document, gone.bookmark.id, at(T3));
+  document = { ...document, prefs: { ...document.prefs, iconOnly: true, sort: 'recent' } };
+
+  /* The fields the equality below is about, named once so a later edit that stops setting one
+     cannot make the test pass by comparing two defaults. */
+  const exported = document.bookmarks[0];
+  assert.equal(exported.pinned, true);
+  assert.equal(exported.icon, 'data:image/png;base64,AAAA');
+  assert.equal(exported.color, '#ff0000');
+  assert.equal(exported.lastClickedAt, new Date(T2).toISOString());
+  assert.equal(document.tombstones.length, 1);
+  assert.equal(document.prefs.iconOnly, true);
+
+  const file = JSON.stringify(exportPlain(document, at(T3)));
+  const { document: back, statistics } = importPlain(file, at(T3));
+
+  assert.equal(statistics.imported, 1);
+  assert.deepEqual(back.bookmarks, document.bookmarks, 'every field of every record crosses');
+  assert.deepEqual(back.tombstones, document.tombstones, 'the deletion crosses with it');
+  assert.deepEqual(back.prefs, document.prefs, 'the view it was taken from crosses too');
+
+  /* A count that arrives from a file still leaves one line, and the line the file carried for
+     the record it describes is still filed under that record. */
+  assert.ok(
+    back.activity.some((event) => event.bookmarkId === clickedId && event.cause === 'click'),
+    'the click the file recorded is still filed under the bookmark'
+  );
+  assert.ok(
+    back.activity.some((event) => event.bookmarkId === clickedId && event.cause === 'import'),
+    'the count that arrived from the file left a line'
+  );
+});
+
+test('a file that repeats an id still gives each record its own', () => {
+  /* Identity crosses with the record, so a file naming one id twice must not produce two
+     records that answer to it: every later lookup would find the first. */
+  const { document, statistics } = importPlain(
+    [
+      { id: 'same', url: 'https://one.example/', name: 'One' },
+      { id: 'same', url: 'https://two.example/', name: 'Two' }
+    ],
+    now
+  );
+
+  assert.equal(statistics.imported, 2);
+  assert.equal(document.bookmarks[0].id, 'same', 'the first keeps the id the file gave it');
+  assert.equal(new Set(document.bookmarks.map((bookmark) => bookmark.id)).size, 2);
+});
+
+test('a file stamped past this device clock arrives at the import time, and stays deletable', () => {
+  /* A file can be written by anything: an old export, another app, or a person with an editor.
+     A record stamped in the year 9999 outranks every later edit, so the next merge puts back a
+     bookmark that was just deleted, and keeps doing it. */
+  const iso = (moment) => new Date(moment).toISOString();
+  const envelope = (record) =>
+    JSON.stringify(
+      exportPlain(
+        { schema: 1, bookmarks: [record], tombstones: [], activity: [], prefs: { iconOnly: false } },
+        now
+      )
+    );
+  const record = (overrides) => ({
+    id: 'future-1',
+    url: 'https://future.example/',
+    hostname: 'future.example',
+    origin: 'https://future.example',
+    name: 'Future',
+    search: '',
+    clickCount: 0,
+    uses: {},
+    pinned: false,
+    hideLabel: false,
+    icon: null,
+    color: null,
+    createdAt: iso(NOW),
+    updatedAt: iso(NOW),
+    lastClickedAt: null,
+    ...overrides
+  });
+
+  /* A clock a little fast is believed: a restore from a device a minute ahead keeps its dates. */
+  const near = importPlain(
+    envelope(
+      record({
+        createdAt: iso(NOW + 60_000),
+        updatedAt: iso(NOW + 60_000),
+        lastClickedAt: iso(NOW + 60_000)
+      })
+    ),
+    now
+  ).document;
+  assert.ok(60_000 < MAX_IMPORT_SKEW_MS, 'a minute is inside the allowance');
+  assert.equal(near.bookmarks[0].updatedAt, iso(NOW + 60_000));
+  assert.equal(near.bookmarks[0].lastClickedAt, iso(NOW + 60_000));
+
+  /* A stamp past the allowance is a mistake rather than a time, and is read as the arrival. */
+  const far = importPlain(
+    envelope(
+      record({
+        createdAt: '+033658-09-27T01:46:40.000Z',
+        updatedAt: iso(Date.UTC(9999, 0, 1)),
+        lastClickedAt: iso(Date.UTC(9999, 0, 1))
+      })
+    ),
+    now
+  ).document;
+  const landed = far.bookmarks[0];
+  assert.equal(landed.createdAt, iso(NOW), 'a creation past the clock reads as the import');
+  assert.equal(landed.updatedAt, iso(NOW), 'an edit past the clock reads as the import');
+  assert.equal(landed.lastClickedAt, iso(NOW));
+
+  /* The deletion, then the copy another device still holds. The record must not come back. */
+  const deleted = deleteBookmark(far, landed.id, () => NOW + 60_000);
+  assert.equal(deleted.bookmarks.length, 0);
+
+  const merged = mergeDocuments(deleted, far, () => NOW + 120_000);
+  assert.equal(merged.document.bookmarks.length, 0, 'the deletion holds against that copy');
+  assert.equal(merged.document.tombstones.length, 1, 'and the tombstone survives the merge');
 });
 
 test('a document round-trip keeps the label choice it was exported with', () => {
