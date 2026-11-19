@@ -491,6 +491,20 @@ export class Vault {
       const tombstone = await this.tombstone();
       if (tombstone && !this.invitesRequired()) return this.deletedRefusal(tombstone);
 
+      /* One live challenge at a time, exactly as `/challenge` keeps one for the login nonce.
+         Asking again while a nonce is still valid answers with that same nonce and writes
+         nothing, so a request from anywhere else cannot displace the challenge the person is
+         about to sign: minting on every blind request would let anyone who knows the id keep the
+         real phrase holder's proof from ever landing. The expiry handed back is the one already
+         stored, so asking again does not extend a nonce's life either. */
+      const live = await this.storage.get('create-nonce');
+      if (live && live.expiresAt > this.now()) {
+        return json(
+          { error: 'proof_required', nonce: live.value, expiresAt: live.expiresAt },
+          428
+        );
+      }
+
       const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
       const expiresAt = this.now() + NONCE_TTL_MS;
       await this.storage.put('create-nonce', { value: nonce, expiresAt });

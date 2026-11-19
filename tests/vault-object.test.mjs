@@ -221,6 +221,62 @@ test('a blind creation request writes nothing and answers with a nonce', async (
   assert.deepEqual(harness.reserved, [], 'a blind request takes no slot');
 });
 
+test('a second blind creation request answers the live nonce and writes nothing', async () => {
+  const harness = object();
+
+  const first = await blind(harness);
+  const stored = structuredClone(harness.storage.raw.get('create-nonce'));
+
+  const second = await blind(harness);
+
+  assert.equal(second.status, 428);
+  assert.equal(second.body.error, 'proof_required');
+  assert.equal(second.body.nonce, first.body.nonce, 'the live nonce is handed back');
+  assert.equal(second.body.expiresAt, first.body.expiresAt, 'and so is its own deadline');
+  assert.deepEqual(harness.storage.raw.get('create-nonce'), stored, 'asking again writes nothing');
+});
+
+test('a blind creation request cannot displace the challenge a proof is about to sign', async () => {
+  const harness = object();
+
+  /* The person takes a challenge; someone else, holding only the id, posts the same route. */
+  const owner = await blind(harness);
+  const stranger = await blind(harness);
+
+  assert.equal(stranger.body.nonce, owner.body.nonce, 'one challenge, whoever asks');
+
+  /* The proof the person signed over the nonce they were given still creates the account. */
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, owner.body.nonce);
+  const created = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret, proof }
+      })
+    )
+  );
+
+  assert.equal(created.status, 201);
+  assert.equal(created.body.created, true);
+});
+
+test('a blind creation request does not extend the nonce it finds, and a stale one is replaced', async () => {
+  const harness = object();
+
+  const first = await blind(harness);
+
+  /* Half a minute later the same nonce, still on its original deadline: asking is not a refresh. */
+  harness.advance(30_000);
+  const again = await blind(harness);
+  assert.equal(again.body.nonce, first.body.nonce);
+  assert.equal(again.body.expiresAt, first.body.expiresAt);
+
+  /* Past the deadline the nonce is spent by time, so a fresh one is minted with a later stamp. */
+  harness.advance(30_000);
+  const fresh = await blind(harness);
+  assert.notEqual(fresh.body.nonce, first.body.nonce);
+  assert.ok(fresh.body.expiresAt > first.body.expiresAt);
+});
+
 test('a valid proof creates the account exactly once', async () => {
   const harness = object();
 
