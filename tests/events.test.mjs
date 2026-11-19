@@ -13,7 +13,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
 import worker, { LIMITS } from '../src/index.js';
 import { ACCOUNT_REF_HEX, accountRef, digestHex, logEvent } from '../src/events.js';
@@ -25,6 +25,9 @@ import { withFetch } from './dns.mjs';
 
 const PHRASE = WORDLIST.slice(0, 13).join(' ');
 const ACCOUNT = await deriveAccount(PHRASE);
+/* A second account, reached from the same address in one test: the id alone is what the keying
+   is about, so a separate phrase is enough. */
+const OTHER_ACCOUNT = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
 /* The only field an account may appear as: the prefix of its digest, never the id. */
 const REF = createHash('sha256').update(ACCOUNT.accountId).digest('hex').slice(0, ACCOUNT_REF_HEX);
 const SOURCE = '203.0.113.7';
@@ -299,6 +302,58 @@ test('a lock names the source it counted, as a digest of the value the Worker fo
   });
 });
 
+test('a sign-in failure writes a source keyed to the account, not the address alone', async () => {
+  const harness = vaultObject();
+  await provision(harness);
+
+  /* The Worker, in front of the real object, so the failure line is written from the header the
+     Worker filled rather than one a test chose. */
+  const env = {
+    VAULTS: {
+      idFromName: (name) => ({ name }),
+      get: () => harness.vault
+    }
+  };
+
+  const { result, lines } = await withEvents(async () => {
+    const challenge = await worker.fetch(
+      api(`/a/${ACCOUNT.accountId}/challenge`, { method: 'POST' }),
+      env
+    );
+    assert.equal(challenge.status, 200);
+    return read(
+      await worker.fetch(
+        api(`/a/${ACCOUNT.accountId}/login`, { method: 'POST', body: { proof: 'x'.repeat(43) } }),
+        env
+      )
+    );
+  });
+
+  assert.equal(result.status, 401);
+  assert.deepEqual(result.body, { error: 'bad_proof' });
+
+  /* HMAC-SHA-256 under this account's id over `vault\n203.0.113.7`, digested again by logEvent
+     and cut to 12 hex. A literal pin of the rule, not a second implementation of it. */
+  const expected = '6e3eea274fa0';
+  const addressOnly = createHash('sha256')
+    .update(createHash('sha256').update(`vault\n${SOURCE}`).digest('hex'))
+    .digest('hex')
+    .slice(0, ACCOUNT_REF_HEX);
+
+  assert.deepEqual(parsed(lines), [
+    {
+      event: 'signin_failed',
+      route: 'signin',
+      reason: 'bad_proof',
+      account: REF,
+      source: expected
+    }
+  ]);
+  assert.match(expected, /^[0-9a-f]{12}$/);
+  assert.notEqual(expected, addressOnly, 'the address alone no longer produces the field');
+  for (const line of lines) assert.equal(line.includes(SOURCE), false);
+});
+
 test('a creation refused at the cap writes create_refused cap_full', async () => {
   const harness = vaultObject({ full: true });
   const challenge = await blind(harness.vault);
@@ -361,7 +416,9 @@ test('a creation with a malformed body writes create_refused without an account'
 
 /* ------------------------------------------------------------------- the Worker */
 
-test('the Worker forwards a digest of the source, replacing any value the caller sent', async () => {
+/* An env whose account object records every request it is handed, so the forwarded header can be
+   read as the object would read it. */
+function forwardingEnv() {
   const seen = [];
   const env = {
     VAULTS: {
@@ -376,6 +433,16 @@ test('the Worker forwards a digest of the source, replacing any value the caller
       })
     }
   };
+  return { env, seen };
+}
+
+/* HMAC-SHA-256 with the account id as the key, over the address in the Worker's own frame. */
+function keyedSource(accountId, address) {
+  return createHmac('sha256', accountId).update(`vault\n${address}`).digest('hex');
+}
+
+test('the Worker forwards a digest of the source, replacing any value the caller sent', async () => {
+  const { env, seen } = forwardingEnv();
 
   const claimed = 'f'.repeat(64);
   await worker.fetch(
@@ -387,12 +454,15 @@ test('the Worker forwards a digest of the source, replacing any value the caller
     env
   );
 
-  const expected = await digestHex(`vault\n${SOURCE}`);
+  const expected = keyedSource(ACCOUNT.accountId, SOURCE);
   assert.equal(seen.length, 1, 'the object was asked once');
   assert.equal(seen[0].headers.get('x-vault-source'), expected);
   assert.notEqual(seen[0].headers.get('x-vault-source'), claimed, 'the caller cannot choose it');
   assert.equal(seen[0].headers.get('cf-connecting-ip'), SOURCE, 'the address is still forwarded');
   assert.equal(seen[0].headers.get('x-vault-source').includes('203.0.113.7'), false);
+
+  /* The value the header used to carry is not the value it carries now. */
+  assert.notEqual(expected, await digestHex(`vault\n${SOURCE}`));
 
   /* A different address is a different source, which is what the object counts against. */
   await worker.fetch(
@@ -407,6 +477,43 @@ test('the Worker forwards a digest of the source, replacing any value the caller
     seen[1].headers.get('x-vault-source'),
     seen[0].headers.get('x-vault-source')
   );
+});
+
+test('one account reached from one address forwards the same source on every request', async () => {
+  const { env, seen } = forwardingEnv();
+
+  for (let request = 0; request < 2; request += 1) {
+    await worker.fetch(
+      api(`/a/${ACCOUNT.accountId}/login`, { method: 'POST', body: { proof: 'x'.repeat(43) } }),
+      env
+    );
+  }
+
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0].headers.get('x-vault-source'), seen[1].headers.get('x-vault-source'));
+  assert.equal(seen[0].headers.get('x-vault-source'), keyedSource(ACCOUNT.accountId, SOURCE));
+});
+
+test('one address forwarded for two accounts carries two unrelated sources', async () => {
+  const { env, seen } = forwardingEnv();
+
+  await worker.fetch(
+    api(`/a/${ACCOUNT.accountId}/login`, { method: 'POST', body: { proof: 'x'.repeat(43) } }),
+    env
+  );
+  await worker.fetch(
+    api(`/a/${OTHER_ACCOUNT.accountId}/login`, { method: 'POST', body: { proof: 'x'.repeat(43) } }),
+    env
+  );
+
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0].headers.get('cf-connecting-ip'), SOURCE);
+  assert.equal(seen[1].headers.get('cf-connecting-ip'), SOURCE);
+  assert.notEqual(
+    seen[0].headers.get('x-vault-source'),
+    seen[1].headers.get('x-vault-source')
+  );
+  assert.equal(seen[1].headers.get('x-vault-source'), keyedSource(OTHER_ACCOUNT.accountId, SOURCE));
 });
 
 function workerHarness({ refuse = [], throwOnObject = false } = {}) {

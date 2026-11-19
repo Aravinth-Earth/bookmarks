@@ -241,10 +241,10 @@ counters are a brake on one source spending the service, not a quota.
 Sign-in and fetch are the two classes that write storage or contact another host; the vault
 class is the app's own traffic and is the most permissive of the three.
 
-The source is the caller's address, counted as a SHA-256 digest and never stored raw. The
-counts are Cloudflare's rate limiting bindings (`[[ratelimits]]` in `wrangler.toml`), so they
-are held per Cloudflare location and are approximate. `npm run check` fails when the thresholds
-in that file and the `LIMITS` table in `src/index.js` disagree.
+The source is the caller's address, counted as a SHA-256 digest by the limiter and never stored
+raw. The counts are Cloudflare's rate limiting bindings (`[[ratelimits]]` in `wrangler.toml`),
+so they are held per Cloudflare location and are approximate. `npm run check` fails when the
+thresholds in that file and the `LIMITS` table in `src/index.js` disagree.
 
 A challenge is valid for 60 seconds, and asking for one again during that time returns the same
 nonce. A sign-in that is already in progress therefore completes whatever else arrives.
@@ -252,12 +252,12 @@ nonce. A sign-in that is already in progress therefore completes whatever else a
 ### Sign-in lockout
 
 A wrong proof is counted against the source it came from, never against the account, so no one
-who knows an account id can shut its owner out by failing five times. The Worker derives the
-source from the caller's address, forwards only its SHA-256, and replaces any value the caller
-sent; the account object stores a second digest over that and the account. Five wrong proofs
-from one source lock that source for **15 minutes** and nothing else — another source, the
-owner's included, still signs in. A correct proof clears that source's count at once, and a
-count older than fifteen minutes is forgotten.
+who knows an account id can shut its owner out by failing five times. The Worker keys the
+caller's address to the account with HMAC-SHA-256, forwards only that digest, and replaces any
+value the caller sent; the account object stores a second digest over that and the account.
+Five wrong proofs from one source lock that source for **15 minutes** and nothing else —
+another source, the owner's included, still signs in. A correct proof clears that source's
+count at once, and a count older than fifteen minutes is forgotten.
 
 One account remembers at most **64 sources**. A new source is admitted only by evicting the
 oldest entry, so inventing sources cannot grow the record, and an evicted entry can only forget
@@ -288,7 +288,7 @@ failed, or erased:
 | `route` | The class the route is counted as — `signin`, `fetch` or `vault` — or `api` when an exception surfaced before a class was known |
 | `reason` | The code the refusing branch answered with: `bad_proof`, `challenge_expired`, `no_account`, `too_large`, `cap_full`, `invalid`, `mismatch`, `locked`, `throttled`, `over_limit`, `bad_host`, `blocked_host`, `bad_hash`, `timeout`, `fetch_failed`, `unhandled` |
 | `account` | The first 12 hex characters of SHA-256(account id), present when the branch holds the account. The id itself is never written. |
-| `source` | The first 12 hex characters of SHA-256 over the source digest the Worker forwarded, present when the sign-in was counted against a source. Never an address. |
+| `source` | The first 12 hex characters of SHA-256 over the account-keyed source digest the Worker forwarded, present when the sign-in was counted against a source. Never an address. |
 | `retry_after` | Whole seconds; on `rate_limited` and `signin_locked` only |
 
 The shape is defined once, in `src/events.js`, and `logEvent` is the only writer. It takes an

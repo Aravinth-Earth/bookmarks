@@ -10,7 +10,7 @@
  * opens anything.
  */
 
-import { digestHex, logEvent } from './events.js';
+import { logEvent } from './events.js';
 import { MAX_SMALL_BODY, MAX_VAULT_BODY } from './vault.js';
 
 /* The app is the whole of its own origin: the page sits at `/`, so there is no prefix to strip and
@@ -152,15 +152,30 @@ function tooMany(rule) {
 }
 
 /**
- * The source a sign-in is counted against, as a digest.
+ * The source a sign-in is counted against, as a digest keyed to the account it is forwarded for.
  *
  * The edge writes `cf-connecting-ip` on every request, and the object keys a failed proof on
- * this value so one place cannot spend another's attempts. Only the digest is forwarded, so the
- * object never holds an address, and the header is set here rather than passed through: a value
- * the caller sent is replaced, not read.
+ * this value so one place cannot spend another's attempts. The digest is an HMAC under the
+ * account id, so a value read from a log line says nothing about which address produced it, and
+ * two accounts reached from one address carry unrelated values. Only the digest is forwarded, so
+ * the object never holds an address, and the header is set here rather than passed through: a
+ * value the caller sent is replaced, not read.
  */
-async function sourceDigest(request) {
-  return digestHex(`vault\n${request.headers.get('cf-connecting-ip') ?? ''}`);
+async function sourceDigest(request, accountId) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(accountId),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const mac = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    encoder.encode(`vault\n${request.headers.get('cf-connecting-ip') ?? ''}`)
+  );
+  return [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 /** The caller's request again, at the object, carrying the source the Worker decided on. */
@@ -1300,7 +1315,7 @@ async function handleApi(request, env, url) {
     if (Number.isFinite(declared) && declared > cap) return json({ error: 'too_large' }, 413);
 
     return limited(env, classOfRoute(forward), request, async () =>
-      forwardTo(stub, target, request, await sourceDigest(request))
+      forwardTo(stub, target, request, await sourceDigest(request, accountId))
     );
   }
 
