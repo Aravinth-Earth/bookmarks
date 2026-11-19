@@ -27,8 +27,13 @@ quiet();
 const ACCOUNT = 'A'.repeat(22);
 const AUTH_SECRET = 'A'.repeat(43);
 
-function harness({ doStatus = 201, doBody = { ok: true } } = {}) {
+/* `registry` is optional on purpose: with it absent there is no REGISTRY binding, which is the path
+   every test above this one asserts — the edge asks nothing and forwards exactly as it always did.
+   Present, it is the cap's object: `{ exists, room }` is what it answers, `throws` makes it
+   unreachable. */
+function harness({ doStatus = 201, doBody = { ok: true }, registry } = {}) {
   const calls = [];
+  const asked = [];
   const env = {
     VAULTS: {
       idFromName: (name) => ({ name }),
@@ -55,7 +60,29 @@ function harness({ doStatus = 201, doBody = { ok: true } } = {}) {
         })
     }
   };
-  return { env, calls };
+
+  if (registry) {
+    env.REGISTRY = {
+      idFromName: (name) => ({ name }),
+      get: (id) => ({
+        fetch: async (request) => {
+          asked.push({
+            name: id.name,
+            path: new URL(request.url).pathname,
+            account: new URL(request.url).searchParams.get('account')
+          });
+          if (registry.throws) throw new Error('the registry is unreachable');
+
+          return new Response(JSON.stringify({ exists: registry.exists, room: registry.room }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+      })
+    };
+  }
+
+  return { env, calls, asked };
 }
 
 function api(path, options = {}) {
@@ -120,6 +147,107 @@ test('account paths are forwarded to that account and nothing else', async () =>
 
   assert.equal(response.status, 200);
   assert.equal(calls[0].name, ACCOUNT);
+  assert.equal(calls[0].path, '/challenge');
+});
+
+/* Naming a Durable Object creates it, so the id is put to the Registry before that happens. The
+   Registry is the cap's object and answers two booleans: whether the id was ever reserved, and
+   whether there is room for another account. */
+
+test('an id the registry never reserved is refused before any object is made', async () => {
+  for (const path of [`/a/${ACCOUNT}/challenge`, `/a/${ACCOUNT}/vault`, `/a/${ACCOUNT}/status`]) {
+    const { env, calls, asked } = harness({ registry: { exists: false, room: true } });
+    const response = await worker.fetch(api(path), env);
+
+    assert.equal(response.status, 404, path);
+    assert.deepEqual(await response.json(), { error: 'no_account' }, path);
+    assert.equal(calls.length, 0, `${path} never reaches the runtime, so nothing is minted`);
+
+    assert.equal(asked.length, 1, path);
+    assert.equal(asked[0].path, '/exists');
+    assert.equal(asked[0].account, ACCOUNT);
+    assert.equal(asked[0].name, 'registry');
+  }
+});
+
+test('a reserved id is forwarded exactly as it was, path and body unchanged', async () => {
+  const { env, calls } = harness({ registry: { exists: true, room: true }, doStatus: 200, doBody: { nonce: 'abc' } });
+  const body = JSON.stringify({ challenge: 'abc', signature: 'def' });
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/challenge`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body
+    }),
+    env
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { nonce: 'abc' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, ACCOUNT);
+  assert.equal(calls[0].path, '/challenge');
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls[0].body, body);
+});
+
+test('an unknown id asking to be created with no room left is refused as full, unmade', async () => {
+  const { env, calls } = harness({ registry: { exists: false, room: false } });
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/account`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT, authSecret: AUTH_SECRET })
+    }),
+    env
+  );
+
+  assert.equal(response.status, 429);
+  assert.deepEqual(await response.json(), { error: 'full' });
+  assert.equal(calls.length, 0, 'no object is made just to be told the server is full');
+});
+
+test('an unknown id with room to spare still creates its account', async () => {
+  const { env, calls } = harness({ registry: { exists: false, room: true }, doStatus: 201 });
+  const body = JSON.stringify({ accountId: ACCOUNT, authSecret: AUTH_SECRET });
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/account`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body
+    }),
+    env
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/account');
+  assert.equal(calls[0].body, body, 'creation still reserves the slot, in the object that owns the cap');
+});
+
+test('a reserved id is forwarded even when the cap is full', async () => {
+  const { env, calls } = harness({ registry: { exists: true, room: false }, doStatus: 200, doBody: { ok: true } });
+  const response = await worker.fetch(
+    api(`/a/${ACCOUNT}/account`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT })
+    }),
+    env
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1, 'an account that exists is never refused by the cap');
+  assert.equal(calls[0].path, '/account');
+});
+
+test('a registry that cannot answer lets the request through, unchanged', async () => {
+  const { env, calls, asked } = harness({ registry: { throws: true }, doStatus: 200, doBody: { nonce: 'abc' } });
+  const response = await worker.fetch(api(`/a/${ACCOUNT}/challenge`, { method: 'POST' }), env);
+
+  assert.equal(response.status, 200);
+  assert.equal(asked.length, 1, 'it was asked');
+  assert.equal(calls.length, 1, 'and the object still decided');
   assert.equal(calls[0].path, '/challenge');
 });
 
