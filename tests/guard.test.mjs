@@ -97,3 +97,53 @@ test('an unmodified copy passes the guard', (t) => {
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /check passed/);
 });
+
+/** Rewrite the alert rule in the copy, so a case can plant one drift in it. */
+function editRule(dir, edit) {
+  const path = join(dir, 'alerts/signin-failures.json');
+  const rule = JSON.parse(readFileSync(path, 'utf8'));
+  edit(rule);
+  writeFileSync(path, `${JSON.stringify(rule, null, 2)}\n`);
+}
+
+test('an alert rule that would fire on a single failure fails the guard', (t) => {
+  const dir = copyOfTree(t);
+  editRule(dir, (rule) => {
+    rule.threshold = 1;
+  });
+
+  const result = guard(dir);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /alerts: the rule fires at 1 failures/);
+});
+
+test('an alert rule that counts an event the Worker no longer writes fails the guard', (t) => {
+  const dir = copyOfTree(t);
+  editRule(dir, (rule) => {
+    rule.events = rule.events.map((name) => (name === 'signin_locked' ? 'signin_lock' : name));
+  });
+
+  const result = guard(dir);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /alerts: the rule counts "signin_lock", which src\/ never writes/);
+});
+
+test('an alert rule grouped by the source instead of the account fails the guard', (t) => {
+  const dir = copyOfTree(t);
+  editRule(dir, (rule) => {
+    rule.group_by = ['source'];
+  });
+
+  const result = guard(dir);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /alerts: the rule is not grouped by the account digest/);
+});
+
+test('a deployment with no alert rule fails the guard', (t) => {
+  const dir = copyOfTree(t);
+  rmSync(join(dir, 'alerts/signin-failures.json'));
+
+  const result = guard(dir);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /alerts: alerts\/signin-failures\.json is missing/);
+});

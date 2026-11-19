@@ -758,6 +758,97 @@ try {
 }
 
 
+/* 9. The alert rule is the deployment's only notification, so it is checked against the code that
+   has to make it fire. Every event it counts must be an event `src/` really writes, its threshold
+   must be the number of wrong proofs that locks a source, and its window must be the period in
+   which those failures still count — the three ways a written rule stops describing the product
+   and starts describing nothing. The rule is read as data, so a missing file fails here rather
+   than passing on an empty scan. */
+try {
+  const ruleFile = 'alerts/signin-failures.json';
+  const rulePath = join(root, ruleFile);
+
+  if (!existsSync(rulePath)) {
+    problems.push(`alerts: ${ruleFile} is missing, so a lockout would raise no notification`);
+  } else {
+    const rule = JSON.parse(readFileSync(rulePath, 'utf8'));
+    const config = readFileSync(join(root, 'wrangler.toml'), 'utf8');
+    const deployed = config.match(/^[ \t]*name[ \t]*=[ \t]*"([^"]+)"/m)?.[1];
+
+    if (rule.worker !== deployed) {
+      problems.push(`alerts: the rule watches "${rule.worker}", and wrangler.toml deploys "${deployed}"`);
+    }
+    if (rule.dataset !== 'logs.workersLogs') {
+      problems.push(`alerts: the rule reads ${JSON.stringify(rule.dataset)}, not the Workers Logs dataset the refusals land in`);
+    }
+    if (rule.metric !== 'count') {
+      problems.push(`alerts: the rule measures ${JSON.stringify(rule.metric)}, and a sustained set is a count`);
+    }
+
+    /* The event names are read from the call sites rather than from a list here, so the rule and
+       the Worker cannot be edited apart. The presence floor is the count this Worker writes; a
+       scan that found none would otherwise pass vacuously. */
+    const written = new Set();
+    for (const file of workerFiles) {
+      for (const match of readFileSync(file, 'utf8').matchAll(/logEvent\(\s*'([a-z_]+)'/g)) {
+        written.add(match[1]);
+      }
+    }
+    if (written.size < 5) {
+      problems.push(`alerts: ${written.size} event names found in src/, so this scan inspected nothing useful`);
+    }
+
+    const events = Array.isArray(rule.events) ? rule.events : [];
+    if (!events.includes('signin_failed')) {
+      problems.push('alerts: the rule does not count signin_failed, so a run of failed sign-ins cannot raise it');
+    }
+    if (events.length === 0) {
+      problems.push('alerts: the rule counts no event at all, so nothing can raise it');
+    }
+    for (const name of events) {
+      if (!written.has(name)) problems.push(`alerts: the rule counts "${name}", which src/ never writes`);
+    }
+
+    const { MAX_FAILURES, LOCKOUT_MS } = await import(join(root, 'src/vault.js'));
+    if (rule.threshold !== MAX_FAILURES) {
+      problems.push(
+        `alerts: the rule fires at ${JSON.stringify(rule.threshold)} failures, and ${MAX_FAILURES} wrong proofs ` +
+          'from one source is the lock it is meant to report'
+      );
+    }
+    if (!Number.isInteger(rule.window_seconds) || rule.window_seconds * 1000 !== LOCKOUT_MS) {
+      problems.push(
+        `alerts: the rule counts over ${JSON.stringify(rule.window_seconds)}s, and a source's failures ` +
+          `are forgotten after ${LOCKOUT_MS / 1000}s`
+      );
+    }
+    for (const [field, rule_] of [
+      ['every_seconds', (value) => Number.isInteger(value) && value > 0 && value <= rule.window_seconds],
+      ['repeat_seconds', (value) => Number.isInteger(value) && value >= rule.window_seconds]
+    ]) {
+      if (!rule_(rule[field])) problems.push(`alerts: ${field} is ${JSON.stringify(rule[field])}, which this rule cannot use`);
+    }
+
+    /* Grouped by the account digest, so one lockout is one notification. Grouped by the source
+       instead, a distributed attempt would arrive once per source, and every one of them would
+       name a value the owner cannot act on. */
+    const groupBy = Array.isArray(rule.group_by) ? rule.group_by : [];
+    if (!groupBy.includes('account')) {
+      problems.push('alerts: the rule is not grouped by the account digest, so one lockout would arrive once per source');
+    }
+
+    const doc = readFileSync(join(root, 'docs/alerts.md'), 'utf8');
+    if (!doc.includes(ruleFile)) {
+      problems.push(`alerts: docs/alerts.md does not name ${ruleFile}, so the rule is written down nowhere a reader looks`);
+    }
+    if (!doc.includes('signin_failed')) {
+      problems.push('alerts: docs/alerts.md does not name the event the rule counts');
+    }
+  }
+} catch (error) {
+  problems.push(`alerts: ${error.message}`);
+}
+
 if (problems.length) {
   console.error('check failed:');
   for (const problem of problems) console.error(`  - ${problem}`);
@@ -767,5 +858,5 @@ if (problems.length) {
 console.log(
   `check passed: ${assets.length} assets, ${htmlAssets.length} HTML and ${workerFiles.length} Worker ` +
     `files with no unlisted or inline script, no third-party references, no overclaiming copy, ` +
-    `1296 words, request limits match wrangler.toml`
+    `1296 words, request limits match wrangler.toml, the alert rule matches the events the Worker writes`
 );
