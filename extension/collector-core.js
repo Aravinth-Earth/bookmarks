@@ -284,3 +284,109 @@ export function createCollector({ persistent, now = Date.now }) {
     tidy: (at) => exclusive(() => tidyInner(at))
   };
 }
+
+/**
+ * Fold a browser history into the rows the collector already holds.
+ *
+ * `entries` is what a history API gives for one range: `{ url, visitCount, lastVisitTime }` per address, with
+ * `lastVisitTime` in epoch milliseconds. `policy` is a stored policy — read through `normalizePolicy`, so a partly
+ * filled object reads as its defaults — and `at` is the moment the import is applied. Nothing here reads a store, a
+ * clock or a browser: the rows come in as `items`, keyed by address, and the answer is `{ items, counts }`, where
+ * `items` is a new object and the rows handed in are left as they were.
+ *
+ * An address folds the way a capture folds it: canonicalised, refused when an exclusion covers it, then recorded
+ * under whatever key a `site` or `host` rule names, so an imported page lands in exactly the row a live visit to it
+ * would have landed in. An address with no row yet is written as `{ url, host, visits, firstSeenAt, lastSeenAt,
+ * private: false }` and keeps the visit count and the last visit time the history gave it — the history is the
+ * count, not a visit happening now. An address that already has a row keeps the larger of the two counts, the later
+ * of the two times and the earlier of the two first sightings.
+ *
+ * `counts` is `{ imported, merged, excluded, capped, invalid }`. `excluded` and `invalid` wrote nothing: an excluded
+ * site, an address that is not a link anyone can open again, a count that is not a whole number of visits.
+ * `capped` counts every row a bound drops after the fold — both the retention window and the entry cap, applied in
+ * the order the collector applies them, so the import keeps the set a tidy would keep. The daily cap is not
+ * consulted: it bounds how many new addresses a day of browsing adds, and a one-off import is not a day of browsing.
+ */
+export function importHistory({ entries = [], policy, items = {}, at = Date.now() } = {}) {
+  const counts = { imported: 0, merged: 0, excluded: 0, capped: 0, invalid: 0 };
+  const active = normalizePolicy(policy ?? DEFAULT_POLICY);
+  const history = Array.isArray(entries) ? entries : [];
+
+  if (!active.enabled || history.length === 0) return { items, counts };
+
+  const rows = {};
+  for (const [key, row] of Object.entries(items && typeof items === 'object' ? items : {})) rows[key] = row;
+
+  for (const raw of history) {
+    const entry = raw && typeof raw === 'object' ? raw : null;
+
+    const seen = canonicalUrl(entry?.url);
+    if (seen === null) {
+      counts.invalid += 1;
+      continue;
+    }
+    if (isExcluded(seen, active.exclude)) {
+      counts.excluded += 1;
+      continue;
+    }
+
+    const url = recordedUrl(seen, active.levels);
+    const visits = entry.visitCount;
+    const when = entry.lastVisitTime;
+    /* A row with no visits is not a count, and a row with no time cannot be placed in the retention window. */
+    if (!Number.isInteger(visits) || visits < 1 || typeof when !== 'number' || !Number.isFinite(when)) {
+      counts.invalid += 1;
+      continue;
+    }
+
+    const lastSeenAt = stamp(when);
+    const existing = rows[url];
+
+    if (!existing) {
+      rows[url] = {
+        url,
+        host: new URL(url).hostname,
+        visits,
+        firstSeenAt: lastSeenAt,
+        lastSeenAt,
+        private: false
+      };
+      counts.imported += 1;
+      continue;
+    }
+
+    rows[url] = {
+      ...existing,
+      visits: Math.max(Number.isInteger(existing.visits) ? existing.visits : 0, visits),
+      firstSeenAt:
+        Date.parse(lastSeenAt) < Date.parse(existing.firstSeenAt) ? lastSeenAt : existing.firstSeenAt,
+      lastSeenAt: Date.parse(lastSeenAt) > Date.parse(existing.lastSeenAt) ? lastSeenAt : existing.lastSeenAt,
+      private: existing.private
+    };
+    counts.merged += 1;
+  }
+
+  const folded = Object.values(rows);
+  let kept = folded;
+
+  if (active.retentionDays > 0) {
+    const cutoff = at - active.retentionDays * DAY_MS;
+    kept = kept.filter((item) => Date.parse(item.lastSeenAt) >= cutoff);
+  }
+
+  if (active.maxEntries > 0 && kept.length > active.maxEntries) {
+    const visible = (item) => (Number.isInteger(item.visits) ? item.visits : 0) >= active.minVisits;
+    kept = [...kept]
+      .sort(
+        (left, right) =>
+          Number(visible(right)) - Number(visible(left)) || right.lastSeenAt.localeCompare(left.lastSeenAt)
+      )
+      .slice(0, active.maxEntries);
+  }
+
+  counts.capped = folded.length - kept.length;
+
+  const next = {};
+  for (const item of kept) next[item.url] = item;
+  return { items: next, counts };
+}

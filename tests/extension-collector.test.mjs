@@ -9,7 +9,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCollector } from '../extension/collector-core.js';
+import { createCollector, importHistory } from '../extension/collector-core.js';
+import { DEFAULT_POLICY } from '../extension/policy.js';
 
 function memory() {
   const map = new Map();
@@ -315,4 +316,34 @@ test('the entry cap reaches the store on a tidy, not on every visit', async () =
   assert.equal(await collector.tidy(), 2);
   const rows = Object.entries(await persistent.all()).filter(([key]) => key.startsWith('u:'));
   assert.deepEqual(rows.map(([, row]) => row.host).sort(), ['b.example', 'c.example']);
+});
+
+/* A history import is a fold over values, so every case below hands it entries and rows and reads the answer. */
+
+const AT = Date.parse('2026-06-01T12:00:00.000Z');
+const withPolicy = (patch = {}) => ({ ...DEFAULT_POLICY, enabled: true, ...patch });
+const iso = (at) => new Date(at).toISOString();
+
+test('history entries become rows with the counts they already had', () => {
+  const { items, counts } = importHistory({
+    entries: [
+      { url: 'https://a.example/read', visitCount: 7, lastVisitTime: AT - 60_000 },
+      { url: 'https://b.example/read', visitCount: 1, lastVisitTime: AT }
+    ],
+    policy: withPolicy(),
+    at: AT
+  });
+
+  assert.deepEqual(counts, { imported: 2, merged: 0, excluded: 0, capped: 0, invalid: 0 });
+  assert.deepEqual(Object.keys(items).sort(), ['https://a.example/read', 'https://b.example/read']);
+  assert.deepEqual(items['https://a.example/read'], {
+    url: 'https://a.example/read',
+    host: 'a.example',
+    visits: 7,
+    firstSeenAt: iso(AT - 60_000),
+    lastSeenAt: iso(AT - 60_000),
+    private: false
+  });
+  assert.equal(items['https://b.example/read'].visits, 1, 'the count is the history count, not one visit');
+  assert.equal(items['https://b.example/read'].lastSeenAt, iso(AT));
 });
