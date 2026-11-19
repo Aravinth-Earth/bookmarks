@@ -17,6 +17,8 @@ import {
   BASE_URL
 } from './fixtures.mjs';
 
+import { LOCK_CHANNEL } from '../../public/lock-signal.js';
+
 test('a new vault opens on an empty list and says so', async ({ page }) => {
   const phrase = await createVault(page);
 
@@ -92,4 +94,75 @@ test('a vault that was never created shows the lock screen on a fresh visit', as
   await expect(page.locator('#lock-view')).toBeVisible();
   await expect(page.locator('#app-view')).toBeHidden();
   await page.close();
+});
+
+/**
+ * A lock that arrives from another tab takes the open dialog with it.
+ *
+ * The dialog is appended to `#modal-root`, beside `#app-view`, so hiding the app leaves it painted
+ * over the lock screen with a bookmark's address and name still readable — and the global key
+ * handler stands aside while a dialog is open, so Escape cannot dismiss it either. The other tab
+ * locks through the toolbar button, which is the path a person uses without opening Settings.
+ */
+test('a lock from another tab closes the open bookmark dialog', async ({ page, context }) => {
+  const phrase = await createVault(page);
+  await addBookmark(page, { url: 'https://e2e.local/kept', name: 'Kept' });
+
+  /* The row's own buttons are in the list view; the pills view is for reading. */
+  await page.locator('#view-toggle').click();
+  await expect(page.locator('#view-toggle')).toHaveAttribute('aria-label', /switch to pills view/i);
+  await page.getByRole('button', { name: 'Edit Kept' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Edit bookmark' });
+  await expect(sheet.locator('input[type=text]').first()).toHaveValue('https://e2e.local/kept');
+  await expect(sheet.getByLabel('Name')).toHaveValue('Kept');
+
+  /* A second tab on the same profile, opened with the phrase: the lock it sends reaches the first. */
+  const other = await context.newPage();
+  try {
+    await other.goto(`${BASE_URL}/`);
+    await other.locator('#phrase').fill(phrase);
+    await other.locator('#unlock-button').click();
+    await expect(other.locator('#app-view')).toBeVisible({ timeout: 60_000 });
+
+    await other.locator('#lock-button').click();
+    await expect(other.locator('#lock-view')).toBeVisible({ timeout: 30_000 });
+
+    await expect(page.locator('#lock-view')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('#modal-root')).toBeEmpty();
+    await expect(page.locator('#modal-root')).not.toContainText('e2e.local/kept');
+    await expect(page.locator('#phrase')).toBeFocused();
+  } finally {
+    await other.close();
+  }
+});
+
+/**
+ * The recovery phrase must not outlive the lock either.
+ *
+ * A device with no vault offers the new-vault dialog, which draws the 13 words in `#modal-root`. A
+ * lock from another tab reaches this page as well, and the sheet — and the words in it — have to
+ * go with the app. The signal is sent the way the page sends it: the module's own channel name,
+ * and a message that carries nothing but its type.
+ */
+test('a lock from another tab closes the new-vault dialog and takes the phrase with it', async ({ page, context }) => {
+  await page.locator('#new-vault-button').click();
+  const phrase = (await page.locator('#modal-root .phrase-line').textContent()).trim();
+  expect(phrase.split(' ')).toHaveLength(13);
+
+  const other = await context.newPage();
+  try {
+    await other.goto(`${BASE_URL}/`);
+    await other.evaluate((channel) => {
+      const sender = new BroadcastChannel(channel);
+      sender.postMessage({ type: 'locked' });
+      sender.close();
+    }, LOCK_CHANNEL);
+
+    await expect(page.locator('#lock-view')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('#modal-root')).toBeEmpty();
+    await expect(page.locator('body')).not.toContainText(phrase);
+    await expect(page.locator('#phrase')).toBeFocused();
+  } finally {
+    await other.close();
+  }
 });
