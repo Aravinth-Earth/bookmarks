@@ -304,6 +304,15 @@ line, `account_deleted`. The Worker writes `rate_limited`, `proxy_refused` and `
 `tests/events.test.mjs` reads the lines the way the platform would — by capturing the console —
 and checks both the fields and the absence of anything identifying.
 
+### Alerts
+
+One rule turns those lines into a notification. `alerts/signin-failures.json`, beside
+`wrangler.toml`, counts `signin_failed` and `signin_locked` per account digest over the lockout's
+own fifteen minutes and raises one notification when the count reaches the five wrong proofs that
+lock a source; a rule that keeps arriving stays quiet, and a new set later is a new notification.
+`docs/alerts.md` says what it counts, where it is created in the dashboard and what to do when it
+fires. `npm run check` refuses a deploy where the rule and the events `src/` writes no longer agree.
+
 ## Secrets
 
 `OWNER_ACCOUNT_ID` is the only configured value, and it is optional: it names the account that

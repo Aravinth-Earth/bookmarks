@@ -1,0 +1,12 @@
+{
+  "name": "Sign-in failure burst",
+  "worker": "bookmarks",
+  "dataset": "logs.workersLogs",
+  "events": ["signin_failed", "signin_locked"],
+  "group_by": ["account"],
+  "metric": "count",
+  "threshold": 5,
+  "window_seconds": 900,
+  "every_seconds": 60,
+  "repeat_seconds": 3600
+}
