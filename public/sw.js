@@ -13,7 +13,7 @@
  * The API is never cached: a stale vault read would be worse than no answer at all.
  */
 
-const CACHE_NAME = 'bookmarks-ffdc7609ee';
+const CACHE_NAME = 'bookmarks-a5eb3bb6ee';
 const SHELL = [
   '/',
   '/index.html',

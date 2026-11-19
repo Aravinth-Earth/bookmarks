@@ -38,6 +38,22 @@ export const MAX_ACTIVITY_CHARS = 24_000;
    drops the oldest lines until both fit. tests/activity.test.mjs checks this against the real
    server cap. */
 export const FREE_DOCUMENT_BYTES = 117_000;
+/* The collected rows' pictures live inside the sealed document, so they need a bound of their
+   own against it: how many hosts may keep one, and how many bytes those pictures may take. A
+   downscaled icon is about a kilobyte, and a 32px PNG is never larger than a few; 48 entries and
+   24,000 bytes is a fifth of the document at worst, and the oldest entry falls first. Without a
+   bound, a page that merely looked at a few hundred addresses would fill the vault and make the
+   seal the thing that refuses a save. */
+export const MAX_COLLECTED_ICONS = 48;
+export const MAX_COLLECTED_ICON_BYTES = 24_000;
+/* The attempt index is a courtesy too: one digest and one millisecond stamp per host asked in the
+   season. It grows with every host a sweep touches, without anyone adding a bookmark, so it needs
+   a bound of its own: 512 entries is a few tens of kilobytes, about a fifth of the document at
+   worst, and the oldest stamp falls first. An entry is a fixed digest and a stamp, so a count
+   bounds the bytes; the room left in the document is checked as well. Without a bound, a page
+   that walked a large history would fill the vault with retry stamps and make the seal the thing
+   that refuses a save. */
+export const MAX_ICON_TRIES = 512;
 export const ACTIVITY_CAUSES = Object.freeze([
   'click',
   'open',
@@ -151,6 +167,198 @@ export function createDocument() {
     activity: [],
     prefs: { iconOnly: false }
   };
+}
+
+/* ---- the two icon maps, which are sealed with the document -------------------------------------
+ *
+ * Neither is required: a document written before they existed has neither, and a remote copy that
+ * carries neither must leave the local one as it is. `iconTries` is `{ "<digest>": <ms epoch> }`
+ * — when each host was last asked for an icon — and `collectedIcons` is `{ "<host>": "<data
+ * URI>" }`, the picture a collected row shows. Both live here rather than on the device because a
+ * copy of the browser profile must hold ciphertext, and because a name in the clear side by side
+ * with a browser's history is exactly the record this app exists to avoid.
+ */
+
+function isMap(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** The attempt index from a document that may not have one. */
+export function iconTriesOf(document) {
+  return isMap(document?.iconTries) ? document.iconTries : {};
+}
+
+/** The collected pictures from a document that may not have one. */
+export function collectedIconsOf(document) {
+  return isMap(document?.collectedIcons) ? document.collectedIcons : {};
+}
+
+/**
+ * One collected row's picture, or null.
+ *
+ * Null is the state before the vault is open as well as the state of a host with no picture:
+ * with no document in hand there is nothing to look in, and the row draws its letter. Nothing
+ * waits on this — the lettered tile is what a locked page shows.
+ */
+export function collectedIconFor(document, host) {
+  if (!isMap(document?.collectedIcons)) return null;
+  const icon = document.collectedIcons[String(host ?? '')];
+  return typeof icon === 'string' && icon !== '' ? icon : null;
+}
+
+/**
+ * The document with one host's picture set.
+ *
+ * A host that is not in the map is added last, which is what lets a trim drop the oldest first.
+ * A host already in the map keeps its place: the same picture again is the same document, and a
+ * different one replaces the picture in place, so the order a trim reads as age does not move.
+ */
+export function withCollectedIcon(document, host, icon) {
+  if (typeof host !== 'string' || host === '') return document;
+  if (typeof icon !== 'string' || icon === '') return document;
+  const collectedIcons = collectedIconsOf(document);
+  if (collectedIcons[host] === icon) return document;
+  return { ...document, collectedIcons: { ...collectedIcons, [host]: icon } };
+}
+
+/**
+ * Keep the collected pictures inside their own budget: a count, a byte size, and the room left in
+ * the document, oldest first.
+ *
+ * The pictures are the part of the document that can grow without anyone deciding to add a
+ * bookmark, so they are bounded before the seal rather than left to make the seal fail. Entries
+ * that are not a non-empty string are dropped as well, so a document from another build cannot
+ * hand the renderer something that is not a picture.
+ *
+ * The count and the byte size are the map's own caps; `maxDocumentBytes` is the free copy's size,
+ * which a library already near the cap can exhaust on its own. A vault that filled up on pictures
+ * loses the oldest of them, so the seal is never refused for something the log cannot give back.
+ *
+ * @returns the same document when nothing needed dropping
+ */
+export function fitCollectedIcons(
+  document,
+  {
+    maxEntries = MAX_COLLECTED_ICONS,
+    maxBytes = MAX_COLLECTED_ICON_BYTES,
+    maxDocumentBytes = FREE_DOCUMENT_BYTES
+  } = {}
+) {
+  const collectedIcons = collectedIconsOf(document);
+  const hosts = Object.keys(collectedIcons);
+  const usable = hosts.filter((host) => typeof collectedIcons[host] === 'string' && collectedIcons[host] !== '');
+
+  let bytes = 0;
+  for (const host of usable) bytes += entryBytes(host, collectedIcons[host]);
+
+  let first = 0;
+  while (first < usable.length && (usable.length - first > maxEntries || bytes > maxBytes)) {
+    bytes -= entryBytes(usable[first], collectedIcons[usable[first]]);
+    first += 1;
+  }
+
+  const withPictures = (from) => {
+    const kept = {};
+    for (const host of usable.slice(from)) kept[host] = collectedIcons[host];
+    return { ...document, collectedIcons: kept };
+  };
+
+  let fitted = withPictures(first);
+  while (first < usable.length && documentBytes(fitted) > maxDocumentBytes) {
+    first += 1;
+    fitted = withPictures(first);
+  }
+
+  if (first === 0 && usable.length === hosts.length) return document;
+  return fitted;
+}
+
+/** One map entry as the JSON will carry it, quotes, colon and comma included. */
+function entryBytes(key, value) {
+  return documentBytes({ [key]: value });
+}
+
+/**
+ * Keep the attempt index inside its own budget: a count, and the room left in the document,
+ * oldest stamp first.
+ *
+ * The index is a digest and a millisecond stamp per host, so every entry has the same shape and a
+ * count bounds the bytes. It grows on its own while a sweep walks a library and the rows it
+ * collected, so it is bounded before the seal rather than left to make the seal fail. Entries
+ * whose value is not a finite stamp are dropped, so a document from another build cannot hand the
+ * renderer a key it cannot read.
+ *
+ * The count is the map's own cap; `maxDocumentBytes` is the free copy's size, which a library
+ * already near the cap can exhaust on its own. A vault that filled up on attempts loses the
+ * oldest of them, so the seal is never refused for something that is only a retry courtesy.
+ *
+ * @returns the same document when nothing needed dropping
+ */
+export function fitIconTries(
+  document,
+  { maxEntries = MAX_ICON_TRIES, maxDocumentBytes = FREE_DOCUMENT_BYTES } = {}
+) {
+  const iconTries = iconTriesOf(document);
+  const keys = Object.keys(iconTries);
+  const usable = keys.filter((key) => Number.isFinite(Number(iconTries[key])));
+  /* The stamp is the age, not the insertion order: a merge unions two maps, so the order the keys
+     arrived in says nothing about which host was asked first. */
+  const byAge = [...usable].sort(
+    (left, right) => Number(iconTries[left]) - Number(iconTries[right]) || left.localeCompare(right)
+  );
+
+  let first = 0;
+  while (byAge.length - first > maxEntries) first += 1;
+
+  const withAttempts = (from) => {
+    const kept = {};
+    for (const key of byAge.slice(from)) kept[key] = Number(iconTries[key]);
+    return { ...document, iconTries: kept };
+  };
+
+  let fitted = withAttempts(first);
+  while (first < byAge.length && documentBytes(fitted) > maxDocumentBytes) {
+    first += 1;
+    fitted = withAttempts(first);
+  }
+
+  if (first === 0 && usable.length === keys.length) return document;
+  return fitted;
+}
+
+/**
+ * Both attempt maps, unioned.
+ *
+ * A merge may not delete what one device knows and the other does not: the newer timestamp wins
+ * per digest, and a digest only one side carries is kept. A side with no map contributes nothing,
+ * which is what leaves the other side's map untouched when a remote copy carries neither key.
+ */
+export function mergeIconTries(local, remote) {
+  const kept = { ...iconTriesOf(local) };
+  for (const [key, at] of Object.entries(iconTriesOf(remote))) {
+    const stamp = Number(at);
+    if (!Number.isFinite(stamp)) continue;
+    const seen = Number(kept[key]);
+    if (!Number.isFinite(seen) || stamp > seen) kept[key] = stamp;
+  }
+  return kept;
+}
+
+/**
+ * Both collected-picture maps, unioned.
+ *
+ * A host the local side already has keeps the picture it has, whatever the remote side carries:
+ * the two are the same site's icon, and holding the local copy keeps the insertion order a trim
+ * reads as age. A host only the remote side has is added after the ones already here, for the
+ * same reason.
+ */
+export function mergeCollectedIcons(local, remote) {
+  const kept = { ...collectedIconsOf(local) };
+  for (const [host, icon] of Object.entries(collectedIconsOf(remote))) {
+    if (typeof icon !== 'string' || icon === '') continue;
+    if (!(host in kept)) kept[host] = icon;
+  }
+  return kept;
 }
 
 function findIndex(document, id) {
@@ -447,6 +655,10 @@ function documentBytes(value) {
 /**
  * Drop the oldest lines until the whole document fits the free hosted copy.
  *
+ * The icon maps are trimmed to their own budgets first: the attempts lose their oldest stamps and
+ * the pictures their oldest hosts, so a vault that filled up on icons loses icons rather than the
+ * log, and the size measured below is the size that will be sealed.
+ *
  * The log budget above bounds the log on its own; this bounds it against everything else in the
  * vault. A library already near the cap leaves little room, and a log is the part that can go —
  * bookmarks are never cut. The newest line is kept as long as it fits at all; a document whose
@@ -454,18 +666,20 @@ function documentBytes(value) {
  * something the log did not cause.
  */
 export function fitActivity(document, { maxBytes = FREE_DOCUMENT_BYTES } = {}) {
-  const activity = Array.isArray(document.activity) ? document.activity : [];
-  if (activity.length === 0) return document;
+  const attempts = fitIconTries(document, { maxDocumentBytes: maxBytes });
+  const fitted = fitCollectedIcons(attempts, { maxDocumentBytes: maxBytes });
+  const activity = Array.isArray(fitted.activity) ? fitted.activity : [];
+  if (activity.length === 0) return fitted;
 
-  let bytes = documentBytes(document);
-  if (bytes <= maxBytes) return document;
+  let bytes = documentBytes(fitted);
+  if (bytes <= maxBytes) return fitted;
 
   const kept = [...activity];
   while (kept.length > 0 && bytes > maxBytes) {
     /* One event plus the comma that separated it from the next; the oldest is last. */
     bytes -= documentBytes(kept.pop()) + 1;
   }
-  return { ...document, activity: kept };
+  return { ...fitted, activity: kept };
 }
 
 /** Build one event for the log, refusing a shape that could not be read back. */
@@ -827,19 +1041,29 @@ export function mergeDocuments(local, remote, now = Date.now, options = {}) {
     );
   }
 
-  return {
-    document: fitActivity({
-      schema: SCHEMA,
-      bookmarks,
-      tombstones: keptTombstones,
-      activity: normaliseActivity(
-        [...events, ...(local.activity ?? []), ...(remote.activity ?? [])],
-        now
-      ),
-      prefs: newerPrefs(local.prefs, remote.prefs)
-    }),
-    statistics
+  /* Neither icon map is deleted by a merge. A remote copy that carries neither leaves the local
+     maps exactly as they are; one that carries either is unioned in, so the device that asked a
+     host last, or the one that has the picture, still has it after converging. A key is only
+     written when the union is not empty, which keeps a document that never had these fields the
+     shape it was written with. */
+  const document = {
+    schema: SCHEMA,
+    bookmarks,
+    tombstones: keptTombstones,
+    activity: normaliseActivity(
+      [...events, ...(local.activity ?? []), ...(remote.activity ?? [])],
+      now
+    ),
+    prefs: newerPrefs(local.prefs, remote.prefs)
   };
+
+  const iconTries = mergeIconTries(local, remote);
+  if (Object.keys(iconTries).length > 0) document.iconTries = iconTries;
+
+  const collectedIcons = mergeCollectedIcons(local, remote);
+  if (Object.keys(collectedIcons).length > 0) document.collectedIcons = collectedIcons;
+
+  return { document: fitActivity(document), statistics };
 }
 
 function mergeOne(left, right) {

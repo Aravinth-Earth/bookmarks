@@ -13,10 +13,12 @@ import {
   addBookmark,
   appendActivity,
   changedSlot,
+  collectedIconFor,
   createDocument,
   deleteBookmark,
   filterBookmarks,
   fitActivity,
+  fitIconTries,
   mergeDocuments,
   normaliseActivity,
   recordClick,
@@ -26,7 +28,8 @@ import {
   togglePin,
   updateBookmark,
   useCount,
-  useSplit
+  useSplit,
+  withCollectedIcon
 } from './bookmarks.js';
 import {
   deriveAccount,
@@ -38,12 +41,11 @@ import {
 import { CLIPBOARD_CLEAR_MS, clearPhraseField, overwriteClipboard } from './hygiene.js';
 import { createLockSignal } from './lock-signal.js';
 import {
-  COLLECTED_ICON_KEY,
-  ICON_TRIES_KEY,
   SIZE_KEY,
   VIEW_KEY,
   clearDeviceStorage,
   deviceId,
+  forgetLegacyIconMaps,
   hostKey,
   pruneIconTries
 } from './device-store.js';
@@ -1049,9 +1051,10 @@ function deleteAccountSheet() {
  *
  * The state goes first, before the first await: an edit that is already sealing checks
  * `state.key`, and must not write one more snapshot on its way out. `store.clear()` removes the
- * sealed document, its history and the remembered key in one pass, so the activity log that
- * lives inside the document goes with it. Local settings are removed too — the icon index names
- * sites in the clear, and "nothing is left" has to include it.
+ * sealed document, its history and the remembered key in one pass, so the activity log and the two
+ * icon maps — which live inside the document — go with it. The page's own settings are removed
+ * too, including the key names earlier versions kept icon maps under, so "nothing is left" covers
+ * a device that has not been opened since the upgrade.
  */
 async function forgetDeletedVault(message) {
   clearTimeout(syncTimer);
@@ -1545,6 +1548,12 @@ function enter({
   state.key = key;
   state.version = version;
   state.sealed = sealed;
+  /* The two icon maps used to sit on this device in the clear, under their own localStorage keys.
+     Both live inside the document now, so the old keys are deleted here — as soon as a vault is
+     open and the document is in hand — and their contents are not copied across first: a clear
+     map carried into the seal would keep the leak alive on every profile copied before this ran.
+     Nothing waits on the sweep, and a storage refusal is simply tried again next unlock. */
+  forgetLegacyIconMaps();
   /* A vault written before the log existed has no `activity`, and one written by a newer build
      may carry a line this build cannot read: both are read into the shape the page draws. */
   const { document: safeDocument, dropped } = sanitizeDocument(vaultDocument);
@@ -2756,23 +2765,17 @@ function hostOf(url) {
   }
 }
 
-/* Icons for the collected rows come from the same server endpoint the vault's own icons use, and are kept in this
-   device's `localStorage` rather than inside the sealed vault: they describe a page the vault does not hold, so
-   sealing them would mean the vault grows every time an address is merely looked at. It is one of
-   device-store.js's own keys, so "Clear this device" removes it with the rest. */
+/* Icons for the collected rows come from the same server endpoint the vault's own icons use, and
+   are kept inside the sealed document with everything else: they describe a page the vault does not
+   hold, but a list of sites looked at is exactly what this app exists to keep out of a copy of the
+   browser profile, so they are sealed with it. `fitCollectedIcons` in bookmarks.js caps how many
+   there may be and how many bytes they may take, so a vault full of them is never the reason a save
+   is refused. `collectedIconTries` below is only this page's record of which requests are in flight;
+   it is never written anywhere. */
 const collectedIconTries = new Set();
 
-function collectedIconCache() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(COLLECTED_ICON_KEY) ?? '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
 function collectedIcon(host) {
-  return collectedIconCache()[host] ?? null;
+  return collectedIconFor(state.document, host);
 }
 
 /**
@@ -2784,6 +2787,9 @@ function collectedIcon(host) {
  * tile until the page was reloaded.
  */
 async function loadCollectedIcon(host, { attempt = 0 } = {}) {
+  /* Nothing to look in before the vault is open: the row keeps its letter, and no request is
+     opened to fill a gap that only the sealed document can fill. */
+  if (!state.document) return;
   if (host === '' || collectedIconTries.has(host)) return;
   collectedIconTries.add(host);
 
@@ -2808,14 +2814,20 @@ async function loadCollectedIcon(host, { attempt = 0 } = {}) {
 
   const icon = outcome.value;
 
-  try {
-    const cache = collectedIconCache();
-    cache[host] = icon;
-    localStorage.setItem(COLLECTED_ICON_KEY, JSON.stringify(cache));
-  } catch {
-    /* A cache that cannot be written still leaves the lettered tile. */
+  /* The request may outlive the vault: a lock can arrive while it is in flight. There is no
+     document to put the picture in then, and `withCollectedIcon` would build a partial one that
+     holds the map and nothing else. The row keeps its letter, the mark goes, and the next open
+     asks again. */
+  if (!state.document) {
+    collectedIconTries.delete(host);
     return;
   }
+
+  /* The picture goes into the document and the normal save seals it, so the map is flushed with
+     the vault rather than written anywhere in the clear. `saveNow` coalesces: a row that asks
+     while a seal is running marks the document dirty instead of opening a second one. */
+  state.document = withCollectedIcon(state.document, host, icon);
+  void saveNow();
 
   for (const row of collectedList.querySelectorAll(`[data-host="${CSS.escape(host)}"] .tile`)) {
     row.replaceChildren(el('img', { src: icon, alt: '' }));
@@ -3336,35 +3348,33 @@ async function fetchAndStoreIcon(id, hostname) {
   saveNow();
 }
 
-/* When each host was last asked for an icon. Kept on the device rather than in the vault: it is
-   a local courtesy about retries, not something worth syncing or sealing. It is keyed by a digest
-   of the hostname so the stored index names no site in the clear. */
+/* When each host was last asked for an icon. Kept inside the sealed document, under `iconTries`:
+   it is a local courtesy about retries rather than something to show on another device, but a
+   profile copy has to hold ciphertext, so it is sealed with everything else. It is keyed by a
+   digest of the hostname, which keeps the map small and one shape; the digest is not what hides
+   the names, the seal is. */
 function readIconTries() {
-  try {
-    const raw = localStorage.getItem(ICON_TRIES_KEY);
-    const value = raw ? JSON.parse(raw) : null;
-    if (!value || typeof value !== 'object') return {};
-    const { kept, dropped } = pruneIconTries(value);
-    /* A map written before the digest existed, or one holding a malformed entry, is rewritten
-       without it rather than left in place until the season turns over. */
-    if (dropped > 0) writeIconTries(kept);
-    return kept;
-  } catch {
-    return {};
-  }
+  if (!state.document) return {};
+  const { kept, dropped } = pruneIconTries(state.document.iconTries);
+  /* A map holding a name from an earlier version, a malformed entry, or one past the season is
+     rewritten without it rather than kept until the next save. */
+  if (dropped > 0) writeIconTries(kept);
+  return kept;
 }
 
 function writeIconTries(tries) {
-  try {
-    /* The map is one entry per host ever asked; anything older than a season is noise. */
-    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
-    const kept = Object.fromEntries(
-      Object.entries(tries).filter(([, at]) => Number.isFinite(Number(at)) && Number(at) >= cutoff)
-    );
-    localStorage.setItem(ICON_TRIES_KEY, JSON.stringify(kept));
-  } catch {
-    /* Storage refused; the next launch simply asks again. */
-  }
+  if (!state.document) return;
+  /* One entry per host asked in the season; anything older is noise inside a document that is
+     sealed and pushed. The document is the map's only home now, and `saveNow` is what seals it:
+     a sweep writes once per batch, and the save coalesces the batches into one seal. The count
+     cap is applied here as well as at the seal, so a long sweep never builds a map the save would
+     then have to cut. */
+  const { kept } = pruneIconTries(tries);
+  state.document = fitIconTries(
+    { ...state.document, iconTries: kept },
+    { maxDocumentBytes: Number.POSITIVE_INFINITY }
+  );
+  void saveNow();
 }
 
 async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {}) {

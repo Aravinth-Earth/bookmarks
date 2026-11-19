@@ -2,12 +2,15 @@
  * The page's own bookkeeping on this device.
  *
  * The page needs a few things before any phrase is entered: how the list looks, which theme is
- * chosen, when each site was last asked for an icon, and the icons its collected links have. None
- * of it is vault data, so none of it is sealed. Two of these can name a site: the retry index,
- * which is keyed by a digest of the hostname for that reason, and the collected icons, which are
- * keyed by host because a row the vault does not hold has no other name to look itself up by.
- * Every key the page writes is listed here, so "Clear this device" can remove all of them rather
- * than the vault alone.
+ * chosen, and the name this browser profile counts under. None of it is vault data, so none of it
+ * is sealed. The two icon maps are no longer on this list: when each site was last asked for an
+ * icon, and the pictures the collected rows show, both live inside the sealed document. A copy of
+ * this browser profile therefore holds ciphertext for them and names no site.
+ *
+ * The two old key names are still listed, because a device upgraded from an earlier version can
+ * hold one until the first unlock deletes it, and "Clear this device" has to be able to reach a
+ * leftover. Every key the page writes is listed here, so a clear removes all of them rather than
+ * the vault alone.
  */
 
 export const ICON_TRIES_KEY = 'bookmarks-icon-tries';
@@ -18,12 +21,12 @@ export const DEVICE_ID_KEY = 'bookmarks-device-id';
 export const COLLECTED_ICON_KEY = 'collected-icons';
 
 /**
- * Every localStorage key the page writes. Clearing a device removes each one.
+ * Every localStorage key the page writes, and every key it used to write.
  *
- * The collected icons belong on this list even though the vault does not: they are a copy of what
- * a proxied response carried, and a copy no clear can reach is exactly what the icon route's
- * `no-store` exists to prevent. The key name is the one earlier versions wrote, so a device that
- * already has icons keeps them without a migration.
+ * The two icon keys are the names earlier versions wrote. Nothing reads them now: a clear map is
+ * not migrated into the sealed document, because carrying it across would keep the leak for every
+ * profile copied before this version ran. They stay on the list so a leftover is removed with the
+ * rest, and `forgetLegacyIconMaps` deletes both when a vault is opened.
  */
 export const DEVICE_KEYS = [ICON_TRIES_KEY, VIEW_KEY, SIZE_KEY, THEME_KEY, COLLECTED_ICON_KEY];
 
@@ -35,7 +38,7 @@ export const DEVICE_KEYS = [ICON_TRIES_KEY, VIEW_KEY, SIZE_KEY, THEME_KEY, COLLE
  *
  * It is deliberately not in DEVICE_KEYS: a name that a wipe throws away is a name the next unlock invents again, and
  * the counts this device already put in the vault would be counted a second time under the new name. Clearing a
- * device removes what names a place (the icon index) and leaves eight random bytes that name nothing.
+ * device removes the sealed vault and this page's settings, and leaves eight random bytes that name nothing.
  */
 export function deviceId(storage = globalThis.localStorage) {
   try {
@@ -55,8 +58,12 @@ export function deviceId(storage = globalThis.localStorage) {
 const KEY_SHAPE = /^[0-9a-f]{32}$/;
 
 /**
- * A stable digest of a hostname. The retry index is keyed by this rather than by the name, so the
- * record of which sites were asked names no site in the clear.
+ * A stable digest of a hostname, so the retry index stays small and keeps one shape across launches.
+ *
+ * The digest is not what protects the map — the map is sealed inside the vault now, and a copy of
+ * the profile holds ciphertext — but it is still fixed and short, and one digest per host is both.
+ * It is also a dictionary lookup for anyone who does hold the bytes: the input is a hostname, so
+ * a guess is cheap. That is a reason the bytes are sealed, not a reason to keep them here.
  */
 export async function hostKey(hostname) {
   const bytes = new TextEncoder().encode(`bookmarks-icon-host:${String(hostname).toLowerCase()}`);
@@ -64,20 +71,48 @@ export async function hostKey(hostname) {
   return Array.from(new Uint8Array(digest).slice(0, 16), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+/* The retry index is a courtesy, not a record: a host answered in the last season and no answer
+   changes after that, so an entry older than the window is noise inside a document that is
+   sealed and pushed. */
+export const ICON_TRIES_DAYS = 90;
+const ICON_TRIES_MS = ICON_TRIES_DAYS * 24 * 60 * 60 * 1000;
+
 /**
- * Keeps the entries that are a digest with a usable timestamp. Anything else — a name from an
- * earlier version of the page, a value that is not a number — is dropped, so a stored map that
- * predates the digest does not survive its first read.
+ * Keeps the entries that are a digest with a usable timestamp from the last season. Anything
+ * else — a name from an earlier version of the page, a value that is not a number, an entry
+ * older than the window — is dropped, so a map that predates the digest does not survive its
+ * first read.
+ *
+ * `now` and `maxAgeMs` are parameters so a caller, or a test, can ask about a particular moment
+ * rather than about today.
  */
-export function pruneIconTries(entries) {
+export function pruneIconTries(entries, { now = Date.now(), maxAgeMs = ICON_TRIES_MS } = {}) {
   const kept = {};
   let dropped = 0;
   for (const [key, at] of Object.entries(entries && typeof entries === 'object' ? entries : {})) {
     const stamp = Number(at);
-    if (KEY_SHAPE.test(key) && Number.isFinite(stamp)) kept[key] = stamp;
+    if (KEY_SHAPE.test(key) && Number.isFinite(stamp) && stamp >= now - maxAgeMs) kept[key] = stamp;
     else dropped += 1;
   }
   return { kept, dropped };
+}
+
+/**
+ * Delete the two icon maps earlier versions kept on this device.
+ *
+ * Called the moment a vault is opened, before either map is read. Nothing is read out of them
+ * first: their contents are exactly the clear map this change exists to stop copying around, and
+ * carrying them into the sealed document would leave that map readable in every profile copied
+ * before the sweep ran.
+ */
+export function forgetLegacyIconMaps(storage = globalThis.localStorage) {
+  for (const key of [ICON_TRIES_KEY, COLLECTED_ICON_KEY]) {
+    try {
+      storage.removeItem(key);
+    } catch {
+      /* Storage refused; the key stays on the clear list, and the next open tries again. */
+    }
+  }
 }
 
 /** Removes every key the page writes from this device. */
