@@ -1295,6 +1295,12 @@ async function handleApi(request, env, url) {
     const forward = rest.slice(slash);
     if (forward.startsWith('/admin-')) return json({ error: 'not_found' }, 404);
 
+    /* Ending a session is the one forwarded write a page elsewhere can make a browser send with
+       a plain form. The object answers only a POST so no URL alone can cause it; this is what
+       makes that POST have to come from this app. It is checked before the Registry is asked and
+       before the object is reached, so a refused request costs neither. */
+    if (forward === '/logout' && !fromThisOrigin(request, url)) return foreignOrigin();
+
     /* A body on a verb whose method is defined as body-less is the caller's mistake, not a fault
        of this server: no read in this API takes one, so nothing that arrives with it is meant for
        any route here. Named as such rather than forwarded, because forwarding it fails inside the
@@ -1397,6 +1403,34 @@ export default {
   }
 };
 
-/* The classes the bindings in wrangler.toml name. */
+/**
+ * Whether a request came from this app's own origin.
+ *
+ * A browser states `Origin` on every POST it sends, including one that a form on another page
+ * caused: that form is a simple request, so the browser sends it without asking this server
+ * first, and the stated origin is the only part of it the page elsewhere cannot choose. A
+ * request with no `Origin` falls back to `Referer`, which browsers send for the same kinds of
+ * navigation. One with neither came from a script or a client rather than a page, and is left
+ * to the session token it must present anyway.
+ *
+ * An origin that is present but unreadable — `null` from a sandboxed frame, or a malformed
+ * `Referer` — is not this app's, so it is refused rather than treated as absent.
+ */
+function fromThisOrigin(request, url) {
+  const stated = request.headers.get('origin') ?? request.headers.get('referer');
+  if (stated === null) return true;
+  try {
+    return new URL(stated).origin === url.origin;
+  } catch {
+    return false;
+  }
+}
+
+/** The refusal a state-changing request from somewhere else is owed. */
+function foreignOrigin() {
+  return json({ error: 'forbidden_origin' }, 403);
+}
+
+/** The classes the bindings in wrangler.toml name. */
 export { Vault } from './vault.js';
 export { Registry } from './registry.js';
