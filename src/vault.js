@@ -1180,9 +1180,6 @@ export class Vault {
       return json({ error: 'no_account' }, 404);
     }
 
-    const limit = this.capChars(live);
-    if (ct.length > limit) return json({ error: 'quota', limit }, 413);
-
     const current = (await this.storage.get('vault')) ?? { version: 0 };
     if (baseVersion !== current.version) {
       /* The current blob comes back so the caller can merge and retry in one round trip. */
@@ -1198,6 +1195,15 @@ export class Vault {
 
     const version = current.version + 1;
     const updatedAt = this.now();
+
+    /* The cap covers what the object will hold once this write lands, not the incoming blob
+       alone: the blob it replaces moves into history, and the older versions pruning keeps stay
+       beside it. The history set is read here — after the version check, before anything is
+       written — so the figure is the one this write would actually produce. */
+    const limit = this.capChars(live);
+    if ((await this.storedCharsAfter(current, ct)) > limit) {
+      return json({ error: 'quota', limit }, 413);
+    }
 
     if (current.version > 0) {
       await this.storage.put(`history:${current.version}`, current);
@@ -1470,6 +1476,13 @@ export class Vault {
     if (!account) return json({ error: 'no_account' }, 404);
 
     const vault = (await this.storage.get('vault')) ?? { version: 0 };
+    const ctChars = typeof vault.ct === 'string' ? vault.ct.length : 0;
+    /* The current blob is only one of the copies this object holds; the history beside it is
+       stored for the same account and counts against the same cap. */
+    const historyChars = [...(await this.storage.list({ prefix: 'history:' }))].reduce(
+      (total, [, entry]) => total + (typeof entry?.ct === 'string' ? entry.ct.length : 0),
+      0
+    );
     const now = this.now();
     /* Only live places are counted, so an expired session that has not been pruned yet does
        not inflate the number an operator reads. */
@@ -1485,7 +1498,9 @@ export class Vault {
       lastSeenAt: account.lastSeenAt ?? null,
       paidUntil: account.paidUntil ?? null,
       vaultVersion: vault.version ?? 0,
-      ctChars: typeof vault.ct === 'string' ? vault.ct.length : 0,
+      ctChars,
+      storedChars: ctChars + historyChars,
+      historyChars,
       updatedAt: vault.updatedAt ?? null,
       capChars: this.capChars(account),
       sessions,
@@ -1503,6 +1518,31 @@ export class Vault {
       return Math.max(0, units) * UNIT_CT_CHARS;
     }
     return FREE_MAX_CT_CHARS;
+  }
+
+  /**
+   * The characters the object holds once a write of `ct` over `current` lands: the incoming
+   * ciphertext, the blob it replaces — which becomes the newest history entry — and the older
+   * versions `pruneHistory` keeps beside them. The cap is a size, so it has to cover all of
+   * them; counting only the incoming blob would let one account hold several times its share.
+   */
+  async storedCharsAfter(current, ct) {
+    const entries = [...(await this.storage.list({ prefix: 'history:' }))]
+      .map(([key, entry]) => ({ version: Number(key.slice('history:'.length)), ct: entry?.ct }))
+      .filter((entry) => typeof entry.ct === 'string');
+
+    /* The version check has already matched the stored blob, so the entry it becomes is newer
+       than every version in history and sorts first. */
+    if (current.version > 0 && typeof current.ct === 'string') {
+      entries.push({ version: current.version, ct: current.ct });
+    }
+    entries.sort((left, right) => right.version - left.version);
+
+    /* The same set the write leaves behind: the newest HISTORY_LIMIT entries survive pruning. */
+    return (
+      ct.length +
+      entries.slice(0, HISTORY_LIMIT).reduce((total, entry) => total + entry.ct.length, 0)
+    );
   }
 
   /**
