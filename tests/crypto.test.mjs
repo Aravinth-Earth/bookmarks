@@ -15,6 +15,8 @@ import assert from 'node:assert/strict';
 
 import {
   ACCOUNT_ID_LENGTH,
+  ACCOUNT_ID_V2_PREFIX,
+  COMMITTED_ID_LENGTH,
   DOMAIN_PREFIX,
   IV_BYTES,
   KEY_BITS,
@@ -25,6 +27,7 @@ import {
   VAULT_AD_VERSION,
   WORD_COUNT,
   accountIdFromPhrase,
+  accountIdFromProofKey,
   authKeyFromBytes,
   deriveAccount,
   deriveAuthSecret,
@@ -284,6 +287,44 @@ test('a phrase derives one Ed25519 proof key, and its public half is determinist
   assert.equal(again.authSecret, first.authSecret);
   assert.equal(again.authSecret, await deriveAuthSecret(PHRASE_A));
   assert.equal(again.accountId, await accountIdFromPhrase(PHRASE_A));
+});
+
+test('the server id commits to the public key, and the account id does not move', async () => {
+  const first = await deriveAccount(PHRASE_A);
+  const again = await deriveAccount(PHRASE_A);
+  const other = await deriveAccount(PHRASE_B);
+
+  /* One SHA-256, lowercase hex, and the length the constant names. */
+  assert.match(first.serverId, /^[0-9a-f]{64}$/);
+  assert.equal(first.serverId.length, COMMITTED_ID_LENGTH);
+  assert.equal(first.serverId, await accountIdFromProofKey(first.proofKeyText));
+  assert.equal(again.serverId, first.serverId, 'the same phrase commits to the same id');
+  assert.notEqual(other.serverId, first.serverId, 'another key is a different id');
+
+  /* The prefix is this file's own and deliberately outside the derivation family. */
+  assert.equal(ACCOUNT_ID_V2_PREFIX, 'bookmarks-account-v2');
+  assert.equal(ACCOUNT_ID_V2_PREFIX.startsWith(DOMAIN_PREFIX), false, 'not a derivation label');
+
+  /* The construction, restated independently of the module: prefix, raw key bytes, SHA-256. */
+  const { createHash } = await import('node:crypto');
+  const expected = createHash('sha256')
+    .update(
+      Buffer.concat([
+        Buffer.from(ACCOUNT_ID_V2_PREFIX),
+        Buffer.from(first.proofKeyText, 'base64url')
+      ])
+    )
+    .digest('hex');
+  assert.equal(first.serverId, expected);
+
+  /* Additive: the account id is still the salt, the associated data and the store key. */
+  assert.match(first.accountId, BASE64URL_22);
+  assert.equal(first.accountId, await accountIdFromPhrase(PHRASE_A));
+  assert.notEqual(first.serverId, first.accountId);
+
+  /* The helper refuses what is not a 32-byte key rather than hashing it. */
+  await assert.rejects(() => accountIdFromProofKey('A'.repeat(22)), /32 bytes/);
+  await assert.rejects(() => accountIdFromProofKey('not base64url!'), /base64url/);
 });
 
 test('an Ed25519 proof verifies under the public text and names the account and nonce', async () => {

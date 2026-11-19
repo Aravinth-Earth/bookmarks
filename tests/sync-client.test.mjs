@@ -125,6 +125,41 @@ test('registering asks for a nonce, proves the secret and resends', async () => 
   );
 });
 
+test('a creation from a proof key sends the public key and never a secret', async () => {
+  const calls = [];
+  const fetch = async (_url, options = {}) => {
+    const body = JSON.parse(options.body);
+    calls.push(body);
+    const headers = { 'content-type': 'application/json' };
+    if (body.proof === undefined) {
+      return new Response(
+        JSON.stringify({ error: 'proof_required', nonce: 'nonce-value', expiresAt: 2_000 }),
+        { status: 428, headers }
+      );
+    }
+    return new Response(JSON.stringify({ ok: true, created: true }), { status: 201, headers });
+  };
+
+  const result = await new SyncClient({ fetch }).register(ACCOUNT.serverId, {
+    proofKey: ACCOUNT.proofKey,
+    proofKeyText: ACCOUNT.proofKeyText
+  });
+
+  assert.deepEqual(result, { created: true });
+  assert.equal(calls.length, 2);
+  for (const body of calls) {
+    assert.equal(body.accountId, ACCOUNT.serverId);
+    assert.equal(body.proofKey, ACCOUNT.proofKeyText, 'both requests carry the public key');
+    assert.equal('authSecret' in body, false, 'a secret never rides with a key');
+  }
+  assert.equal(
+    calls[1].proof,
+    await proveAuth(ACCOUNT.proofKey, ACCOUNT.serverId, 'nonce-value'),
+    'the proof is an Ed25519 signature over the committed id'
+  );
+  assert.match(calls[1].proof, /^[A-Za-z0-9_-]{86}$/);
+});
+
 test('a creation of an account that already exists is success, not a second account', async () => {
   let at = 0;
   const fetch = async () => {

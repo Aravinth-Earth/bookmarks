@@ -288,6 +288,35 @@ test('an account path with a malformed id is refused before dispatch', async () 
   }
 });
 
+/* A sixty-four character id is the one a public key commits to, and it names an object exactly like
+   the twenty-two character id does. Neither shape is special-cased at the edge. */
+test('a committed id is routed to its object, and a malformed one still is not', async () => {
+  const committed = '0123456789abcdef'.repeat(4);
+
+  const { env, calls } = harness({ doStatus: 200, doBody: { nonce: 'abc' } });
+  const response = await worker.fetch(api(`/a/${committed}/challenge`, { method: 'POST' }), env);
+
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, committed, 'the object is named by the committed id');
+  assert.equal(calls[0].path, '/challenge');
+
+  /* The legacy shape is untouched. */
+  const legacy = harness({ doStatus: 200, doBody: { nonce: 'abc' } });
+  const legacyResponse = await worker.fetch(api(`/a/${ACCOUNT}/challenge`, { method: 'POST' }), legacy.env);
+  assert.equal(legacyResponse.status, 200);
+  assert.equal(legacy.calls[0].name, ACCOUNT);
+
+  /* Sixty-four characters is not enough: the id has to be lowercase hex. */
+  for (const path of [`/a/${'A'.repeat(64)}/challenge`, `/a/${'a'.repeat(63)}!/challenge`]) {
+    const refused = harness();
+    const answer = await worker.fetch(api(path), refused.env);
+    assert.equal(answer.status, 400, path);
+    assert.deepEqual(await answer.json(), { error: 'bad_account' });
+    assert.equal(refused.calls.length, 0, path);
+  }
+});
+
 test('an unknown API path is a 404', async () => {
   const response = await worker.fetch(api('/nothing'), harness().env);
   assert.equal(response.status, 404);

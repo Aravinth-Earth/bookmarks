@@ -171,11 +171,11 @@ async function provision(harness, authSecret = ACCOUNT.authSecret, invite) {
   );
 }
 
-/** The same flow with the phrase's public proof key instead of its secret. */
+/** The same flow with the phrase's public proof key, under the id that key commits to. */
 async function blindWithKey(harness, proofKey = ACCOUNT.proofKeyText) {
   return read(
     await harness.vault.fetch(
-      request('/account', { body: { accountId: ACCOUNT.accountId, proofKey } })
+      request('/account', { body: { accountId: ACCOUNT.serverId, proofKey } })
     )
   );
 }
@@ -184,11 +184,11 @@ async function provisionWithKey(harness) {
   const challenge = await blindWithKey(harness);
   if (challenge.status !== 428) return challenge;
 
-  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.accountId, challenge.body.nonce);
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.serverId, challenge.body.nonce);
   return read(
     await harness.vault.fetch(
       request('/account', {
-        body: { accountId: ACCOUNT.accountId, proofKey: ACCOUNT.proofKeyText, proof }
+        body: { accountId: ACCOUNT.serverId, proofKey: ACCOUNT.proofKeyText, proof }
       })
     )
   );
@@ -197,7 +197,7 @@ async function provisionWithKey(harness) {
 async function loginWithKey(harness, client) {
   const challenge = await read(await harness.vault.fetch(request('/challenge')));
   assert.equal(challenge.status, 200);
-  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.accountId, challenge.body.nonce);
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.serverId, challenge.body.nonce);
   return read(await harness.vault.fetch(request('/login', { body: { proof, client } })));
 }
 
@@ -367,17 +367,17 @@ test('an existing account cannot be re-claimed with a different secret', async (
 /* ------------------------------------------------- the phrase-derived proof key */
 
 test('a creation that presents a proof key stores the public key and no secret', async () => {
-  const harness = object();
+  const harness = object({ name: ACCOUNT.serverId });
 
   const created = await provisionWithKey(harness);
   assert.equal(created.status, 201);
   assert.equal(created.body.created, true);
-  assert.deepEqual(harness.reserved, [ACCOUNT.accountId], 'the slot is taken once');
+  assert.deepEqual(harness.reserved, [ACCOUNT.serverId], 'the slot is taken once');
 
   const record = await harness.storage.get('account');
   assert.equal('authSecret' in record, false, 'the object holds no credential that can sign in');
   assert.equal(record.proofKey, ACCOUNT.proofKeyText);
-  assert.equal(record.accountId, ACCOUNT.accountId);
+  assert.equal(record.accountId, ACCOUNT.serverId);
   assert.equal(record.plan, 'free');
   assert.equal(record.units, 0);
 
@@ -388,7 +388,7 @@ test('a creation that presents a proof key stores the public key and no secret',
 
   /* And deletes behind that session and a fresh signature. */
   const challenge = await read(await harness.vault.fetch(request('/challenge')));
-  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.accountId, challenge.body.nonce);
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.serverId, challenge.body.nonce);
   const deleted = await read(
     await harness.vault.fetch(
       request('/delete', { body: { proof }, headers: withToken(session.body.token) })
@@ -399,18 +399,18 @@ test('a creation that presents a proof key stores the public key and no secret',
 });
 
 test('a proof-key creation with a secret proof, or another phrase key, is refused and writes nothing', async () => {
-  const harness = object();
+  const harness = object({ name: ACCOUNT.serverId });
   const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
 
   /* A body that asks for the public-key shape but signs the old way. */
   const first = await blindWithKey(harness);
   assert.equal(first.status, 428);
-  const hmac = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, first.body.nonce);
+  const hmac = await proveAuth(ACCOUNT.authSecret, ACCOUNT.serverId, first.body.nonce);
   const asSecret = await read(
     await harness.vault.fetch(
       request('/account', {
         body: {
-          accountId: ACCOUNT.accountId,
+          accountId: ACCOUNT.serverId,
           authSecret: ACCOUNT.authSecret,
           proofKey: ACCOUNT.proofKeyText,
           proof: hmac
@@ -426,11 +426,11 @@ test('a proof-key creation with a secret proof, or another phrase key, is refuse
   /* A valid signature, made by the wrong phrase's key. */
   const second = await blindWithKey(harness);
   assert.equal(second.status, 428);
-  const foreign = await proveAuth(other.proofKey, ACCOUNT.accountId, second.body.nonce);
+  const foreign = await proveAuth(other.proofKey, ACCOUNT.serverId, second.body.nonce);
   const asOther = await read(
     await harness.vault.fetch(
       request('/account', {
-        body: { accountId: ACCOUNT.accountId, proofKey: ACCOUNT.proofKeyText, proof: foreign }
+        body: { accountId: ACCOUNT.serverId, proofKey: ACCOUNT.proofKeyText, proof: foreign }
       })
     )
   );
@@ -441,14 +441,14 @@ test('a proof-key creation with a secret proof, or another phrase key, is refuse
 });
 
 test('a malformed proof key is an invalid creation, never a fallback to the secret', async () => {
-  const harness = object();
+  const harness = object({ name: ACCOUNT.serverId });
 
   /* A secret is present and well formed, so only the key can be what is refused. */
   for (const proofKey of ['x'.repeat(42), '', 'not a key at all', `${'A'.repeat(43)}!`, 42, null]) {
     const response = await read(
       await harness.vault.fetch(
         request('/account', {
-          body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret, proofKey }
+          body: { accountId: ACCOUNT.serverId, authSecret: ACCOUNT.authSecret, proofKey }
         })
       )
     );
@@ -461,51 +461,36 @@ test('a malformed proof key is an invalid creation, never a fallback to the secr
 });
 
 test('a proof-key account cannot be re-claimed with a different secret or a different key', async () => {
-  const harness = object();
+  const harness = object({ name: ACCOUNT.serverId });
   assert.equal((await provisionWithKey(harness)).status, 201);
 
   const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
 
-  /* A different secret's HMAC. */
-  const first = await read(
-    await harness.vault.fetch(
-      request('/account', { body: { accountId: ACCOUNT.accountId, authSecret: other.authSecret } })
-    )
-  );
-  assert.equal(first.status, 428);
-  const hmac = await proveAuth(other.authSecret, ACCOUNT.accountId, first.body.nonce);
+  /* A different secret, presented against an id that commits to a key: the secret is the
+     credential of the id the phrase itself hashed to, so there is nothing here for it to create. */
   const withSecret = await read(
     await harness.vault.fetch(
-      request('/account', {
-        body: { accountId: ACCOUNT.accountId, authSecret: other.authSecret, proof: hmac }
-      })
+      request('/account', { body: { accountId: ACCOUNT.serverId, authSecret: other.authSecret } })
     )
   );
-  assert.equal(withSecret.status, 401);
-  assert.equal(withSecret.body.error, 'bad_proof');
+  assert.equal(withSecret.status, 400);
+  assert.equal(withSecret.body.error, 'invalid');
 
   /* A different public key, signed by its own private half: a real signature for the wrong
-     account, which is exactly the request that used to install a new credential. */
-  const second = await read(
-    await harness.vault.fetch(
-      request('/account', { body: { accountId: ACCOUNT.accountId, proofKey: other.proofKeyText } })
-    )
-  );
-  assert.equal(second.status, 428);
-  const signature = await proveAuth(other.proofKey, ACCOUNT.accountId, second.body.nonce);
+     account. The id it is claimed with is the one the stored key commits to, so the claim ends
+     before a nonce exists for it to sign — which is the whole of the difference this binding makes. */
   const withKey = await read(
     await harness.vault.fetch(
-      request('/account', {
-        body: { accountId: ACCOUNT.accountId, proofKey: other.proofKeyText, proof: signature }
-      })
+      request('/account', { body: { accountId: ACCOUNT.serverId, proofKey: other.proofKeyText } })
     )
   );
-  assert.equal(withKey.status, 401);
-  assert.equal(withKey.body.error, 'bad_proof');
+  assert.equal(withKey.status, 400);
+  assert.equal(withKey.body.error, 'account_mismatch');
 
   const record = await harness.storage.get('account');
   assert.equal(record.proofKey, ACCOUNT.proofKeyText, 'the stored key is untouched');
   assert.equal('authSecret' in record, false, 'no secret was installed');
+  assert.equal(await harness.storage.get('create-nonce'), undefined, 'and no nonce was minted');
   assert.equal((await loginWithKey(harness)).status, 200, 'the real phrase still signs in');
 });
 

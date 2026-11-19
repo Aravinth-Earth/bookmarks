@@ -242,7 +242,10 @@ function notFound() {
  * reachable only through a Durable Object binding: a public `/a/<id>/admin-…` path is a 404
  * and never reaches the object.
  */
-const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
+/* The two shapes an account id may have, told apart by length alone: 22 case-sensitive base64url
+   characters is the id a phrase hashed to before an account could be created from a key, and 64
+   lowercase hex is the id a public key hashes to now. Both name an object here. */
+const ACCOUNT_ID = /^(?:[A-Za-z0-9_-]{22}|[0-9a-f]{64})$/;
 
 const ICON_PATH = '/icon';
 /* A page's own <title>, so the add form can suggest a name instead of showing a bare host. */

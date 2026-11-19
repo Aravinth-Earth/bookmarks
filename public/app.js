@@ -72,7 +72,17 @@ const store = createVault(indexedDbAdapter());
 const lockSignal = createLockSignal();
 
 const state = {
+  /* The phrase's own id: the PBKDF2 salt, the vault's associated data and this device's store key.
+     It is what seals and saves, and it is not what the server calls the account. */
   accountId: null,
+  /* The server's name for this account — the id its public key commits to — and the signing key
+     that proves it. Both are absent on a device remembered before ids were committed to a key,
+     and the phrase's own id is the name used then. */
+  serverId: null,
+  proofKey: null,
+  /* The public half, kept only until the account is created: the server is given it once and
+     there is no reason to hold it after that. */
+  proofKeyText: null,
   /* The signing key, non-extractable; and the base64url secret the server is given at creation,
      which is dropped as soon as the account exists. */
   authKey: null,
@@ -774,7 +784,7 @@ async function openPlaces() {
   let data;
   try {
     if (!sync.signedIn) {
-      const session = await sync.login(state.accountId, authMaterial());
+      const session = await signIn();
       applyPlan(session);
     }
     data = await sync.sessions();
@@ -976,7 +986,12 @@ function deleteAccountSheet() {
         return;
       }
 
-      await sync.deleteAccount(state.accountId, derived.authSecret);
+      /* The account is deleted under the name the server knows it by, and it is signed with the
+         credential that name takes: the Ed25519 key for an id a public key committed to, the
+         secret for the id the phrase itself hashed to. */
+      const name = await liveAccountName(derived);
+      const credential = committedName(name) ? derived.proofKey : derived.authSecret;
+      await sync.deleteAccount(name, credential);
       modal.close();
       await forgetDeletedVault('This account was deleted. Nothing is left on this device, and sync is off.');
     } catch (error) {
@@ -1018,6 +1033,9 @@ function deleteAccountSheet() {
 async function forgetDeletedVault(message) {
   clearTimeout(syncTimer);
   state.accountId = null;
+  state.serverId = null;
+  state.proofKey = null;
+  state.proofKeyText = null;
   state.authKey = null;
   state.authSecret = null;
   forgetInvite();
@@ -1151,6 +1169,68 @@ function authMaterial() {
   return state.authKey ?? state.authSecret;
 }
 
+/* The server's name for an account is 64 lowercase hex characters, and the phrase's own id is 22
+   base64url ones. The length is the whole of the rule, and it is the same rule the server applies
+   when it refuses a creation. */
+const COMMITTED_ACCOUNT_ID = /^[0-9a-f]{64}$/;
+
+/** Whether a name is an id a public key committed to, rather than the id a phrase hashed to. */
+function committedName(accountId) {
+  return typeof accountId === 'string' && COMMITTED_ACCOUNT_ID.test(accountId);
+}
+
+/**
+ * The credential a name is proved with.
+ *
+ * The shape of the name decides it: 64 hex characters is an id a public key committed to, so only
+ * the phrase's Ed25519 key can sign for it; 22 characters is the id the phrase itself hashed to,
+ * so the HMAC secret or the remembered HMAC key signs. Every call site asks this rather than
+ * testing the shape itself, because a credential of the wrong kind is a sign-in that cannot work.
+ */
+function credentialFor(accountId) {
+  return committedName(accountId) ? state.proofKey : authMaterial();
+}
+
+/**
+ * Sign in to this device's account, under whichever name the server knows it by.
+ *
+ * A vault created since ids committed to a key lives under `serverId`; one created before lives
+ * under the phrase's own `accountId`. Asking for the committed name first and falling back when
+ * the server says there is no such account is what lets both kinds sign in from the same page
+ * without either being told it does not exist. `login` keeps the name it was given, so every later
+ * route — pull, push, places, delete — is addressed with the one that answered.
+ */
+async function signIn() {
+  const name = committedName(state.serverId) ? state.serverId : state.accountId;
+  try {
+    return await sync.login(name, credentialFor(name));
+  } catch (error) {
+    if (error?.code !== 'NO_ACCOUNT' || name === state.accountId) throw error;
+    return sync.login(state.accountId, authMaterial());
+  }
+}
+
+/**
+ * The name the server knows this vault by, for a route that has to address it without a session.
+ *
+ * An open session already knows the answer. Otherwise the committed name is asked about first —
+ * it is what this build creates — and the phrase's own id second, because either kind of vault may
+ * be there. Neither existing is not an error here: the route the caller is about to use answers
+ * `no_account`, which it already reads.
+ */
+async function liveAccountName(derived) {
+  if (sync.signedIn && typeof sync.accountId === 'string') return sync.accountId;
+  try {
+    if (await sync.accountExists(derived.serverId)) return derived.serverId;
+  } catch (error) {
+    /* A deleted or switched-off account is an answer about the account, not a failure of the
+       question, so the caller gets it. Anything else — offline, throttled — leaves the phrase's
+       own id as the name to try, which is the name this route used before either was asked. */
+    if (error?.code === 'ACCOUNT_DELETED' || error?.code === 'ACCOUNT_DISABLED') throw error;
+  }
+  return derived.accountId;
+}
+
 /**
  * Whether a blob sealed before the version was bound may still be opened.
  *
@@ -1263,26 +1343,33 @@ async function reconcile() {
     let session;
 
     try {
-      session = await sync.login(state.accountId, authMaterial());
+      session = await signIn();
     } catch (error) {
       if (error.code !== 'NO_ACCOUNT') throw error;
 
-      /* First sync on a new phrase: the account is created from the same secrets the login
-         would have used, so there is nothing to provision and no token to hold. A remembered
-         device holds the signing key, not the secret the server is given, so it cannot create
-         the account without the phrase once. The code, when the server wants one, is the third
-         argument and is empty until a refusal asks for it. */
+      /* First sync on a new phrase: the account is created from the same key the login would have
+         used, so there is nothing to provision and no token to hold. A remembered device holds the
+         signing key, not the secret the server is given, so it cannot create the account without
+         the phrase once. The code, when the server wants one, is the third argument and is empty
+         until a refusal asks for it. */
       setSyncStatus('Creating the account…');
       if (typeof state.authSecret !== 'string') {
         throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
       }
-      await sync.register(state.accountId, state.authSecret, state.invite);
-      /* The server now holds the secret, so this page does not: from here the session signs
-         with the non-extractable key and nothing else. */
+      await sync.register(
+        state.serverId,
+        { proofKey: state.proofKey, proofKeyText: state.proofKeyText },
+        state.invite
+      );
+      /* The server holds the public half now, so the secret it would once have stored is dropped
+         here and never written anywhere. The public text is kept until the session exists: a
+         registration that succeeded and a sign-in that failed on the network is answered by
+         signing in again, and a retried creation has to describe the same one. */
       state.authSecret = null;
+      session = await sync.login(state.serverId, state.proofKey);
+      state.proofKeyText = null;
       /* The creation is done, so the code has no further use: it was spent on this account. */
       forgetInvite();
-      session = await sync.login(state.accountId, authMaterial());
     }
 
     applyPlan(session);
@@ -1399,8 +1486,25 @@ function showLock(message = '', { hasVault = null } = {}) {
   phraseInput.focus();
 }
 
-function enter({ accountId, authSecret, authKey = null, key, version, sealed, document: vaultDocument }) {
+function enter({
+  accountId,
+  serverId = null,
+  proofKey = null,
+  proofKeyText = null,
+  authSecret,
+  authKey = null,
+  key,
+  version,
+  sealed,
+  document: vaultDocument
+}) {
   state.accountId = accountId;
+  /* The name the server knows the account by, and the key that signs for it. A device restored
+     from a record written before ids committed to a key has neither, and the phrase's own id is
+     what every route uses then. */
+  state.serverId = serverId;
+  state.proofKey = proofKey;
+  state.proofKeyText = proofKeyText;
   state.authKey = authKey ?? null;
   state.authSecret = authSecret ?? null;
   state.key = key;
@@ -1604,6 +1708,11 @@ async function tryRemembered() {
     );
     enter({
       accountId: remembered.accountId,
+      /* A record written under the committed scheme names the server's id and holds the key that
+         signs for it; one from before has neither, and the phrase's own id is then the account's
+         name. Nothing else differs, which is why an older record still opens here. */
+      serverId: remembered.serverId ?? null,
+      proofKey: remembered.proofKey ?? null,
       authSecret: null,
       authKey: remembered.authKey ?? null,
       key,
@@ -1638,7 +1747,8 @@ async function handleUnlock(event) {
   unlockButton.textContent = 'Unlocking…';
 
   try {
-    const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
+    const { accountId, serverId, vaultKey, authKey, authSecret, proofKey, proofKeyText } =
+      await deriveAccount(phrase);
     const stored = await store.load(accountId);
     const vaultDocument = stored.sealed
       ? await openVault(vaultKey, stored.sealed, accountId, localSealVersion(stored), {
@@ -1646,11 +1756,19 @@ async function handleUnlock(event) {
         })
       : createDocument();
 
-    if (rememberInput.checked) await store.remember(accountId, vaultKey, authKey);
-    else await store.forget();
+    /* A remembered device is remembered under both names, so it can sign in without the phrase:
+       the vault key opens, the signing key proves, and the server's name is where it proves it. */
+    if (rememberInput.checked) {
+      await store.remember(accountId, vaultKey, authKey, { serverId, proofKey });
+    } else {
+      await store.forget();
+    }
 
     enter({
       accountId,
+      serverId,
+      proofKey,
+      proofKeyText,
       authSecret,
       authKey,
       key: vaultKey,
@@ -1687,7 +1805,12 @@ async function offerServerVault() {
 
   let exists;
   try {
-    exists = await sync.accountExists(state.accountId);
+    /* The committed name first: it is the one this build creates. An account from before that
+       lives under the phrase's own id is asked about next, or a person returning to it would be
+       told their vault exists nowhere. */
+    const first = committedName(state.serverId) ? state.serverId : state.accountId;
+    exists = await sync.accountExists(first);
+    if (!exists && first !== state.accountId) exists = await sync.accountExists(state.accountId);
   } catch (error) {
     if (error?.code === 'ACCOUNT_DISABLED') {
       const failure = disabledNotice();
@@ -1751,7 +1874,13 @@ function deletedNotice() {
  */
 async function noticeIfDisabled() {
   try {
-    const status = await sync.accountStatus(state.accountId);
+    /* Both names are asked, committed first, so an account created before ids were committed to a
+       key is still reported as disabled rather than as missing. */
+    const first = committedName(state.serverId) ? state.serverId : state.accountId;
+    let status = await sync.accountStatus(first);
+    if (!status.exists && first !== state.accountId) {
+      status = await sync.accountStatus(state.accountId);
+    }
     if (!status.disabled) return;
     const failure = disabledNotice();
     setSyncStatus(failure.label);
@@ -1944,15 +2073,27 @@ function openCreateModal() {
 }
 
 async function createNewVault(phrase, remember) {
-  const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
+  const { accountId, serverId, vaultKey, authKey, authSecret, proofKey, proofKeyText } =
+    await deriveAccount(phrase);
   const vaultDocument = createDocument();
   const sealed = await sealVault(vaultKey, vaultDocument, accountId, 1);
 
   await store.save(accountId, sealed, 1);
-  if (remember) await store.remember(accountId, vaultKey, authKey);
+  if (remember) await store.remember(accountId, vaultKey, authKey, { serverId, proofKey });
   else await store.forget();
 
-  enter({ accountId, authSecret, authKey, key: vaultKey, version: 1, sealed, document: vaultDocument });
+  enter({
+    accountId,
+    serverId,
+    proofKey,
+    proofKeyText,
+    authSecret,
+    authKey,
+    key: vaultKey,
+    version: 1,
+    sealed,
+    document: vaultDocument
+  });
   setAddForm(true);
   announce('Vault created. Add a bookmark, or import a file from Settings.');
 }
@@ -1997,7 +2138,8 @@ async function handleRestore() {
   }
 
   try {
-    const { accountId, vaultKey, authKey, authSecret } = await deriveAccount(phrase);
+    const { accountId, serverId, vaultKey, authKey, authSecret, proofKey, proofKeyText } =
+      await deriveAccount(phrase);
     const backupDocument = await openVault(vaultKey, sealed, accountId, sealed.at ?? 1, {
       allowLegacy: sealed.at === undefined
     });
@@ -2039,11 +2181,17 @@ async function handleRestore() {
        sealed at would not open again. */
     const resealed = await sealVault(vaultKey, vaultDocument, accountId, 1);
     await store.save(accountId, resealed, version);
-    if (rememberInput.checked) await store.remember(accountId, vaultKey, authKey);
-    else await store.forget();
+    if (rememberInput.checked) {
+      await store.remember(accountId, vaultKey, authKey, { serverId, proofKey });
+    } else {
+      await store.forget();
+    }
 
     enter({
       accountId,
+      serverId,
+      proofKey,
+      proofKeyText,
       authSecret,
       authKey,
       key: vaultKey,
@@ -3692,12 +3840,13 @@ function promptForSyncPhrase() {
       const typed = phrase.value;
       clearPhraseField(phrase);
       try {
-        const { accountId, authSecret, authKey } = await deriveAccount(typed);
+        const { accountId, serverId, authSecret, authKey, proofKey, proofKeyText } =
+          await deriveAccount(typed);
         if (accountId !== state.accountId) {
           throw new Error('That phrase belongs to a different vault.');
         }
         settled = true;
-        resolve({ authSecret, authKey });
+        resolve({ serverId, authSecret, authKey, proofKey, proofKeyText });
         modal.close();
       } catch (problem) {
         error.textContent = clean(problem.message);
@@ -3967,7 +4116,7 @@ function openSettings() {
   const fillStamps = async () => {
     if (!syncEnabled() || (vaultCreatedAt && lastActivityAt)) return;
     try {
-      if (!sync.signedIn) applyPlan(await sync.login(state.accountId, authMaterial()));
+      if (!sync.signedIn) applyPlan(await signIn());
       for (const row of stampRows) row.value.textContent = formatStamp(row.read());
     } catch {
       /* The dash stands for "not known on this device yet". */
@@ -4203,12 +4352,23 @@ function openSettings() {
               const derived = await promptForSyncPhrase();
               if (!derived) return;
 
+              /* The phrase names the account under both ids and holds both credentials, so the
+                 page takes all of it: the committed name is what the creation and the sign-in
+                 will use from here. */
+              state.serverId = derived.serverId;
+              state.proofKey = derived.proofKey;
+              state.proofKeyText = derived.proofKeyText;
               state.authSecret = derived.authSecret;
               state.authKey = derived.authKey;
               /* The remembered record takes the signing key: the secret the server is given is
                  the one value that must not be written to this device. */
               const remembered = await store.readRemembered();
-              if (remembered) await store.remember(state.accountId, remembered.key, derived.authKey);
+              if (remembered) {
+                await store.remember(state.accountId, remembered.key, derived.authKey, {
+                  serverId: derived.serverId,
+                  proofKey: derived.proofKey
+                });
+              }
             }
 
             setPrefs({ sync: enable });
@@ -4393,6 +4553,9 @@ function repaintSettings() {
  */
 async function lockVault({ broadcast = true } = {}) {
   state.accountId = null;
+  state.serverId = null;
+  state.proofKey = null;
+  state.proofKeyText = null;
   state.authKey = null;
   state.authSecret = null;
   /* A code is a secret like the phrase, so a lock drops it with everything else the page held. */

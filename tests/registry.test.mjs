@@ -96,6 +96,53 @@ test('an id that is not an account id is refused', async () => {
   assert.equal(storage.raw.has('accounts'), false);
 });
 
+/* A sixty-four character id is the one a public key commits to. It is counted exactly like the
+   twenty-two character id a phrase hashes to, because the cap counts accounts and not shapes. */
+const COMMITTED = 'ab'.repeat(32);
+
+test('a committed id reserves, repeats, exists and releases exactly as a legacy one', async () => {
+  const { registry, storage } = harness();
+
+  const first = await json(await registry.fetch(reserve({ accountId: COMMITTED })));
+  assert.equal(first.status, 200);
+  assert.equal(first.body.count, 1);
+
+  const again = await json(await registry.fetch(reserve({ accountId: COMMITTED })));
+  assert.equal(again.status, 200);
+  assert.equal(again.body.alreadyReserved, true);
+  assert.equal(again.body.count, 1);
+  assert.deepEqual(storage.raw.get('accounts'), [COMMITTED]);
+
+  const known = await json(await registry.fetch(exists(COMMITTED)));
+  assert.equal(known.status, 200);
+  assert.deepEqual(known.body, { exists: true, room: true });
+
+  const released = await json(await registry.fetch(release({ accountId: COMMITTED })));
+  assert.equal(released.status, 200);
+  assert.equal(released.body.count, 0, 'the slot is free again');
+  assert.deepEqual(storage.raw.get('accounts'), []);
+  /* Released, not forgotten: the object's tombstone still has to answer for this id. */
+  assert.deepEqual((await json(await registry.fetch(exists(COMMITTED)))).body, {
+    exists: true,
+    room: true
+  });
+});
+
+test('a sixty-four character id that is not lowercase hex is refused', async () => {
+  const { registry, storage } = harness();
+
+  for (const accountId of ['A'.repeat(64), 'g'.repeat(64), `${'a'.repeat(63)}!`]) {
+    const reserveRefused = await json(await registry.fetch(reserve({ accountId })));
+    assert.equal(reserveRefused.status, 400, accountId);
+    assert.deepEqual(reserveRefused.body, { error: 'invalid' });
+
+    const readRefused = await json(await registry.fetch(exists(accountId)));
+    assert.equal(readRefused.status, 400, accountId);
+  }
+
+  assert.equal(storage.raw.has('accounts'), false);
+});
+
 test('the cap holds, and the account after it is refused', async () => {
   const { registry, storage } = harness();
 

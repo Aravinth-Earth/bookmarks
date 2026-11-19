@@ -79,7 +79,14 @@ const SOURCE_DIGEST = /^[0-9a-f]{64}$/;
 /* The one bucket used when the object was reached without a source, as a test or a binding is. */
 const UNATTRIBUTED = 'unattributed';
 
-const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
+/* The two shapes an account id may have, told apart by length alone: 22 case-sensitive base64url
+   characters is the id a phrase hashed to before an account could be created from a key, and 64
+   lowercase hex is the id a public key hashes to now. */
+const ACCOUNT_ID = /^(?:[A-Za-z0-9_-]{22}|[0-9a-f]{64})$/;
+/* The legacy shape on its own, for the one rule that depends on which of the two an id is: a
+   creation that presents a secret may only name an id the phrase itself produced. */
+const LEGACY_ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
+const COMMITTED_ACCOUNT_ID = /^[0-9a-f]{64}$/;
 const AUTH_SECRET = /^[A-Za-z0-9_-]{43}$/;
 /* An Ed25519 public key is 32 bytes, base64url: the same 43 characters as a secret and a
    different kind of value — it verifies a proof and cannot make one. */
@@ -258,6 +265,37 @@ async function sha256(text) {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(text)));
 }
 
+/* The name an account created from a public key is kept under. This is the client's construction
+   restated: the prefix, the 32 raw key bytes, SHA-256, lowercase hex. It is not the `bmk1:` family,
+   which derives the legacy account id and the vault's salt and must keep producing exactly what it
+   produced before. */
+const ACCOUNT_ID_V2_PREFIX = 'bookmarks-account-v2';
+
+/**
+ * The id a public key commits to, or null when the text is not one.
+ *
+ * A creation that presents a key is accepted only under the id this derives from it, which is what
+ * keeps anybody who knows an id from installing their own key against it: they would have to
+ * present a key that hashes to the id, and that means the key whose phrase produced it. Malformed
+ * text is null rather than a throw, because the caller answers it with the same refusal it answers
+ * a well-formed key that disagrees.
+ */
+async function accountIdFromProofKey(proofKeyText) {
+  let raw;
+  try {
+    raw = fromBase64Url(proofKeyText, 'the proof key');
+  } catch {
+    return null;
+  }
+  if (raw.length !== 32) return null;
+  const prefix = encoder.encode(ACCOUNT_ID_V2_PREFIX);
+  const bytes = new Uint8Array(prefix.length + raw.length);
+  bytes.set(prefix);
+  bytes.set(raw, prefix.length);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 async function sessionHash(token) {
   return toBase64Url(await sha256(token));
 }
@@ -303,11 +341,13 @@ async function verifyProof(authSecret, accountId, nonce, proof) {
  * one. Anything malformed — the key, the proof, a signature that does not verify — is `false`,
  * so a caller compares it exactly as it compares an HMAC result and no new refusal is needed.
  *
- * What this does not do, and cannot: the account id is a hash of the phrase truncated to 16 bytes,
- * and it is also the object's name, so the server has no way to check that a submitted public key
- * was really derived from the phrase behind that id. What is gained is narrower and real — the
- * first claim presents a signature under a key whose private half never leaves the client, so the
- * object stores nothing reusable. A breach of this object yields a public key, not a credential.
+ * For a new account the id is derived from this key, and `createAccount` refuses a creation whose
+ * id disagrees, so the key a record holds is provably the one the id was made from. That check is
+ * not available for an account created before ids were committed to a key: its id is a truncated
+ * hash of the phrase, and no public value can be recomputed from the phrase. What is gained even
+ * there is narrower and real — the first claim presents a signature under a key whose private
+ * half never leaves the client, so the object stores nothing reusable. A breach of this object
+ * yields a public key, not a credential.
  */
 async function verifySignature(proofKeyText, accountId, nonce, proof) {
   try {
@@ -425,11 +465,17 @@ export class Vault {
    * with the phrase's credential and presents that proof with the same body. Only that second
    * request may write the account.
    *
-   * The credential is one of two shapes. A caller that presents `proofKey` — the public half of
-   * the phrase's Ed25519 key, 43 base64url characters — signs the challenge with the private half,
-   * and the record keeps only the public key: there is then no reusable secret in this object for
-   * a breach to yield. A caller that presents none follows the established shape and stores the
-   * auth secret, byte-for-byte as before, so a browser that has not been updated keeps working.
+   * The credential is one of two shapes, and the id's own shape says which. A caller that presents
+   * `proofKey` — the public half of the phrase's Ed25519 key, 43 base64url characters — must name a
+   * 64-hex id, and that id must be the one the key hashes to; the record keeps only the public key,
+   * so there is no reusable secret in this object for a breach to yield. A caller that presents
+   * `authSecret` instead must name the 22-character id a phrase hashes to, and the record stores
+   * the secret, byte-for-byte as before, so a browser that has not been updated keeps working.
+   *
+   * The id check is what makes a first claim safe to trust. Someone who knows only a public id can
+   * derive a phrase of their own and sign a challenge, but they cannot make their key hash to an
+   * id that was derived from someone else's key, so the creation is refused before a nonce is
+   * minted or spent and before anything is written.
    *
    * An account that already exists is never written again and never overwritten. Its proof is
    * checked against the credential the stored record carries and against nothing the request
@@ -455,19 +501,39 @@ export class Vault {
     const usesProofKey = proofKey !== undefined;
 
     /* A proof key replaces the secret rather than joining it, so a body that presents one need
-       not carry a secret at all: the record will not store one. */
-    if (
-      !ACCOUNT_ID.test(accountId ?? '') ||
-      (!usesProofKey && !AUTH_SECRET.test(authSecret ?? ''))
-    ) {
-      /* Whatever was presented is not an account id or a secret, and is not written down. */
+       not carry a secret at all: the record will not store one. Which of the two a body presents
+       also decides which id shape it may name, because the shape is what the server can check. */
+    if (!ACCOUNT_ID.test(accountId ?? '')) {
+      /* An id of neither shape is not an account id, and is not written down. */
       await logEvent('create_refused', { route: 'signin', reason: 'invalid' });
       return json({ error: 'invalid' }, 400);
     }
-    /* Present but not a 32-byte Ed25519 public key is a malformed creation, not a legacy one.
-       Falling back to the secret here would quietly store the credential the caller was leaving
-       behind, so the shape is refused instead. */
-    if (usesProofKey && !PROOF_KEY.test(proofKey)) {
+    if (usesProofKey) {
+      if (!COMMITTED_ACCOUNT_ID.test(accountId) || !PROOF_KEY.test(proofKey)) {
+        /* Whatever was presented is not a public key, or the id is not one a key could have
+           produced. Neither is written down, and a secret alongside a malformed key is refused
+           rather than quietly stored: that would be the credential the caller was replacing. */
+        await logEvent('create_refused', { route: 'signin', reason: 'invalid' });
+        return json({ error: 'invalid' }, 400);
+      }
+      /* The id must be the one this key hashes to. Someone who knows only an id cannot present a
+         key that does, so this is where a first claim on somebody else's id ends — before a nonce
+         is minted or spent, and before anything is stored. */
+      const derived = await accountIdFromProofKey(proofKey);
+      if (derived !== accountId) {
+        await logEvent('create_refused', {
+          route: 'signin',
+          reason: 'mismatch',
+          account: accountId
+        });
+        /* The refusal does not name the id the key would produce: that value is public, but it is
+           not this request's business and saying it would turn a refusal into an oracle. */
+        return json({ error: 'account_mismatch' }, 400);
+      }
+    } else if (!LEGACY_ACCOUNT_ID.test(accountId ?? '') || !AUTH_SECRET.test(authSecret ?? '')) {
+      /* A secret is the credential of the id the phrase itself produced, so it may only be
+         presented against that shape. Anything else is not an account id and a secret, and is not
+         written down. */
       await logEvent('create_refused', { route: 'signin', reason: 'invalid' });
       return json({ error: 'invalid' }, 400);
     }

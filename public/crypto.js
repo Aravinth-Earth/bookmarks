@@ -50,6 +50,12 @@ export const ACCOUNT_ID_BYTES = 16;
 export const ACCOUNT_ID_LENGTH = 22;
 /* 32 bytes, base64url, unpadded. */
 export const AUTH_LENGTH = 43;
+/* The id of an account created from a phrase commits to the phrase's public key, so holding the id
+   and holding the key are the same fact. The prefix separates this hash from every other use of
+   SHA-256 in this file, and it is not the `bmk1:` family: that family derives the legacy id and the
+   vault's salt, and both must keep producing exactly what they produced before. */
+export const ACCOUNT_ID_V2_PREFIX = 'bookmarks-account-v2';
+export const COMMITTED_ID_LENGTH = 64; // hex, one SHA-256
 
 const WORD_SET = new Set(WORDLIST);
 const encoder = new TextEncoder();
@@ -174,6 +180,27 @@ export async function accountIdFromPhrase(input) {
   return accountIdFromNormalized(normalizePhrase(input));
 }
 
+/**
+ * The server's name for an account, derived from the phrase's public proof key.
+ *
+ * An id that a key hashed to cannot be claimed with another key: the server recomputes this from
+ * the `proofKey` a creation presents and refuses a request whose id disagrees. It is 64 lowercase
+ * hex characters, one SHA-256 over a constant prefix and the 32 raw key bytes, and it is derived
+ * from public material — it names the account and proves nothing on its own.
+ *
+ * @returns {Promise<string>} 64 lowercase hex characters
+ */
+export async function accountIdFromProofKey(proofKeyText) {
+  const raw = fromBase64Url(proofKeyText, 'the proof key');
+  if (raw.length !== 32) throw new Error('bookmarks: a proof key is 32 bytes');
+  const prefix = encoder.encode(ACCOUNT_ID_V2_PREFIX);
+  const bytes = new Uint8Array(prefix.length + raw.length);
+  bytes.set(prefix);
+  bytes.set(raw, prefix.length);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 async function deriveMaster(normalized, accountId) {
   const salt = await sha256(`${LABELS.key}${accountId}`);
   const material = await crypto.subtle.importKey(
@@ -284,7 +311,12 @@ export async function deriveAuthSecret(input) {
  * one, so an account created with it stores no credential worth stealing. They are additive
  * fields — everything above them is exactly what it was.
  *
- * @returns {Promise<{accountId: string, vaultKey: CryptoKey, authKey: CryptoKey, authSecret: string, proofKey: CryptoKey, proofKeyText: string}>}
+ * `serverId` is the name the server keeps the account under, 64 lowercase hex derived from
+ * `proofKeyText`. It is additive too, and it is deliberately not `accountId`: the account id is
+ * the PBKDF2 salt, the vault's associated data and the local store's key, so it has to keep
+ * deriving exactly what it always did.
+ *
+ * @returns {Promise<{accountId: string, vaultKey: CryptoKey, authKey: CryptoKey, authSecret: string, proofKey: CryptoKey, proofKeyText: string, serverId: string}>}
  */
 export async function deriveAccount(input) {
   const normalized = normalizePhrase(input);
@@ -305,7 +337,8 @@ export async function deriveAccount(input) {
     authKey,
     authSecret: toBase64Url(authBits),
     proofKey: proof.proofKey,
-    proofKeyText: proof.proofKeyText
+    proofKeyText: proof.proofKeyText,
+    serverId: await accountIdFromProofKey(proof.proofKeyText)
   };
 }
 

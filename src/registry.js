@@ -11,7 +11,10 @@
 
 import { MAX_CODES_PER_CALL, MAX_INVITES, INVITE_TTL_MS, hashCode, newCode, shortHash } from './invites.js';
 
-const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
+/* The two shapes an account id may have, told apart by length alone: 22 case-sensitive base64url
+   characters is the id a phrase hashed to before an account could be created from a key, and 64
+   lowercase hex is the id a public key hashes to now. The cap counts both. */
+const ACCOUNT_ID = /^(?:[A-Za-z0-9_-]{22}|[0-9a-f]{64})$/;
 const DAY_MS = 86_400_000;
 
 /* A var of the same name can override this without a code change. */

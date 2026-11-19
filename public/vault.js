@@ -116,8 +116,15 @@ export function createVault(adapter, { now = () => Date.now() } = {}) {
    * `vaultKey` and `authSecret` may be CryptoKeys or the base64url text the older record
    * stored; either way what lands in the adapter is a pair of CryptoKeys, so a copy of the
    * profile yields keys that sign and decrypt but cannot be exported or read.
+   *
+   * `extras` carries what a device created under the committed scheme needs in order to sign in
+   * without the phrase: `serverId`, the 64-hex name the server keeps the account under, and
+   * `proofKey`, the non-extractable Ed25519 key that signs its proofs. They are optional, so a
+   * three-argument call writes exactly the record it always did, and the record stays keyed by the
+   * phrase's own account id either way. IndexedDB structured-clones a CryptoKey, so the signing
+   * key is stored the same way the vault key is; the seed and the phrase are never written.
    */
-  async function remember(accountId, vaultKey, authSecret) {
+  async function remember(accountId, vaultKey, authSecret, extras = {}) {
     if (vaultKey === undefined || vaultKey === null || vaultKey === '') {
       throw new Error('bookmarks: a remembered key carries the vault key');
     }
@@ -128,7 +135,16 @@ export function createVault(adapter, { now = () => Date.now() } = {}) {
       keyFromBytes(vaultKey),
       authKeyFromBytes(authSecret)
     ]);
-    await adapter.put(REMEMBERED, { accountId, key, authKey, savedAt: now() });
+    const record = { accountId, key, authKey, savedAt: now() };
+    /* Only present when this device has them, so a record written by an older build reads the
+       same and an older build reads a newer record by ignoring the two new fields. */
+    if (typeof extras.serverId === 'string' && extras.serverId !== '') {
+      record.serverId = extras.serverId;
+    }
+    if (extras.proofKey !== undefined && extras.proofKey !== null) {
+      record.proofKey = extras.proofKey;
+    }
+    await adapter.put(REMEMBERED, record);
   }
 
   function isFresh(savedAt) {
@@ -143,6 +159,10 @@ export function createVault(adapter, { now = () => Date.now() } = {}) {
    * again. A record written before keys were stored carries `keyBytes` and `authSecret` as
    * base64url text; it is imported into non-extractable keys, written back in the new shape,
    * and the old fields go with the write. An upgrade keeps working without the phrase.
+   *
+   * A record written under the committed scheme also carries `serverId` and `proofKey`; they are
+   * handed back as they were stored. A record from before that has neither, and its absence is the
+   * whole signal that the phrase's own id is the name this device signs in under.
    */
   async function readRemembered() {
     const record = await adapter.get(REMEMBERED);
