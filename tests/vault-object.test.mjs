@@ -38,14 +38,19 @@ const ACCOUNT = await deriveAccount(PHRASE);
 const IV = 'abcdefghijklmnop';
 const CT = 'abcdefghijklmnopqrstuvwxyz';
 
-function storage() {
+function storage({ failPut } = {}) {
   const map = new Map();
+  /* The runtime holds one alarm at a time, so this is the alarm this object has now, not a log of
+     every time one was set. */
   const alarms = [];
   return {
     async get(key) {
       return map.get(key);
     },
     async put(key, value) {
+      /* A key the test names fails once, so a write that cannot land is exercised without a
+         storage that is broken for the account it was meant to protect. */
+      if (failPut?.(key)) throw new Error('the storage write failed');
       map.set(key, structuredClone(value));
     },
     async delete(key) {
@@ -59,7 +64,10 @@ function storage() {
       );
     },
     async setAlarm(at) {
-      alarms.push(at);
+      alarms.splice(0, alarms.length, at);
+    },
+    async deleteAlarm() {
+      alarms.splice(0, alarms.length);
     },
     async deleteAll() {
       map.clear();
@@ -71,13 +79,16 @@ function storage() {
 
 function object(overrides = {}) {
   const ctx = {
-    storage: storage(),
+    storage: overrides.storage ?? storage(),
     id: { name: overrides.name ?? ACCOUNT.accountId }
   };
 
   const reserved = [];
   const released = [];
   let full = overrides.registryFull ?? false;
+  /* A Registry that is unavailable answers nothing: the path says whether this request is the one
+     that fails, so a test can let it recover. */
+  const registryFails = overrides.registryFails ?? (() => false);
 
   const env = {
     OWNER_ACCOUNT_ID: overrides.ownerId ?? '',
@@ -88,6 +99,7 @@ function object(overrides = {}) {
       get: (id) => ({
         fetch: async (request) => {
           const path = new URL(request.url).pathname;
+          if (registryFails(path)) throw new Error('the Registry is unavailable');
           const body = await request.clone().json();
           const headers = { 'content-type': 'application/json' };
 
@@ -2038,6 +2050,165 @@ test('a deleted account is not recreated by another sync, and only an invite or 
   assert.equal(nowPossible.status, 201, 'the id can be created again once the tombstone is gone');
 });
 
+/* ------------------------------- a slot that is reserved and must not be lost */
+
+test('a creation whose account write fails gives the slot back on the next wake-up', async () => {
+  let failed = false;
+  const store = storage({
+    failPut: (key) => {
+      if (key !== 'account' || failed) return false;
+      failed = true;
+      return true;
+    }
+  });
+  const harness = object({ storage: store });
+
+  await assert.rejects(provision(harness), 'the creation cannot answer without an account');
+
+  assert.equal(harness.storage.raw.has(`slot:${ACCOUNT.accountId}`), true, 'the slot is recorded');
+  assert.equal(harness.storage.alarms.length, 1, 'and something will wake the object for it');
+  assert.equal(harness.storage.raw.has('account'), false);
+
+  await harness.vault.alarm();
+
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the reserved slot goes back');
+  assert.equal(harness.storage.raw.has(`slot:${ACCOUNT.accountId}`), false, 'the debt is settled');
+  assert.equal(harness.storage.alarms.length, 0, 'and nothing is left to wake');
+});
+
+test('a deletion whose release fails is retried on the next alarm instead of dropped', async () => {
+  let down = true;
+  const harness = object({ registryFails: (path) => path === '/release' && down });
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', {
+        body: { proof: await proofFor(harness) },
+        headers: withToken(session.body.token)
+      })
+    )
+  );
+
+  assert.equal(deleted.status, 200, 'the deletion still answers ok');
+  assert.equal(deleted.body.ok, true);
+  assert.equal(harness.storage.raw.has(`slot:${ACCOUNT.accountId}`), true, 'the slot is still owed');
+  assert.equal(harness.storage.alarms.length, 1, 'and an alarm is armed to ask again');
+  assert.deepEqual(harness.released, [], 'nothing was released');
+
+  down = false;
+  await harness.vault.alarm();
+
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the retry gives the slot back');
+  assert.equal(harness.storage.raw.has(`slot:${ACCOUNT.accountId}`), false);
+  assert.equal(harness.storage.raw.has('deleted'), true, 'the tombstone is untouched');
+  assert.equal(harness.storage.alarms.length, 0, 'a settled debt stops re-arming');
+});
+
+test('an unused account whose release fails is not wiped before its slot is free', async () => {
+  let down = true;
+  const harness = object({ registryFails: (path) => path === '/release' && down });
+  await provision(harness);
+
+  harness.advance(UNUSED_RELEASE_MS + 1);
+  await harness.vault.alarm();
+
+  assert.equal(harness.storage.raw.has('account'), true, 'the record stays while the slot is held');
+  assert.equal((await harness.storage.get('account')).accountId, ACCOUNT.accountId);
+  assert.equal(harness.storage.raw.has(`slot:${ACCOUNT.accountId}`), true, 'the debt is recorded');
+  assert.deepEqual(harness.released, []);
+  assert.equal(harness.storage.alarms.length, 1, 'the object is woken to try again');
+
+  down = false;
+  await harness.vault.alarm();
+
+  assert.deepEqual(harness.released, [ACCOUNT.accountId]);
+  assert.equal(harness.storage.raw.size, 0, 'the record and its marker are gone');
+});
+
+test('a normal creation and a normal deletion leave no marker and no alarm behind', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const created = await harness.storage.get('account');
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('slot:')),
+    [],
+    'an account that exists owes nothing'
+  );
+  assert.deepEqual(
+    harness.storage.alarms,
+    [created.createdAt + UNUSED_RELEASE_MS],
+    'exactly the one unused-release alarm is armed'
+  );
+
+  const session = await loginAs(harness, 'desktop');
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', {
+        body: { proof: await proofFor(harness) },
+        headers: withToken(session.body.token)
+      })
+    )
+  );
+
+  assert.equal(deleted.status, 200);
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted'], 'only the tombstone remains');
+  assert.deepEqual(harness.storage.alarms, [], 'a confirmed release arms nothing further');
+
+  await harness.vault.alarm();
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the wake-up does not release twice');
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted'], 'nor touch the tombstone');
+});
+
+test('a wake-up that finds nothing owed keeps no alarm behind', async () => {
+  const harness = object();
+  await provision(harness);
+
+  /* An object with neither a record nor a marker: the deadline that woke it is the only thing
+     here, and nothing under it can be settled. */
+  await harness.storage.delete('account');
+  assert.equal(harness.storage.alarms.length, 1, 'the unused-release alarm is still armed');
+
+  await harness.vault.alarm();
+
+  assert.deepEqual(harness.released, [], 'there is no marker to ask the Registry about');
+  assert.deepEqual(harness.storage.alarms, [], 'and nothing is left to wake the object again');
+});
+
+test('an operator removal with no id known gives up the alarm it cannot use', async () => {
+  const harness = object({ name: '' });
+  await harness.storage.setAlarm(1_000_000);
+
+  const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
+
+  assert.equal(removed.status, 200);
+  assert.equal(removed.body.deleted, false, 'there was nothing to delete');
+  assert.deepEqual(harness.released, [], 'a release needs an id to name');
+  assert.deepEqual([...harness.storage.raw.keys()], [], 'and no marker is written without one');
+  assert.deepEqual(harness.storage.alarms, [], 'the deadline this removal ended is not kept');
+});
+
+test('an operator removal settles a slot an earlier creation left recorded', async () => {
+  const harness = object();
+  await provision(harness);
+
+  /* A reservation whose account write never landed outlives it as a marker on the object. */
+  await harness.storage.put('slot:an-earlier-account', { at: 1 });
+
+  const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
+
+  assert.equal(removed.status, 200);
+  assert.deepEqual(
+    [...harness.released].sort(),
+    [ACCOUNT.accountId, 'an-earlier-account'].sort(),
+    'the account and the reservation it outlived both go back'
+  );
+  assert.deepEqual([...harness.storage.raw.keys()], [], 'no marker is left to retry from');
+  assert.deepEqual(harness.storage.alarms, [], 'and a settled debt arms nothing');
+});
+
 test('a creation with an invite clears the tombstone on an invite-only server', async () => {
   const harness = object({ invitesRequired: true });
   assert.equal((await provision(harness)).status, 201);
@@ -2196,14 +2367,32 @@ test('ending a place needs a session, and an unknown id is a 404 that changes no
  * around a stream the test controls: the object can reach the body read and wait there while the
  * test acts on the account, and only then does the body arrive. `duplex: 'half'` is what Node's
  * fetch requires of a stream body.
+ *
+ * `arrived` resolves when the object asks the stream for the body, which is after it has
+ * authorised the request and read the account ahead of the body. Waiting for that, rather than for
+ * a timer, is what makes these tests deterministic: a timer can fire while the object is still
+ * hashing the session, and the test then acts on an account the request never got as far as.
  */
 function openWrite(headers = {}) {
   let controller;
-  const body = new ReadableStream({
-    start(open) {
-      controller = open;
-    }
+  let reached;
+  const arrived = new Promise((resolve) => {
+    reached = resolve;
   });
+  const body = new ReadableStream(
+    {
+      start(open) {
+        controller = open;
+      },
+      /* The reader is waiting for a chunk, so the object is parked at its body read. */
+      pull() {
+        reached();
+      }
+    },
+    /* A queued chunk is what `highWaterMark: 0` forbids, so `pull` is called only by a reader that
+       is waiting, never when the request is merely constructed. */
+    { highWaterMark: 0 }
+  );
   const encoder = new TextEncoder();
 
   return {
@@ -2213,6 +2402,7 @@ function openWrite(headers = {}) {
       body,
       duplex: 'half'
     }),
+    arrived,
     send(value) {
       controller.enqueue(encoder.encode(JSON.stringify(value)));
     },
@@ -2220,11 +2410,6 @@ function openWrite(headers = {}) {
       controller.close();
     }
   };
-}
-
-/** Let the object reach its body read before the test changes the account underneath it. */
-function settle() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 test('an owner claim made while a save is in flight survives the save', async () => {
@@ -2237,7 +2422,7 @@ test('an owner claim made while a save is in flight survives the save', async ()
 
   const held = openWrite(withToken(session.body.token));
   const pending = harness.vault.fetch(held.request);
-  await settle();
+  await held.arrived;
 
   /* The sign-in that lands while this body is still in the air is the only writer of the plan. */
   await harness.vault.claimOwner(await harness.storage.get('account'));
@@ -2265,7 +2450,7 @@ test('a units and paid-until grant made while a save is in flight survives the s
 
   const held = openWrite(withToken(session.body.token));
   const pending = harness.vault.fetch(held.request);
-  await settle();
+  await held.arrived;
 
   const granted = { ...(await harness.storage.get('account')), units: 3, paidUntil: 9_000_000 };
   await harness.storage.put('account', granted);
@@ -2298,7 +2483,7 @@ test('a body that lands after the operator ended the account is refused, not wri
 
   const held = openWrite(withToken(session.body.token));
   const pending = harness.vault.fetch(held.request);
-  await settle();
+  await held.arrived;
 
   const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
   assert.equal(removed.status, 200);
