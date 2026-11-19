@@ -38,6 +38,7 @@ import {
 import { CLIPBOARD_CLEAR_MS, clearPhraseField, overwriteClipboard } from './hygiene.js';
 import { createLockSignal } from './lock-signal.js';
 import {
+  COLLECTED_ICON_KEY,
   ICON_TRIES_KEY,
   SIZE_KEY,
   VIEW_KEY,
@@ -58,7 +59,14 @@ import {
   parseSealed
 } from './import-export.js';
 import { tileFor } from './tiles.js';
-import { fetchIcon, fetchPageTitle } from './icons.js';
+import {
+  OUTCOME_VALUE,
+  fetchIconOutcome,
+  fetchPageTitle,
+  isAnswer,
+  retryDelayMs,
+  stampAnswers
+} from './icons.js';
 import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
 import { formatStamp } from './stamps.js';
@@ -105,12 +113,17 @@ let syncBusy = false;
 let syncQueued = false;
 let syncTimer = 0;
 let syncLabel = '';
-/* Icon fetching: four hosts at a time, and the vault saved every fifth batch rather than each. */
+/* Icon runs: four hosts are folded into the vault together, so a save is not pushed per icon. This
+   number no longer decides how fast requests go out — the queue in icons.js does, paced by the
+   Worker's own ceiling — and it is not a reason to think of the run as parallel. */
 const ICON_BATCH = 4;
 const ICON_SAVE_EVERY = 5;
 /* A host that failed is not asked again on every launch: once a week, and only a few at a time.
    The index of when each host was asked lives in device-store.js, keyed by a digest. */
 const ICON_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+/* A refusal is not a failure of the host, so it is retried rather than stamped — this is how many
+   times, at the pauses icons.js derives (`retryDelayMs`), before the next sweep takes over. */
+const ICON_RETRY_ATTEMPTS = 3;
 const ICON_TOPUP_HOSTS = 20;
 let iconsBusy = false;
 /* True once a name has been typed for the bookmark being added, so a suggestion never wins. */
@@ -2700,8 +2713,8 @@ function hostOf(url) {
 
 /* Icons for the collected rows come from the same server endpoint the vault's own icons use, and are kept in this
    device's `localStorage` rather than inside the sealed vault: they describe a page the vault does not hold, so
-   sealing them would mean the vault grows every time an address is merely looked at. */
-const COLLECTED_ICON_KEY = 'collected-icons';
+   sealing them would mean the vault grows every time an address is merely looked at. It is one of
+   device-store.js's own keys, so "Clear this device" removes it with the rest. */
 const collectedIconTries = new Set();
 
 function collectedIconCache() {
@@ -2717,12 +2730,35 @@ function collectedIcon(host) {
   return collectedIconCache()[host] ?? null;
 }
 
-async function loadCollectedIcon(host) {
+/**
+ * One collected row's icon.
+ *
+ * The host is marked while its request is in flight, so a re-render does not open a second one.
+ * The mark is dropped again unless the host actually answered: a refusal during the burst a clear
+ * leaves behind is exactly when a retry matters, and a mark left standing would keep the lettered
+ * tile until the page was reloaded.
+ */
+async function loadCollectedIcon(host, { attempt = 0 } = {}) {
   if (host === '' || collectedIconTries.has(host)) return;
   collectedIconTries.add(host);
 
-  const icon = await fetchIcon(host).catch(() => null);
-  if (!icon) return;
+  const outcome = await fetchIconOutcome(host);
+
+  if (outcome.kind !== OUTCOME_VALUE) {
+    collectedIconTries.delete(host);
+
+    /* The edge refused us, or the request never left. That says nothing about the host, so it is
+       asked again after the backoff icons.js derives — a few seconds, doubling — and no more than
+       a few times. A host that answered "no icon" simply stays lettered, which is normal. */
+    if (!isAnswer(outcome) && attempt < ICON_RETRY_ATTEMPTS) {
+      setTimeout(() => {
+        void loadCollectedIcon(host, { attempt: attempt + 1 });
+      }, retryDelayMs(attempt, outcome.retryAfterMs));
+    }
+    return;
+  }
+
+  const icon = outcome.value;
 
   try {
     const cache = collectedIconCache();
@@ -3240,9 +3276,10 @@ function removeBookmark(bookmark) {
 }
 
 async function fetchAndStoreIcon(id, hostname) {
-  const icon = await fetchIcon(hostname).catch(() => null);
-  if (!icon) return;
+  const outcome = await fetchIconOutcome(hostname);
+  if (outcome.kind !== OUTCOME_VALUE) return;
 
+  const icon = outcome.value;
   const bookmark = findBookmark(id);
   if (!bookmark || bookmark.icon) return;
 
@@ -3311,49 +3348,66 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
 
   iconsBusy = true;
   try {
-    /* Four at a time: enough to finish a library quickly, few enough that the Worker is not the
-       thing that floods someone's server. */
-    for (let at = 0; at < hosts.length; at += ICON_BATCH) {
-      const batch = hosts.slice(at, at + ICON_BATCH);
-      const fetched = await Promise.all(
-        batch.map(async (hostname) => [
-          hostname,
-          await fetchIcon(hostname, { fresh: true }).catch(() => null)
-        ])
-      );
+    /* The queue in icons.js paces the requests; a batch is only how many answers are folded into
+       the vault, and saved, at once. The rounds exist for refusals: the edge may decline a few
+       hosts in a big run, and those are asked again after a pause instead of being stamped. */
+    let pending = hosts;
+    for (let attempt = 0; pending.length > 0; attempt += 1) {
+      const refused = [];
 
-      const filled = fetched.filter(([, icon]) => typeof icon === 'string');
-      if (filled.length > 0) {
-        let next = state.document;
-        for (const [hostname, icon] of filled) {
-          for (const id of byHost.get(hostname) ?? []) {
-            if (next.bookmarks.some((bookmark) => bookmark.id === id && !bookmark.icon)) {
-              next = updateBookmark(next, id, { icon }, Date.now);
-              added += 1;
+      for (let at = 0; at < pending.length; at += ICON_BATCH) {
+        const batch = pending.slice(at, at + ICON_BATCH);
+        const results = await Promise.all(
+          batch.map(async (hostname) => ({
+            host: hostname,
+            outcome: await fetchIconOutcome(hostname, { fresh: true }),
+            attempt
+          }))
+        );
+
+        const filled = results.filter(({ outcome }) => outcome.kind === OUTCOME_VALUE);
+        if (filled.length > 0) {
+          let next = state.document;
+          for (const { host: hostname, outcome } of filled) {
+            for (const id of byHost.get(hostname) ?? []) {
+              if (next.bookmarks.some((bookmark) => bookmark.id === id && !bookmark.icon)) {
+                next = updateBookmark(next, id, { icon: outcome.value }, Date.now);
+                added += 1;
+              }
             }
           }
-        }
-        state.document = next;
-        render();
+          state.document = next;
+          render();
 
-        /* Saving after every four icons would push the whole sealed blob fifty times for one
-           import; this keeps the loss window small without that. */
-        unsavedBatches += 1;
-        if (unsavedBatches >= ICON_SAVE_EVERY) {
-          await saveNow();
-          unsavedBatches = 0;
+          /* Saving after every four icons would push the whole sealed blob fifty times for one
+             import; this keeps the loss window small without that. */
+          unsavedBatches += 1;
+          if (unsavedBatches >= ICON_SAVE_EVERY) {
+            await saveNow();
+            unsavedBatches = 0;
+          }
         }
+
+        done += batch.length;
+        setVaultStatus(
+          attempt === 0
+            ? `Fetching icons… ${Math.min(done, hosts.length)}/${hosts.length}`
+            : `Retrying ${pending.length} refused ${pending.length === 1 ? 'host' : 'hosts'}…`
+        );
+
+        /* A host that answered — with an icon or with "no icon" — is not worth asking again this
+           week. A refusal is not an answer: it leaves the index alone and comes back scheduled.
+           Written per batch so a closed tab does not lose what it already spent. */
+        refused.push(...(await stampAnswers(tries, results, Date.now())));
+        if (results.some(({ outcome }) => isAnswer(outcome))) writeIconTries(tries);
       }
 
-      done += batch.length;
-      setVaultStatus(`Fetching icons… ${done}/${hosts.length}`);
+      if (refused.length === 0 || attempt >= ICON_RETRY_ATTEMPTS) break;
 
-      /* A host that just answered — with an icon or not — is not worth asking again this week.
-         Written per batch so a closed tab does not lose what it already spent. */
-      const triedAt = Date.now();
-      const keys = await Promise.all(batch.map((hostname) => hostKey(hostname)));
-      for (const key of keys) tries[key] = triedAt;
-      writeIconTries(tries);
+      /* Only the refused hosts, and only after the pause the edge or the backoff asked for. The
+         queue spaces these like any other request, so a retry is not a second burst. */
+      await new Promise((resolve) => setTimeout(resolve, Math.max(...refused.map((entry) => entry.delayMs))));
+      pending = refused.map(({ host }) => host);
     }
 
     if (unsavedBatches > 0) await saveNow();
