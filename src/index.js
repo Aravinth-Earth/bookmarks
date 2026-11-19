@@ -1032,7 +1032,7 @@ async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
       headers: {
         'content-type': type,
         'content-length': String(bytes.byteLength),
-        'cache-control': 'public, max-age=2592000, immutable',
+        'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
         /* These bytes come from a host the caller named, and one of the accepted types is SVG,
            which can carry script. The page only ever reads an icon as a subresource, so it is
@@ -1057,19 +1057,6 @@ async function handleIcon(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-/** A small JSON answer with a real cache lifetime, for values that rarely change. */
-function cachedJson(body, maxAge) {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': `public, max-age=${maxAge}`,
-      'content-security-policy': "default-src 'none'",
-      'x-content-type-options': 'nosniff'
-    }
-  });
 }
 
 /** The handful of entities that actually turn up inside a <title>, decoded. */
@@ -1208,7 +1195,14 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
     if (await resolvesRefused(hostname, abort.signal)) return proxyRefused('blocked_host');
 
     const title = await fetchPageTitle(hostname, abort.signal);
-    return title ? cachedJson({ title }, 604_800) : json({ error: 'no_title' }, 404);
+    /* The answer names a host the caller chose, so it is not something a browser may keep: the
+       URL above it is only a hash of that name. */
+    return title
+      ? json({ title }, 200, {
+          'content-security-policy': "default-src 'none'",
+          'x-content-type-options': 'nosniff'
+        })
+      : json({ error: 'no_title' }, 404);
   } catch {
     await logEvent('proxy_refused', {
       route: ROUTE_CLASS[TITLE_PATH],
