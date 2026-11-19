@@ -23,7 +23,8 @@ export const DOMAIN_PREFIX = 'bmk1:';
 export const LABELS = Object.freeze({
   account: `${DOMAIN_PREFIX}account:`,
   auth: `${DOMAIN_PREFIX}auth:`,
-  key: `${DOMAIN_PREFIX}key:`
+  key: `${DOMAIN_PREFIX}key:`,
+  proof: `${DOMAIN_PREFIX}proof:`
 });
 
 export const WORD_COUNT = 13;
@@ -49,6 +50,12 @@ export const ACCOUNT_ID_BYTES = 16;
 export const ACCOUNT_ID_LENGTH = 22;
 /* 32 bytes, base64url, unpadded. */
 export const AUTH_LENGTH = 43;
+/* The id of an account created from a phrase commits to the phrase's public key, so holding the id
+   and holding the key are the same fact. The prefix separates this hash from every other use of
+   SHA-256 in this file, and it is not the `bmk1:` family: that family derives the legacy id and the
+   vault's salt, and both must keep producing exactly what they produced before. */
+export const ACCOUNT_ID_V2_PREFIX = 'bookmarks-account-v2';
+export const COMMITTED_ID_LENGTH = 64; // hex, one SHA-256
 
 const WORD_SET = new Set(WORDLIST);
 const encoder = new TextEncoder();
@@ -173,6 +180,27 @@ export async function accountIdFromPhrase(input) {
   return accountIdFromNormalized(normalizePhrase(input));
 }
 
+/**
+ * The server's name for an account, derived from the phrase's public proof key.
+ *
+ * An id that a key hashed to cannot be claimed with another key: the server recomputes this from
+ * the `proofKey` a creation presents and refuses a request whose id disagrees. It is 64 lowercase
+ * hex characters, one SHA-256 over a constant prefix and the 32 raw key bytes, and it is derived
+ * from public material — it names the account and proves nothing on its own.
+ *
+ * @returns {Promise<string>} 64 lowercase hex characters
+ */
+export async function accountIdFromProofKey(proofKeyText) {
+  const raw = fromBase64Url(proofKeyText, 'the proof key');
+  if (raw.length !== 32) throw new Error('bookmarks: a proof key is 32 bytes');
+  const prefix = encoder.encode(ACCOUNT_ID_V2_PREFIX);
+  const bytes = new Uint8Array(prefix.length + raw.length);
+  bytes.set(prefix);
+  bytes.set(raw, prefix.length);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 async function deriveMaster(normalized, accountId) {
   const salt = await sha256(`${LABELS.key}${accountId}`);
   const material = await crypto.subtle.importKey(
@@ -198,6 +226,50 @@ async function hkdf(master, salt, label) {
     KEY_BITS
   );
   return new Uint8Array(bits);
+}
+
+/* A 32-byte Ed25519 seed is not a key on its own: PKCS8 wraps it in a constant header that names
+   the algorithm and the inner OCTET STRING, and only the seed varies. Writing the header out here
+   is what lets a seed derived from the phrase be imported by WebCrypto. */
+const ED25519_PKCS8_PREFIX = new Uint8Array([
+  0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20
+]);
+const PROOF_TEXT_LENGTH = 43;
+
+function ed25519Pkcs8(seed) {
+  const bytes = new Uint8Array(ED25519_PKCS8_PREFIX.length + seed.length);
+  bytes.set(ED25519_PKCS8_PREFIX);
+  bytes.set(seed, ED25519_PKCS8_PREFIX.length);
+  return bytes;
+}
+
+/**
+ * The phrase's signing key, and the public half as text.
+ *
+ * The seed is one more HKDF output of the same PBKDF2 master, under its own label, so it is as
+ * deterministic as the vault key and entirely separate from it. The key that is kept and returned
+ * is non-extractable: it signs, and no script can read the seed back. The import is done twice on
+ * the same PKCS8 bytes — once extractable, only to read the public `x` out of the JWK, and then
+ * again non-extractable for the key that is actually used — so the readable copy has no other
+ * purpose and is dropped immediately.
+ *
+ * `proofKeyText` is 32 bytes, base64url, 43 characters. It is a public key: it can check a proof
+ * and can never make one, which is why the server can hold it.
+ */
+async function deriveProofKey(master, salt) {
+  const seed = await hkdf(master, salt, `${LABELS.proof}ed25519`);
+  const pkcs8 = ed25519Pkcs8(seed);
+  const readable = await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, true, [
+    'sign'
+  ]);
+  const { x } = await crypto.subtle.exportKey('jwk', readable);
+  if (typeof x !== 'string' || x.length !== PROOF_TEXT_LENGTH) {
+    throw new Error('bookmarks: the proof key has no public half');
+  }
+  const proofKey = await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, [
+    'sign'
+  ]);
+  return { proofKey, proofKeyText: x };
 }
 
 /**
@@ -234,7 +306,17 @@ export async function deriveAuthSecret(input) {
  * `authSecret` is the base64url plaintext. It exists only because creating an account on the
  * server sends it once; nothing writes it to this device.
  *
- * @returns {Promise<{accountId: string, vaultKey: CryptoKey, authKey: CryptoKey, authSecret: string}>}
+ * `proofKey` and `proofKeyText` are the phrase's Ed25519 key pair: a non-extractable signing key
+ * and its public half as text. A server that holds the text can check a proof and can never make
+ * one, so an account created with it stores no credential worth stealing. They are additive
+ * fields — everything above them is exactly what it was.
+ *
+ * `serverId` is the name the server keeps the account under, 64 lowercase hex derived from
+ * `proofKeyText`. It is additive too, and it is deliberately not `accountId`: the account id is
+ * the PBKDF2 salt, the vault's associated data and the local store's key, so it has to keep
+ * deriving exactly what it always did.
+ *
+ * @returns {Promise<{accountId: string, vaultKey: CryptoKey, authKey: CryptoKey, authSecret: string, proofKey: CryptoKey, proofKeyText: string, serverId: string}>}
  */
 export async function deriveAccount(input) {
   const normalized = normalizePhrase(input);
@@ -244,28 +326,36 @@ export async function deriveAccount(input) {
     hkdf(bits, salt, `${LABELS.key}enc`),
     hkdf(bits, salt, `${LABELS.auth}secret`)
   ]);
-  const [vaultKey, authKey] = await Promise.all([
+  const [vaultKey, authKey, proof] = await Promise.all([
     crypto.subtle.importKey('raw', keyBits, 'AES-GCM', false, ['encrypt', 'decrypt']),
-    crypto.subtle.importKey('raw', authBits, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+    crypto.subtle.importKey('raw', authBits, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']),
+    deriveProofKey(bits, salt)
   ]);
   return {
     accountId,
     vaultKey,
     authKey,
-    authSecret: toBase64Url(authBits)
+    authSecret: toBase64Url(authBits),
+    proofKey: proof.proofKey,
+    proofKeyText: proof.proofKeyText,
+    serverId: await accountIdFromProofKey(proof.proofKeyText)
   };
 }
 
 /**
- * The login proof: HMAC-SHA256 over the account and the server's nonce, keyed by the auth
- * secret. The secret itself never crosses the wire, and a proof is useless once the nonce is
- * spent. The account is inside the signed text so a proof cannot be replayed against another
- * account even if a nonce were somehow reused.
+ * The login proof: a signature over the account and the server's nonce. The credential itself
+ * never crosses the wire, and a proof is useless once the nonce is spent. The account is inside
+ * the signed text so a proof cannot be replayed against another account even if a nonce were
+ * somehow reused.
  *
- * `authSecret` is either the base64url secret a phrase derives or the non-extractable HMAC
- * CryptoKey a remembered device holds. Both sign the same text, so a reload keeps signing in.
+ * Two kinds of key sign the same text, so every call site reads the same:
  *
- * @returns {Promise<string>} base64url, 43 characters
+ *   - a base64url auth secret or the non-extractable HMAC key a remembered device holds, which
+ *     is the account shape the server stored before phrase-derived keys existed;
+ *   - the non-extractable Ed25519 key `deriveAccount` returns, whose public half the server holds
+ *     instead of a secret. Its signature is 64 bytes, 86 characters of base64url.
+ *
+ * @returns {Promise<string>} base64url; 43 characters for HMAC, 86 for Ed25519
  */
 export async function proveAuth(authSecret, accountId, nonce) {
   if (typeof nonce !== 'string' || nonce === '') {
@@ -274,11 +364,12 @@ export async function proveAuth(authSecret, accountId, nonce) {
   const key = isCryptoKey(authSecret)
     ? authSecret
     : await authKeyFromBytes(authSecret);
-  if (key.algorithm?.name !== 'HMAC') {
-    throw new Error('bookmarks: a proof is signed with an HMAC key');
+  const algorithm = key.algorithm?.name;
+  if (algorithm !== 'HMAC' && algorithm !== 'Ed25519') {
+    throw new Error('bookmarks: a proof is signed with an HMAC or Ed25519 key');
   }
   const signature = await crypto.subtle.sign(
-    'HMAC',
+    algorithm,
     key,
     encoder.encode(`${accountId}\n${nonce}`)
   );
@@ -302,6 +393,19 @@ export async function authKeyFromBytes(secret) {
     throw new Error(`bookmarks: an auth secret is ${KEY_BITS} bits`);
   }
   return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+}
+
+/**
+ * The public half of a proof key, imported as a verifier: 32 base64url bytes, 43 characters. It
+ * can check a signature and can never make one, which is exactly the capability a server is
+ * given. A caller that holds the text needs no other material to verify a sign-in.
+ */
+export async function proofKeyFromText(text) {
+  const raw = fromBase64Url(text, 'the proof key');
+  if (raw.length !== 32) {
+    throw new Error('bookmarks: a proof key is 32 bytes');
+  }
+  return crypto.subtle.importKey('raw', raw, { name: 'Ed25519' }, false, ['verify']);
 }
 
 /**

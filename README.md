@@ -14,8 +14,8 @@ all; sync only ever moves the sealed blob.
 ## What this is not
 
 - **No account, in the email sense.** The phrase is the account: it derives the account id, the
-  auth secret and the vault key. The id is a hash of the phrase, not an address, and there is
-  nothing to sign up to.
+  auth secret and the vault key. The id is a hash of the phrase, or of the signing key that
+  phrase derives, not an address, and there is nothing to sign up to.
 - **No recovery.** Lose the phrase and the vault is unopenable, by construction. The only backup
   is an export you keep yourself.
 - **No third-party code.** No CDN, no web font, no analytics, no tracker, no vendor icon
@@ -308,6 +308,20 @@ and checks both the fields and the absence of anything identifying.
 is the owner. It is not a bearer token — it cannot log in, create accounts or read anything.
 Nothing in this repository is a credential. The vault key is derived in the browser and never
 reaches the server; the auth secret it derives can log in and cannot decrypt.
+
+The id the server keeps a new account under is the SHA-256 of the phrase's public signing key, 64
+lowercase hex characters, and a creation is accepted only under the id its key hashes to. An id
+therefore commits to one key: someone who knows an id and nothing else cannot derive a phrase of
+their own and install a key against it, because the id they have to name is the one their key
+produces, and that is not a value they can choose. An account created before this rule commits to
+nothing. Its 22-character id is a hash of the phrase, the server cannot recompute any public value
+from it, and a record of that shape keeps the auth secret instead of a key — so a first claim on an
+unused id of that shape is tied to no key, and a breach of such a record yields a credential that
+can sign in. That is the residual risk, and it lasts as long as those ids are accepted. They keep
+working: they sign in with the secret exactly as before, and the shape can only be created by
+presenting a secret, never a key. Nothing migrates onto the new shape, because the id is the PBKDF2
+salt and the associated data of the sealed blob, and an account renamed to a key-derived id could
+not open the vault it already holds.
 
 ## Icons
 

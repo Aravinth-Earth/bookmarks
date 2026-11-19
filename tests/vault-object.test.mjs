@@ -171,6 +171,36 @@ async function provision(harness, authSecret = ACCOUNT.authSecret, invite) {
   );
 }
 
+/** The same flow with the phrase's public proof key, under the id that key commits to. */
+async function blindWithKey(harness, proofKey = ACCOUNT.proofKeyText) {
+  return read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.serverId, proofKey } })
+    )
+  );
+}
+
+async function provisionWithKey(harness) {
+  const challenge = await blindWithKey(harness);
+  if (challenge.status !== 428) return challenge;
+
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.serverId, challenge.body.nonce);
+  return read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.serverId, proofKey: ACCOUNT.proofKeyText, proof }
+      })
+    )
+  );
+}
+
+async function loginWithKey(harness, client) {
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  assert.equal(challenge.status, 200);
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.serverId, challenge.body.nonce);
+  return read(await harness.vault.fetch(request('/login', { body: { proof, client } })));
+}
+
 async function login(harness) {
   const challenge = await read(await harness.vault.fetch(request('/challenge')));
   assert.equal(challenge.status, 200);
@@ -189,6 +219,62 @@ test('a blind creation request writes nothing and answers with a nonce', async (
   assert.equal(typeof response.body.expiresAt, 'number');
   assert.equal(harness.storage.raw.has('account'), false, 'nothing is written yet');
   assert.deepEqual(harness.reserved, [], 'a blind request takes no slot');
+});
+
+test('a second blind creation request answers the live nonce and writes nothing', async () => {
+  const harness = object();
+
+  const first = await blind(harness);
+  const stored = structuredClone(harness.storage.raw.get('create-nonce'));
+
+  const second = await blind(harness);
+
+  assert.equal(second.status, 428);
+  assert.equal(second.body.error, 'proof_required');
+  assert.equal(second.body.nonce, first.body.nonce, 'the live nonce is handed back');
+  assert.equal(second.body.expiresAt, first.body.expiresAt, 'and so is its own deadline');
+  assert.deepEqual(harness.storage.raw.get('create-nonce'), stored, 'asking again writes nothing');
+});
+
+test('a blind creation request cannot displace the challenge a proof is about to sign', async () => {
+  const harness = object();
+
+  /* The person takes a challenge; someone else, holding only the id, posts the same route. */
+  const owner = await blind(harness);
+  const stranger = await blind(harness);
+
+  assert.equal(stranger.body.nonce, owner.body.nonce, 'one challenge, whoever asks');
+
+  /* The proof the person signed over the nonce they were given still creates the account. */
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, owner.body.nonce);
+  const created = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret, proof }
+      })
+    )
+  );
+
+  assert.equal(created.status, 201);
+  assert.equal(created.body.created, true);
+});
+
+test('a blind creation request does not extend the nonce it finds, and a stale one is replaced', async () => {
+  const harness = object();
+
+  const first = await blind(harness);
+
+  /* Half a minute later the same nonce, still on its original deadline: asking is not a refresh. */
+  harness.advance(30_000);
+  const again = await blind(harness);
+  assert.equal(again.body.nonce, first.body.nonce);
+  assert.equal(again.body.expiresAt, first.body.expiresAt);
+
+  /* Past the deadline the nonce is spent by time, so a fresh one is minted with a later stamp. */
+  harness.advance(30_000);
+  const fresh = await blind(harness);
+  assert.notEqual(fresh.body.nonce, first.body.nonce);
+  assert.ok(fresh.body.expiresAt > first.body.expiresAt);
 });
 
 test('a valid proof creates the account exactly once', async () => {
@@ -276,6 +362,170 @@ test('an existing account cannot be re-claimed with a different secret', async (
     'the stored secret is untouched'
   );
   assert.equal((await login(harness)).status, 200, 'the real phrase still signs in');
+});
+
+/* ------------------------------------------------- the phrase-derived proof key */
+
+test('a creation that presents a proof key stores the public key and no secret', async () => {
+  const harness = object({ name: ACCOUNT.serverId });
+
+  const created = await provisionWithKey(harness);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.created, true);
+  assert.deepEqual(harness.reserved, [ACCOUNT.serverId], 'the slot is taken once');
+
+  const record = await harness.storage.get('account');
+  assert.equal('authSecret' in record, false, 'the object holds no credential that can sign in');
+  assert.equal(record.proofKey, ACCOUNT.proofKeyText);
+  assert.equal(record.accountId, ACCOUNT.serverId);
+  assert.equal(record.plan, 'free');
+  assert.equal(record.units, 0);
+
+  /* The same account signs in with the private half, which never left this side. */
+  const session = await loginWithKey(harness, 'desktop');
+  assert.equal(session.status, 200);
+  assert.match(session.body.token, /^[A-Za-z0-9_-]{43}$/);
+
+  /* And deletes behind that session and a fresh signature. */
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.serverId, challenge.body.nonce);
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', { body: { proof }, headers: withToken(session.body.token) })
+    )
+  );
+  assert.equal(deleted.status, 200);
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted'], 'only the tombstone remains');
+});
+
+test('a proof-key creation with a secret proof, or another phrase key, is refused and writes nothing', async () => {
+  const harness = object({ name: ACCOUNT.serverId });
+  const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
+
+  /* A body that asks for the public-key shape but signs the old way. */
+  const first = await blindWithKey(harness);
+  assert.equal(first.status, 428);
+  const hmac = await proveAuth(ACCOUNT.authSecret, ACCOUNT.serverId, first.body.nonce);
+  const asSecret = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: {
+          accountId: ACCOUNT.serverId,
+          authSecret: ACCOUNT.authSecret,
+          proofKey: ACCOUNT.proofKeyText,
+          proof: hmac
+        }
+      })
+    )
+  );
+  assert.equal(asSecret.status, 401);
+  assert.equal(asSecret.body.error, 'bad_proof');
+  assert.equal(harness.storage.raw.has('account'), false);
+  assert.deepEqual(harness.reserved, []);
+
+  /* A valid signature, made by the wrong phrase's key. */
+  const second = await blindWithKey(harness);
+  assert.equal(second.status, 428);
+  const foreign = await proveAuth(other.proofKey, ACCOUNT.serverId, second.body.nonce);
+  const asOther = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.serverId, proofKey: ACCOUNT.proofKeyText, proof: foreign }
+      })
+    )
+  );
+  assert.equal(asOther.status, 401);
+  assert.equal(asOther.body.error, 'bad_proof');
+  assert.equal(harness.storage.raw.has('account'), false);
+  assert.deepEqual(harness.reserved, []);
+});
+
+test('a malformed proof key is an invalid creation, never a fallback to the secret', async () => {
+  const harness = object({ name: ACCOUNT.serverId });
+
+  /* A secret is present and well formed, so only the key can be what is refused. */
+  for (const proofKey of ['x'.repeat(42), '', 'not a key at all', `${'A'.repeat(43)}!`, 42, null]) {
+    const response = await read(
+      await harness.vault.fetch(
+        request('/account', {
+          body: { accountId: ACCOUNT.serverId, authSecret: ACCOUNT.authSecret, proofKey }
+        })
+      )
+    );
+    assert.equal(response.status, 400, JSON.stringify(proofKey));
+    assert.equal(response.body.error, 'invalid');
+  }
+
+  assert.equal(harness.storage.raw.has('create-nonce'), false, 'nothing was even minted');
+  assert.equal(harness.storage.raw.has('account'), false);
+});
+
+test('a proof-key account cannot be re-claimed with a different secret or a different key', async () => {
+  const harness = object({ name: ACCOUNT.serverId });
+  assert.equal((await provisionWithKey(harness)).status, 201);
+
+  const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
+
+  /* A different secret, presented against an id that commits to a key: the secret is the
+     credential of the id the phrase itself hashed to, so there is nothing here for it to create. */
+  const withSecret = await read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.serverId, authSecret: other.authSecret } })
+    )
+  );
+  assert.equal(withSecret.status, 400);
+  assert.equal(withSecret.body.error, 'invalid');
+
+  /* A different public key, signed by its own private half: a real signature for the wrong
+     account. The id it is claimed with is the one the stored key commits to, so the claim ends
+     before a nonce exists for it to sign — which is the whole of the difference this binding makes. */
+  const withKey = await read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.serverId, proofKey: other.proofKeyText } })
+    )
+  );
+  assert.equal(withKey.status, 400);
+  assert.equal(withKey.body.error, 'account_mismatch');
+
+  const record = await harness.storage.get('account');
+  assert.equal(record.proofKey, ACCOUNT.proofKeyText, 'the stored key is untouched');
+  assert.equal('authSecret' in record, false, 'no secret was installed');
+  assert.equal(await harness.storage.get('create-nonce'), undefined, 'and no nonce was minted');
+  assert.equal((await loginWithKey(harness)).status, 200, 'the real phrase still signs in');
+});
+
+test('a record written before phrase-derived keys still signs in and deletes with its secret', async () => {
+  const harness = object();
+
+  /* The shape `createAccount` wrote before this change, written straight into storage. */
+  await harness.storage.put('account', {
+    accountId: ACCOUNT.accountId,
+    authSecret: ACCOUNT.authSecret,
+    plan: 'free',
+    units: 0,
+    via: 'direct',
+    createdAt: 900_000,
+    lastSeenAt: 900_000,
+    paidUntil: null
+  });
+
+  const session = await login(harness);
+  assert.equal(session.status, 200);
+  assert.equal(
+    (await harness.storage.get('account')).authSecret,
+    ACCOUNT.authSecret,
+    'the legacy record is read, not rewritten'
+  );
+
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', { body: { proof }, headers: withToken(session.body.token) })
+    )
+  );
+  assert.equal(deleted.status, 200);
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted']);
 });
 
 test('a new account is refused when the registry is full', async () => {
@@ -428,15 +678,74 @@ test('the right proof logs in, and the same proof cannot be replayed', async () 
   assert.equal(replay.body.error, 'challenge_expired');
 });
 
+test('an empty post to the login route does not end a sign-in that is in progress', async () => {
+  const harness = object();
+  await provision(harness);
+
+  /* The person holds a nonce; a stranger who can reach the route posts nothing at all. */
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const stored = structuredClone(harness.storage.raw.get('nonce'));
+
+  const empty = await read(await harness.vault.fetch(request('/login', { body: {} })));
+  const bodyless = await read(await harness.vault.fetch(request('/login')));
+
+  assert.equal(empty.status, 401);
+  assert.equal(empty.body.error, 'bad_proof');
+  assert.equal(bodyless.status, 401);
+  assert.equal(bodyless.body.error, 'bad_proof');
+  assert.deepEqual(harness.storage.raw.get('nonce'), stored, 'the challenge is still there');
+
+  /* And the proof the person had already signed still signs in. */
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const login = await read(await harness.vault.fetch(request('/login', { body: { proof } })));
+  assert.equal(login.status, 200);
+});
+
+test('a login body that is refused as too large leaves the challenge standing', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const stored = structuredClone(harness.storage.raw.get('nonce'));
+
+  const huge = await read(
+    await harness.vault.fetch(request('/login', { body: { proof: 'a'.repeat(5 * 1024) } }))
+  );
+  assert.equal(huge.status, 413);
+  assert.deepEqual(harness.storage.raw.get('nonce'), stored);
+
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  assert.equal((await read(await harness.vault.fetch(request('/login', { body: { proof } })))).status, 200);
+});
+
+test('a presented proof still spends the challenge, so a guess is not retried against it', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const wrong = await proveAuth('A'.repeat(43), ACCOUNT.accountId, challenge.body.nonce);
+
+  const refused = await read(await harness.vault.fetch(request('/login', { body: { proof: wrong } })));
+  assert.equal(refused.status, 401);
+  assert.equal(refused.body.error, 'bad_proof');
+  assert.equal(await harness.storage.get('nonce'), undefined, 'the attempt spent it');
+
+  const second = await read(await harness.vault.fetch(request('/login', { body: { proof: wrong } })));
+  assert.equal(second.status, 401);
+  assert.equal(second.body.error, 'challenge_expired');
+});
+
 test('a wrong proof is refused, and five in a row from the object lock the account it reached', async () => {
   const harness = object();
   await provision(harness);
 
+  /* The right length and the wrong value, so each of these is an attempt. */
+  const wrong = 'x'.repeat(43);
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     const challenge = await read(await harness.vault.fetch(request('/challenge')));
     assert.equal(challenge.status, 200, `challenge ${attempt}`);
     const response = await read(
-      await harness.vault.fetch(request('/login', { body: { proof: 'not-the-proof' } }))
+      await harness.vault.fetch(request('/login', { body: { proof: wrong } }))
     );
     assert.equal(response.status, 401, `attempt ${attempt}`);
     assert.equal(response.body.error, 'bad_proof');
@@ -445,9 +754,7 @@ test('a wrong proof is refused, and five in a row from the object lock the accou
   const locked = await read(await harness.vault.fetch(request('/challenge')));
   assert.equal(locked.status, 200, 'a challenge still arrives while locked');
 
-  const refused = await read(
-    await harness.vault.fetch(request('/login', { body: { proof: 'not-the-proof' } }))
-  );
+  const refused = await read(await harness.vault.fetch(request('/login', { body: { proof: wrong } })));
   assert.equal(refused.status, 429);
   assert.ok(refused.body.retryAfter > 0);
 
@@ -473,10 +780,12 @@ async function failedLoginFrom(harness, source) {
     await harness.vault.fetch(request('/challenge', { headers: { 'x-vault-source': source } }))
   );
   assert.equal(challenge.status, 200, 'a challenge arrives');
+  /* The right length and the wrong value. A string that could not be the proof at all is not an
+     attempt at this nonce, so it is not counted, and these tests are about the count. */
   return read(
     await harness.vault.fetch(
       request('/login', {
-        body: { proof: 'not-the-proof' },
+        body: { proof: 'x'.repeat(43) },
         headers: { 'x-vault-source': source }
       })
     )
@@ -1514,6 +1823,30 @@ async function proofFor(harness) {
 function withToken(token) {
   return { authorization: `Bearer ${token}` };
 }
+
+test('a delete that presents no proof leaves the challenge it will need', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+  const token = session.body.token;
+
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const stored = structuredClone(harness.storage.raw.get('nonce'));
+
+  const empty = await read(
+    await harness.vault.fetch(request('/delete', { body: {}, headers: withToken(token) }))
+  );
+  assert.equal(empty.status, 401);
+  assert.equal(empty.body.error, 'bad_proof');
+  assert.deepEqual(harness.storage.raw.get('nonce'), stored, 'the challenge is still there');
+
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const deleted = await read(
+    await harness.vault.fetch(request('/delete', { body: { proof }, headers: withToken(token) }))
+  );
+  assert.equal(deleted.status, 200);
+  assert.equal(deleted.body.ok, true);
+});
 
 test('an account is deleted behind a live session and a fresh proof, leaving only a tombstone', async () => {
   const harness = object();

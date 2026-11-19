@@ -242,7 +242,10 @@ function notFound() {
  * reachable only through a Durable Object binding: a public `/a/<id>/admin-…` path is a 404
  * and never reaches the object.
  */
-const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
+/* The two shapes an account id may have, told apart by length alone: 22 case-sensitive base64url
+   characters is the id a phrase hashed to before an account could be created from a key, and 64
+   lowercase hex is the id a public key hashes to now. Both name an object here. */
+const ACCOUNT_ID = /^(?:[A-Za-z0-9_-]{22}|[0-9a-f]{64})$/;
 
 const ICON_PATH = '/icon';
 /* A page's own <title>, so the add form can suggest a name instead of showing a bare host. */
@@ -1202,6 +1205,32 @@ async function handleTitle(request, url, timeoutMs = ICON_TIMEOUT_MS) {
   }
 }
 
+/**
+ * What the Registry knows about one id, or null when it cannot say.
+ *
+ * A Durable Object comes into being the moment it is named, so the question has to be asked before
+ * that — but only the object is the authority on an account. A registry that throws, answers a
+ * status, or answers something that is not a yes/no therefore yields nothing, and the request goes
+ * on to the object exactly as it always did: this check is a resource guard, and a guard that turns
+ * a hiccup into an outage is worse than the waste it saves.
+ */
+async function reservedAtRegistry(env, accountId) {
+  try {
+    const registry = env.REGISTRY;
+    const stub = registry.get(registry.idFromName('registry'));
+    const response = await stub.fetch(
+      new Request(`https://registry/exists?account=${encodeURIComponent(accountId)}`)
+    );
+    if (response.status !== 200) return null;
+
+    const answer = await response.json();
+    if (typeof answer?.exists !== 'boolean' || typeof answer?.room !== 'boolean') return null;
+    return answer;
+  } catch {
+    return null;
+  }
+}
+
 async function handleApi(request, env, url) {
   const path = url.pathname.slice(API_PREFIX.length);
 
@@ -1242,6 +1271,20 @@ async function handleApi(request, env, url) {
        fetch API and would be answered as an internal error. */
     if ((request.method === 'GET' || request.method === 'HEAD') && request.body) {
       return json({ error: 'unexpected_body' }, 400);
+    }
+
+    /* An id that was never reserved has no account behind it, and no object either — asking the
+       runtime for that object by name is what creates it, so the question is put to the Registry
+       first. Creation is the one route allowed to bring an id into existence, and it is also the
+       one route that can be told the cap is full before an object is made to say it. Anything
+       else about an unknown id is a 404, which is what the client already reads as "no account".
+       With no Registry bound, or no usable answer from it, nothing is refused: see the helper. */
+    const known = env.REGISTRY ? await reservedAtRegistry(env, accountId) : null;
+    if (known) {
+      if (!known.exists && forward !== '/account') return json({ error: 'no_account' }, 404);
+      /* The object still holds the authoritative check; this only keeps a full server from paying
+         for an object that would refuse on its first request. Same code it would have answered. */
+      if (!known.exists && !known.room) return json({ error: 'full' }, 429);
     }
 
     const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));

@@ -11,11 +11,20 @@
 
 import { MAX_CODES_PER_CALL, MAX_INVITES, INVITE_TTL_MS, hashCode, newCode, shortHash } from './invites.js';
 
-const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
+/* The two shapes an account id may have, told apart by length alone: 22 case-sensitive base64url
+   characters is the id a phrase hashed to before an account could be created from a key, and 64
+   lowercase hex is the id a public key hashes to now. The cap counts both. */
+const ACCOUNT_ID = /^(?:[A-Za-z0-9_-]{22}|[0-9a-f]{64})$/;
 const DAY_MS = 86_400_000;
 
 /* A var of the same name can override this without a code change. */
 export const MAX_ACCOUNTS = 50;
+
+/* How many released ids are remembered. A deleted id keeps a tombstone in its object and must keep
+   answering `410 account_deleted` instead of `404 no_account`, so the edge needs to know the id was
+   here even though its slot is gone. The list is bounded: past this many deletions the oldest id
+   falls out and degrades to `no_account`, which a client already reads as "create it". */
+export const RELEASED_LIMIT = 256;
 
 const MAX_BODY = 4 * 1024;
 
@@ -93,9 +102,14 @@ export class Registry {
   }
 
   async fetch(request) {
-    const path = new URL(request.url).pathname;
+    const url = new URL(request.url);
+    const path = url.pathname;
 
     if (path === '/reserve' && request.method === 'POST') return this.reserve(request);
+    /* Read-only, and reachable by GET alone: the edge asks this before it names a Durable Object,
+       because naming one creates it. Any other verb falls through to `not_found`, like every route
+       here that is not a write. */
+    if (path === '/exists' && request.method === 'GET') return this.exists(url);
     if (path === '/invites' && request.method === 'GET') return this.listInvites();
     if (path === '/invites/new' && request.method === 'POST') return this.createInvites(request);
     if (path === '/invites/revoke' && request.method === 'POST') return this.revokeInvite(request);
@@ -113,6 +127,32 @@ export class Registry {
     }
 
     return json({ error: 'not_found' }, 404);
+  }
+
+  /**
+   * Whether an id names an account, and whether there is room for another one.
+   *
+   * The Worker asks this before it asks the runtime for a Durable Object, because getting that
+   * object by name creates and stores it: without this question any well-formed id would mint
+   * storage whether or not an account ever existed under it. A released id still answers true —
+   * its object holds a tombstone and answers `410 account_deleted`, and a 404 here would turn that
+   * documented answer into "never existed". `room` is counted over live accounts only, so a
+   * deletion really does free its slot.
+   *
+   * Nothing is written here. This route is asked by the edge on every account path, and a read that
+   * spent an invite or touched the clock would turn a question into a change.
+   */
+  async exists(url) {
+    const accountId = url.searchParams.get('account') ?? '';
+    if (!ACCOUNT_ID.test(accountId)) return json({ error: 'invalid' }, 400);
+
+    const accounts = (await this.storage.get('accounts')) ?? [];
+    const released = (await this.storage.get('released')) ?? [];
+
+    return json({
+      exists: accounts.includes(accountId) || released.includes(accountId),
+      room: accounts.length < await this.max()
+    });
   }
 
   async reserve(request) {
@@ -288,6 +328,14 @@ export class Registry {
     const accounts = (await this.storage.get('accounts')) ?? [];
     const remaining = accounts.filter((id) => id !== accountId);
     if (remaining.length !== accounts.length) await this.storage.put('accounts', remaining);
+
+    /* The id is remembered as "was here" even though its slot is gone: its object still holds the
+       tombstone, and the edge must let the request through so that it can answer 410 rather than
+       404. Newest-kept, oldest dropped past the limit, so a long-lived server cannot grow this
+       without bound. */
+    const released = (await this.storage.get('released')) ?? [];
+    const kept = [...released.filter((id) => id !== accountId), accountId].slice(-RELEASED_LIMIT);
+    await this.storage.put('released', kept);
 
     /* A spent code keeps its usedAt — it was used, and reusing it must stay refused — but it no
        longer names an account that exists. Nothing is gained by keeping the id of a deleted

@@ -293,6 +293,30 @@ function creationRefusal(response) {
   return throttle(response);
 }
 
+/**
+ * Whether a credential is the phrase-derived pair rather than the legacy secret text.
+ *
+ * A secret is a string; the pair is an object carrying the non-extractable signing key and the
+ * public text the server is given. Callers pass the secret exactly as they always did, so the
+ * string form is what every existing call site and test still uses.
+ */
+function isProofCredential(credential) {
+  return typeof credential === 'object' && credential !== null && 'proofKey' in credential;
+}
+
+/**
+ * What a creation body says about its credential.
+ *
+ * A secret is the account's own credential on a server that stored one, so it rides in
+ * `authSecret` exactly as it always did. A phrase-derived pair sends only its public half, because
+ * the server needs to recognise the key and never to hold anything that can sign.
+ */
+function credentialFields(credential) {
+  return isProofCredential(credential)
+    ? { proofKey: credential.proofKeyText }
+    : { authSecret: credential };
+}
+
 export class SyncClient {
   constructor({ base = '/api', fetch: fetchImpl = globalThis.fetch.bind(globalThis) } = {}) {
     this.base = base.replace(/\/+$/, '');
@@ -373,6 +397,10 @@ export class SyncClient {
       });
     }
 
+    /* The credential decides the algorithm on its own: `proveAuth` signs an HMAC when it is handed
+       the secret text or the remembered HMAC key, and an Ed25519 proof when it is handed the
+       phrase's signing key. So this route needs no change for an account whose id commits to a
+       key, and the parameter keeps its old name because it is still the thing that proves one. */
     const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
     const session = await this.request(`/a/${accountId}/login`, {
       method: 'POST',
@@ -400,30 +428,36 @@ export class SyncClient {
    * Create the account on the server.
    *
    * The first request writes nothing: the server answers 428 with a nonce, and the proof is the
-   * same HMAC that signing in uses, so an account cannot be created for an id whose phrase the
+   * same signature that signing in uses, so an account cannot be created for an id whose phrase the
    * caller does not hold. A second attempt is made when the nonce was spent or replaced before
    * the proof arrived, which is what two devices creating the same account at once looks like.
    *
-   * `created: false` means the account already existed and this caller proved the same secret,
+   * `credential` is either the base64url auth secret an account created before ids were committed
+   * to a key signs with, or `{ proofKey, proofKeyText }` — the phrase's non-extractable signing key
+   * and its public half. The second form is what a new account uses: both requests carry
+   * `proofKey` and never a secret, because the server stores the public half and nothing else.
+   *
+   * `created: false` means the account already existed and this caller proved the same credential,
    * so a retried creation is success and does not take a second slot.
    *
    * `invite` is the code an invite-only server asks for. It defaults to an empty string rather
    * than being left off, because the account route reads an empty code as "none offered" and the
    * second request must describe the same creation as the first one did.
    */
-  async register(accountId, authSecret, invite = '') {
+  async register(accountId, credential, invite = '') {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await this.registerOnce(accountId, authSecret, invite);
+      const result = await this.registerOnce(accountId, credential, invite);
       if (result) return result;
     }
     throw new SyncError('REGISTER_FAILED', 'Could not create the account.');
   }
 
   /** One creation round trip. `null` means the challenge was stale and is worth retrying. */
-  async registerOnce(accountId, authSecret, invite = '') {
+  async registerOnce(accountId, credential, invite = '') {
+    const fields = credentialFields(credential);
     const challenge = await this.request(`/a/${accountId}/account`, {
       method: 'POST',
-      body: { accountId, authSecret, invite }
+      body: { accountId, ...fields, invite }
     });
 
     const challengeRefused = creationRefusal(challenge);
@@ -437,10 +471,13 @@ export class SyncClient {
       });
     }
 
-    const proof = await proveAuth(authSecret, accountId, challenge.payload.nonce);
+    /* `proveAuth` reads the key it is handed, so the same call signs the HMAC a secret names and
+       the Ed25519 proof a phrase-derived key names. */
+    const signingKey = isProofCredential(credential) ? credential.proofKey : credential;
+    const proof = await proveAuth(signingKey, accountId, challenge.payload.nonce);
     const response = await this.request(`/a/${accountId}/account`, {
       method: 'POST',
-      body: { accountId, authSecret, proof, invite }
+      body: { accountId, ...fields, proof, invite }
     });
 
     if (response.status === 201) return { created: true };
@@ -589,9 +626,13 @@ export class SyncClient {
   /**
    * Delete the account and everything the server holds for it.
    *
-   * Deletion is destructive, so the session token is not enough: the phrase's secret signs one
+   * Deletion is destructive, so the session token is not enough: the phrase's credential signs one
    * fresh challenge, and the proof rides with the delete. A page that has no session signs in
    * once first; either way the proof is spent and nothing keeps the secret or the proof here.
+   *
+   * The credential may be the base64url secret, the remembered HMAC key, or the phrase's Ed25519
+   * key when the account's id commits to a public key. All three sign the same text, so nothing
+   * here changes with the kind of account; the caller only has to pass the one the id names.
    *
    * The caller is left signed out, because the session it held is part of what was deleted.
    */

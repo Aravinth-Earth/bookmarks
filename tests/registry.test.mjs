@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { MAX_ACCOUNTS, Registry } from '../src/registry.js';
+import { MAX_ACCOUNTS, RELEASED_LIMIT, Registry } from '../src/registry.js';
 
 function storage() {
   const map = new Map();
@@ -48,6 +48,17 @@ function release(body) {
   return reserve(body, '/release');
 }
 
+/* The question the edge asks before it names a Durable Object: a GET, and an id in the query. */
+function exists(account, method = 'GET') {
+  return new Request(`https://registry/exists?account=${encodeURIComponent(account ?? '')}`, { method });
+}
+
+/* Every key and value the object holds, in one string, so a read can be compared with what
+   storage looked like before it. */
+function snapshot(map) {
+  return JSON.stringify([...map.entries()]);
+}
+
 async function json(response) {
   return { status: response.status, body: await response.json() };
 }
@@ -80,6 +91,53 @@ test('an id that is not an account id is refused', async () => {
   for (const accountId of ['', 'short', 'A'.repeat(21), 'A'.repeat(23), 'A'.repeat(21) + '!']) {
     const response = await json(await registry.fetch(reserve({ accountId })));
     assert.equal(response.status, 400, accountId);
+  }
+
+  assert.equal(storage.raw.has('accounts'), false);
+});
+
+/* A sixty-four character id is the one a public key commits to. It is counted exactly like the
+   twenty-two character id a phrase hashes to, because the cap counts accounts and not shapes. */
+const COMMITTED = 'ab'.repeat(32);
+
+test('a committed id reserves, repeats, exists and releases exactly as a legacy one', async () => {
+  const { registry, storage } = harness();
+
+  const first = await json(await registry.fetch(reserve({ accountId: COMMITTED })));
+  assert.equal(first.status, 200);
+  assert.equal(first.body.count, 1);
+
+  const again = await json(await registry.fetch(reserve({ accountId: COMMITTED })));
+  assert.equal(again.status, 200);
+  assert.equal(again.body.alreadyReserved, true);
+  assert.equal(again.body.count, 1);
+  assert.deepEqual(storage.raw.get('accounts'), [COMMITTED]);
+
+  const known = await json(await registry.fetch(exists(COMMITTED)));
+  assert.equal(known.status, 200);
+  assert.deepEqual(known.body, { exists: true, room: true });
+
+  const released = await json(await registry.fetch(release({ accountId: COMMITTED })));
+  assert.equal(released.status, 200);
+  assert.equal(released.body.count, 0, 'the slot is free again');
+  assert.deepEqual(storage.raw.get('accounts'), []);
+  /* Released, not forgotten: the object's tombstone still has to answer for this id. */
+  assert.deepEqual((await json(await registry.fetch(exists(COMMITTED)))).body, {
+    exists: true,
+    room: true
+  });
+});
+
+test('a sixty-four character id that is not lowercase hex is refused', async () => {
+  const { registry, storage } = harness();
+
+  for (const accountId of ['A'.repeat(64), 'g'.repeat(64), `${'a'.repeat(63)}!`]) {
+    const reserveRefused = await json(await registry.fetch(reserve({ accountId })));
+    assert.equal(reserveRefused.status, 400, accountId);
+    assert.deepEqual(reserveRefused.body, { error: 'invalid' });
+
+    const readRefused = await json(await registry.fetch(exists(accountId)));
+    assert.equal(readRefused.status, 400, accountId);
   }
 
   assert.equal(storage.raw.has('accounts'), false);
@@ -386,4 +444,109 @@ test('releasing an account frees its slot and stops the spent code naming it', a
   const fresh = await mint(registry);
   assert.equal(fresh.status, 200);
   assert.equal((await spend(registry, fresh.body.codes[0])).status, 200);
+});
+
+test('an id that was reserved exists, and one that was only well formed does not', async () => {
+  const { registry } = harness();
+  await registry.fetch(reserve({ accountId: accountId(1) }));
+
+  const known = await json(await registry.fetch(exists(accountId(1))));
+  assert.equal(known.status, 200);
+  assert.deepEqual(known.body, { exists: true, room: true });
+
+  const unknown = await json(await registry.fetch(exists(accountId(2))));
+  assert.equal(unknown.status, 200);
+  assert.deepEqual(unknown.body, { exists: false, room: true });
+});
+
+test('the read says there is no room once the accounts fill the cap', async () => {
+  const { registry } = harness({ MAX_ACCOUNTS: '1' });
+  await registry.fetch(reserve({ accountId: accountId(1) }));
+
+  /* Both answers: the account that is there is still there, and nothing more will be made. */
+  assert.deepEqual((await json(await registry.fetch(exists(accountId(1))))).body, {
+    exists: true,
+    room: false
+  });
+  assert.deepEqual((await json(await registry.fetch(exists(accountId(2))))).body, {
+    exists: false,
+    room: false
+  });
+});
+
+test('the read writes nothing, whatever it is asked', async () => {
+  const { registry, storage } = harness({ MAX_ACCOUNTS: '1' });
+  await registry.fetch(reserve({ accountId: accountId(1) }));
+
+  const before = snapshot(storage.raw);
+  await registry.fetch(exists(accountId(1)));
+  await registry.fetch(exists(accountId(2)));
+  await registry.fetch(exists('not-an-id'));
+
+  assert.equal(snapshot(storage.raw), before, 'a question is not a change');
+});
+
+test('the read is a GET, and any other verb is not a route', async () => {
+  const { registry, storage } = harness();
+  await registry.fetch(reserve({ accountId: accountId(1) }));
+  const before = snapshot(storage.raw);
+
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const response = await json(await registry.fetch(exists(accountId(1), method)));
+    assert.equal(response.status, 404, method);
+    assert.deepEqual(response.body, { error: 'not_found' });
+  }
+
+  assert.equal(snapshot(storage.raw), before);
+});
+
+test('the read refuses an id that is not an account id', async () => {
+  const { registry, storage } = harness();
+  const before = snapshot(storage.raw);
+
+  for (const candidate of ['', 'short', 'A'.repeat(21), 'A'.repeat(23), `${'A'.repeat(21)}!`]) {
+    const response = await json(await registry.fetch(exists(candidate)));
+    assert.equal(response.status, 400, candidate);
+    assert.deepEqual(response.body, { error: 'invalid' });
+  }
+
+  assert.equal(snapshot(storage.raw), before);
+});
+
+test('a released id still exists, so its tombstone can answer, and its slot is free', async () => {
+  const { registry } = harness({ MAX_ACCOUNTS: '1' });
+  await registry.fetch(reserve({ accountId: accountId(1) }));
+  assert.equal((await json(await registry.fetch(exists(accountId(1))))).body.room, false);
+
+  const released = await json(await registry.fetch(release({ accountId: accountId(1) })));
+  assert.equal(released.status, 200);
+  assert.equal(released.body.count, 0, 'the slot is free again');
+
+  /* The object keeps a tombstone and answers 410; that answer is only reachable if the id is not
+     refused as unknown at the edge. */
+  assert.deepEqual((await json(await registry.fetch(exists(accountId(1))))).body, {
+    exists: true,
+    room: true
+  });
+
+  const stats = await json(await registry.fetch(new Request('https://registry/stats')));
+  assert.equal(stats.body.count, 0, 'and the deleted account is not counted against the cap');
+});
+
+test('the released ids are bounded, and the oldest is forgotten first', async () => {
+  const { registry, storage } = harness();
+
+  /* One more deletion than the list can hold. An id need not have had a slot to be remembered: a
+     release is the statement that the id was here. */
+  for (let index = 0; index <= RELEASED_LIMIT; index += 1) {
+    assert.equal((await json(await registry.fetch(release({ accountId: accountId(index) })))).status, 200);
+  }
+
+  const kept = await registry.storage.get('released');
+  assert.equal(kept.length, RELEASED_LIMIT, 'the list stays bounded');
+  assert.equal(kept.at(-1), accountId(RELEASED_LIMIT), 'newest kept');
+
+  assert.equal((await json(await registry.fetch(exists(accountId(0))))).body.exists, false, 'oldest fell out');
+  assert.equal((await json(await registry.fetch(exists(accountId(1))))).body.exists, true);
+  assert.equal(storage.raw.get('released').length, RELEASED_LIMIT);
 });
