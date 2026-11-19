@@ -1,9 +1,10 @@
 /**
  * Bookmarks — one Durable Object per account.
  *
- * It is a mailbox for one sealed blob. It holds the account's auth secret (which authenticates
- * and cannot decrypt), the current vault, the last few versions, a single-use nonce, and the
- * session hashes. It never sees a bookmark, a name, a URL, an icon or a key.
+ * It is a mailbox for one sealed blob. It holds the account's auth secret — or, for an account
+ * created from a phrase-derived key, only that key's public half — plus the current vault, the
+ * last few versions, a single-use nonce, and the session hashes. Either credential authenticates
+ * and neither can decrypt. It never sees a bookmark, a name, a URL, an icon or a key.
  *
  * One object per account is what removes the write race: every request for that account is
  * serialized here, so "compare the version, then write" needs no retry loop and no conditional
@@ -80,6 +81,9 @@ const UNATTRIBUTED = 'unattributed';
 
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{22}$/;
 const AUTH_SECRET = /^[A-Za-z0-9_-]{43}$/;
+/* An Ed25519 public key is 32 bytes, base64url: the same 43 characters as a secret and a
+   different kind of value — it verifies a proof and cannot make one. */
+const PROOF_KEY = /^[A-Za-z0-9_-]{43}$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const SESSION_HASH = 43;
 /* Eight random bytes, base64url: an id a person may read and a route may name, never the token
@@ -292,6 +296,54 @@ async function verifyProof(authSecret, accountId, nonce, proof) {
   }
 }
 
+/**
+ * Verify a proof against an Ed25519 public key, the same way `verifyProof` checks an HMAC.
+ *
+ * The key is 32 base64url bytes imported as a verifier: it can check a signature and cannot make
+ * one. Anything malformed — the key, the proof, a signature that does not verify — is `false`,
+ * so a caller compares it exactly as it compares an HMAC result and no new refusal is needed.
+ *
+ * What this does not do, and cannot: the account id is a hash of the phrase truncated to 16 bytes,
+ * and it is also the object's name, so the server has no way to check that a submitted public key
+ * was really derived from the phrase behind that id. What is gained is narrower and real — the
+ * first claim presents a signature under a key whose private half never leaves the client, so the
+ * object stores nothing reusable. A breach of this object yields a public key, not a credential.
+ */
+async function verifySignature(proofKeyText, accountId, nonce, proof) {
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      fromBase64Url(proofKeyText, 'the proof key'),
+      { name: 'Ed25519' },
+      false,
+      ['verify']
+    );
+    return await crypto.subtle.verify(
+      'Ed25519',
+      key,
+      fromBase64Url(proof, 'the proof'),
+      encoder.encode(`${accountId}\n${nonce}`)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The proof a record accepts, chosen from the record alone.
+ *
+ * A record that carries `proofKey` is checked as an Ed25519 signature under that public key; any
+ * older record is checked as the HMAC it always was. Nothing the request supplies becomes the
+ * expected value, so presenting a different secret or a different public key cannot re-claim an
+ * account or replace its credential — it is simply a proof the stored record does not accept.
+ */
+async function verifyRecordProof(account, accountId, nonce, proof) {
+  if (account?.proofKey !== undefined) {
+    return verifySignature(account.proofKey, accountId, nonce, proof);
+  }
+  return verifyProof(account?.authSecret, accountId, nonce, proof);
+}
+
 export class Vault {
   constructor(ctx, env, options = {}) {
     this.ctx = ctx;
@@ -366,16 +418,23 @@ export class Vault {
   }
 
   /**
-   * Create the account, gated on a proof of the secret it will store.
+   * Create the account, gated on a proof of the phrase.
    *
    * A request without `proof` writes nothing. It stores a single-use nonce and answers 428 with
    * `{ error: 'proof_required', nonce, expiresAt }`; the caller signs `${accountId}\n${nonce}`
-   * with the auth secret — the same HMAC `/login` verifies — and presents that proof with the
-   * same body. Only that second request may write the account.
+   * with the phrase's credential and presents that proof with the same body. Only that second
+   * request may write the account.
+   *
+   * The credential is one of two shapes. A caller that presents `proofKey` — the public half of
+   * the phrase's Ed25519 key, 43 base64url characters — signs the challenge with the private half,
+   * and the record keeps only the public key: there is then no reusable secret in this object for
+   * a breach to yield. A caller that presents none follows the established shape and stores the
+   * auth secret, byte-for-byte as before, so a browser that has not been updated keeps working.
    *
    * An account that already exists is never written again and never overwritten. Its proof is
-   * checked against the stored secret, and a wrong one answers exactly like a failed login, so
-   * this route cannot be used to re-claim an id with a different secret.
+   * checked against the credential the stored record carries and against nothing the request
+   * submits, and a wrong one answers exactly like a failed login, so this route cannot be used to
+   * re-claim an id with a different secret or a different public key.
    */
   async createAccount(request) {
     const shut = await this.refuseDisabled();
@@ -390,9 +449,25 @@ export class Vault {
 
     const accountId = body.value?.accountId;
     const authSecret = body.value?.authSecret;
+    /* Optional, and its presence is what selects the record's shape. An explicit `undefined` is
+       an absent field; anything else present has to be a public key. */
+    const proofKey = body.value?.proofKey;
+    const usesProofKey = proofKey !== undefined;
 
-    if (!ACCOUNT_ID.test(accountId ?? '') || !AUTH_SECRET.test(authSecret ?? '')) {
+    /* A proof key replaces the secret rather than joining it, so a body that presents one need
+       not carry a secret at all: the record will not store one. */
+    if (
+      !ACCOUNT_ID.test(accountId ?? '') ||
+      (!usesProofKey && !AUTH_SECRET.test(authSecret ?? ''))
+    ) {
       /* Whatever was presented is not an account id or a secret, and is not written down. */
+      await logEvent('create_refused', { route: 'signin', reason: 'invalid' });
+      return json({ error: 'invalid' }, 400);
+    }
+    /* Present but not a 32-byte Ed25519 public key is a malformed creation, not a legacy one.
+       Falling back to the secret here would quietly store the credential the caller was leaving
+       behind, so the shape is refused instead. */
+    if (usesProofKey && !PROOF_KEY.test(proofKey)) {
       await logEvent('create_refused', { route: 'signin', reason: 'invalid' });
       return json({ error: 'invalid' }, 400);
     }
@@ -435,10 +510,16 @@ export class Vault {
     await this.storage.delete('create-nonce');
 
     const existing = await this.storage.get('account');
-    /* For an existing account the proof is checked against the secret it was created with, so
-       presenting the same id with a different secret can never re-claim it. */
-    const expected = existing ? existing.authSecret : authSecret;
-    if (!(await verifyProof(expected, accountId, challenge.value, proof))) {
+    /* For an existing account the proof is checked against what that record carries — its public
+       key, or the secret it was created with — and never against the body, so presenting the same
+       id with a different credential can never re-claim it. Only a first claim is checked against
+       what the caller presented, and that is the one moment a credential is chosen. */
+    const verified = existing
+      ? await verifyRecordProof(existing, accountId, challenge.value, proof)
+      : usesProofKey
+        ? await verifySignature(proofKey, accountId, challenge.value, proof)
+        : await verifyProof(authSecret, accountId, challenge.value, proof);
+    if (!verified) {
       await logEvent('create_refused', {
         route: 'signin',
         reason: 'bad_proof',
@@ -520,7 +601,10 @@ export class Vault {
 
     await this.storage.put('account', {
       accountId,
-      authSecret,
+      /* One credential and never both. A phrase-derived account holds the public key, so a breach
+         of this object leaves nothing that can sign in; a legacy account holds the secret it
+         always did, because the client that created it still signs with that secret. */
+      ...(usesProofKey ? { proofKey } : { authSecret }),
       plan,
       units,
       via,
@@ -616,7 +700,7 @@ export class Vault {
     const client = CLIENT_KINDS.has(body.value?.client) ? body.value.client : 'unknown';
     const ok =
       typeof proof === 'string' && proof.length > 0
-        ? await verifyProof(account.authSecret, account.accountId, nonce.value, proof)
+        ? await verifyRecordProof(account, account.accountId, nonce.value, proof)
         : false;
 
     if (!ok) {
@@ -966,9 +1050,10 @@ export class Vault {
    *
    * A session alone is not enough for a destructive act, and a proof alone is not enough to
    * show the caller is signed in. Both are required: the bearer token names the account's
-   * session, and the HMAC over the last unspent nonce proves the caller holds the phrase. A
-   * wrong proof is counted exactly as a failed sign-in is, so this route is not a cheaper way to
-   * guess.
+   * session, and a proof over the last unspent nonce proves the caller holds the phrase — an
+   * HMAC under the stored secret for an older record, a signature under the stored public key
+   * for one created from a phrase-derived key. A wrong proof is counted exactly as a failed
+   * sign-in is, so this route is not a cheaper way to guess.
    *
    * What remains is one key: the date. A device still holding the phrase is answered 410
    * `account_deleted`, never 404 — `404` is the answer that makes a client create the account
@@ -1014,7 +1099,7 @@ export class Vault {
     const proof = body.value?.proof;
     const ok =
       typeof proof === 'string' && proof.length > 0
-        ? await verifyProof(account.authSecret, account.accountId, nonce.value, proof)
+        ? await verifyRecordProof(account, account.accountId, nonce.value, proof)
         : false;
 
     if (!ok) {

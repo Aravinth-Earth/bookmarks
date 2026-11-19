@@ -35,6 +35,7 @@ import {
   open,
   openVault,
   phraseProblem,
+  proofKeyFromText,
   proveAuth,
   seal,
   sealVault,
@@ -107,11 +108,18 @@ test('the constants name the plan, and the domain prefix is bmk1:', () => {
 });
 
 test('every derivation label carries the bmk1: prefix and no label repeats', () => {
-  assert.deepEqual(Object.keys(LABELS).sort(), ['account', 'auth', 'key']);
+  assert.deepEqual(Object.keys(LABELS).sort(), ['account', 'auth', 'key', 'proof']);
   for (const [name, label] of Object.entries(LABELS)) {
     assert.ok(label.startsWith(DOMAIN_PREFIX), `${name} label "${label}" leaves the domain`);
   }
-  assert.equal(new Set(Object.values(LABELS)).size, 3, 'each derivation gets its own label');
+  assert.equal(new Set(Object.values(LABELS)).size, 4, 'each derivation gets its own label');
+  /* No label may be a prefix of another, or two derivations could share an input. */
+  for (const [name, label] of Object.entries(LABELS)) {
+    for (const [other, otherLabel] of Object.entries(LABELS)) {
+      if (name === other) continue;
+      assert.equal(otherLabel.startsWith(label), false, `${other} starts with ${name}`);
+    }
+  }
 });
 
 test('generatePhrase returns thirteen listed words, and two phrases differ', () => {
@@ -242,6 +250,74 @@ test('a proof from a stored key is the proof from the secret it was made from', 
 
   await assert.rejects(() => proveAuth(vaultKey, accountId, 'nonce-one'), /HMAC/);
   await assert.rejects(() => proveAuth(authKey, accountId, ''), /nonce/);
+});
+
+test('the HMAC proof is byte-for-byte what it was before a signing key existed', async () => {
+  const { accountId, authSecret, authKey } = await deriveAccount(PHRASE_A);
+  const { createHmac } = await import('node:crypto');
+
+  /* An independent HMAC of the same text: the secret path must not have moved. */
+  const expected = createHmac('sha256', Buffer.from(authSecret, 'base64url'))
+    .update(`${accountId}\nnonce-one`)
+    .digest('base64url');
+
+  assert.equal(await proveAuth(authSecret, accountId, 'nonce-one'), expected);
+  assert.equal(await proveAuth(authKey, accountId, 'nonce-one'), expected);
+});
+
+test('a phrase derives one Ed25519 proof key, and its public half is deterministic', async () => {
+  const first = await deriveAccount(PHRASE_A);
+  const again = await deriveAccount(PHRASE_A);
+  const other = await deriveAccount(PHRASE_B);
+
+  assert.match(first.proofKeyText, BASE64URL_43);
+  assert.ok(first.proofKey instanceof CryptoKey);
+  assert.equal(first.proofKey.algorithm.name, 'Ed25519');
+  assert.equal(first.proofKey.extractable, false, 'the seed cannot be read back');
+  await assert.rejects(() => crypto.subtle.exportKey('pkcs8', first.proofKey), /not extractable/i);
+
+  assert.equal(again.proofKeyText, first.proofKeyText, 'the same phrase derives the same key');
+  assert.notEqual(other.proofKeyText, first.proofKeyText, 'another phrase is another key');
+
+  /* Additive: the account id and the secret are exactly what they were before the key existed. */
+  assert.equal(again.accountId, first.accountId);
+  assert.equal(again.authSecret, first.authSecret);
+  assert.equal(again.authSecret, await deriveAuthSecret(PHRASE_A));
+  assert.equal(again.accountId, await accountIdFromPhrase(PHRASE_A));
+});
+
+test('an Ed25519 proof verifies under the public text and names the account and nonce', async () => {
+  const { accountId, proofKey, proofKeyText } = await deriveAccount(PHRASE_A);
+  const other = await deriveAccount(PHRASE_B);
+  const verifier = await proofKeyFromText(proofKeyText);
+
+  assert.equal(verifier.algorithm.name, 'Ed25519');
+  assert.equal(verifier.extractable, false);
+  assert.deepEqual(verifier.usages, ['verify'], 'a public key cannot make a proof');
+
+  const proof = await proveAuth(proofKey, accountId, 'nonce-one');
+  assert.match(proof, /^[A-Za-z0-9_-]{86}$/, '64 bytes of signature');
+
+  const checks = (signature, id, nonce) =>
+    crypto.subtle.verify(
+      'Ed25519',
+      verifier,
+      Buffer.from(signature, 'base64url'),
+      new TextEncoder().encode(`${id}\n${nonce}`)
+    );
+
+  assert.equal(await checks(proof, accountId, 'nonce-one'), true);
+  assert.equal(await checks(proof, accountId, 'nonce-two'), false, 'a nonce cannot be swapped');
+  assert.equal(await checks(proof, other.accountId, 'nonce-one'), false, 'an account cannot be swapped');
+  assert.equal(await proveAuth(proofKey, accountId, 'nonce-one'), proof, 'a signature is deterministic');
+
+  /* A real signature by the wrong phrase's key is still the wrong account's proof. */
+  const foreign = await proveAuth(other.proofKey, accountId, 'nonce-one');
+  assert.equal(await checks(foreign, accountId, 'nonce-one'), false);
+
+  /* The text helper refuses anything that is not a 32-byte key. */
+  await assert.rejects(() => proofKeyFromText('A'.repeat(22)), /32 bytes/);
+  await assert.rejects(() => proofKeyFromText('not base64url!'), /base64url/);
 });
 
 test('remembered material is only ever a non-extractable key', async () => {

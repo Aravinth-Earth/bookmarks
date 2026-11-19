@@ -171,6 +171,36 @@ async function provision(harness, authSecret = ACCOUNT.authSecret, invite) {
   );
 }
 
+/** The same flow with the phrase's public proof key instead of its secret. */
+async function blindWithKey(harness, proofKey = ACCOUNT.proofKeyText) {
+  return read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.accountId, proofKey } })
+    )
+  );
+}
+
+async function provisionWithKey(harness) {
+  const challenge = await blindWithKey(harness);
+  if (challenge.status !== 428) return challenge;
+
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.accountId, challenge.body.nonce);
+  return read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.accountId, proofKey: ACCOUNT.proofKeyText, proof }
+      })
+    )
+  );
+}
+
+async function loginWithKey(harness, client) {
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  assert.equal(challenge.status, 200);
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.accountId, challenge.body.nonce);
+  return read(await harness.vault.fetch(request('/login', { body: { proof, client } })));
+}
+
 async function login(harness) {
   const challenge = await read(await harness.vault.fetch(request('/challenge')));
   assert.equal(challenge.status, 200);
@@ -276,6 +306,185 @@ test('an existing account cannot be re-claimed with a different secret', async (
     'the stored secret is untouched'
   );
   assert.equal((await login(harness)).status, 200, 'the real phrase still signs in');
+});
+
+/* ------------------------------------------------- the phrase-derived proof key */
+
+test('a creation that presents a proof key stores the public key and no secret', async () => {
+  const harness = object();
+
+  const created = await provisionWithKey(harness);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.created, true);
+  assert.deepEqual(harness.reserved, [ACCOUNT.accountId], 'the slot is taken once');
+
+  const record = await harness.storage.get('account');
+  assert.equal('authSecret' in record, false, 'the object holds no credential that can sign in');
+  assert.equal(record.proofKey, ACCOUNT.proofKeyText);
+  assert.equal(record.accountId, ACCOUNT.accountId);
+  assert.equal(record.plan, 'free');
+  assert.equal(record.units, 0);
+
+  /* The same account signs in with the private half, which never left this side. */
+  const session = await loginWithKey(harness, 'desktop');
+  assert.equal(session.status, 200);
+  assert.match(session.body.token, /^[A-Za-z0-9_-]{43}$/);
+
+  /* And deletes behind that session and a fresh signature. */
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const proof = await proveAuth(ACCOUNT.proofKey, ACCOUNT.accountId, challenge.body.nonce);
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', { body: { proof }, headers: withToken(session.body.token) })
+    )
+  );
+  assert.equal(deleted.status, 200);
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted'], 'only the tombstone remains');
+});
+
+test('a proof-key creation with a secret proof, or another phrase key, is refused and writes nothing', async () => {
+  const harness = object();
+  const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
+
+  /* A body that asks for the public-key shape but signs the old way. */
+  const first = await blindWithKey(harness);
+  assert.equal(first.status, 428);
+  const hmac = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, first.body.nonce);
+  const asSecret = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: {
+          accountId: ACCOUNT.accountId,
+          authSecret: ACCOUNT.authSecret,
+          proofKey: ACCOUNT.proofKeyText,
+          proof: hmac
+        }
+      })
+    )
+  );
+  assert.equal(asSecret.status, 401);
+  assert.equal(asSecret.body.error, 'bad_proof');
+  assert.equal(harness.storage.raw.has('account'), false);
+  assert.deepEqual(harness.reserved, []);
+
+  /* A valid signature, made by the wrong phrase's key. */
+  const second = await blindWithKey(harness);
+  assert.equal(second.status, 428);
+  const foreign = await proveAuth(other.proofKey, ACCOUNT.accountId, second.body.nonce);
+  const asOther = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.accountId, proofKey: ACCOUNT.proofKeyText, proof: foreign }
+      })
+    )
+  );
+  assert.equal(asOther.status, 401);
+  assert.equal(asOther.body.error, 'bad_proof');
+  assert.equal(harness.storage.raw.has('account'), false);
+  assert.deepEqual(harness.reserved, []);
+});
+
+test('a malformed proof key is an invalid creation, never a fallback to the secret', async () => {
+  const harness = object();
+
+  /* A secret is present and well formed, so only the key can be what is refused. */
+  for (const proofKey of ['x'.repeat(42), '', 'not a key at all', `${'A'.repeat(43)}!`, 42, null]) {
+    const response = await read(
+      await harness.vault.fetch(
+        request('/account', {
+          body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret, proofKey }
+        })
+      )
+    );
+    assert.equal(response.status, 400, JSON.stringify(proofKey));
+    assert.equal(response.body.error, 'invalid');
+  }
+
+  assert.equal(harness.storage.raw.has('create-nonce'), false, 'nothing was even minted');
+  assert.equal(harness.storage.raw.has('account'), false);
+});
+
+test('a proof-key account cannot be re-claimed with a different secret or a different key', async () => {
+  const harness = object();
+  assert.equal((await provisionWithKey(harness)).status, 201);
+
+  const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
+
+  /* A different secret's HMAC. */
+  const first = await read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.accountId, authSecret: other.authSecret } })
+    )
+  );
+  assert.equal(first.status, 428);
+  const hmac = await proveAuth(other.authSecret, ACCOUNT.accountId, first.body.nonce);
+  const withSecret = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.accountId, authSecret: other.authSecret, proof: hmac }
+      })
+    )
+  );
+  assert.equal(withSecret.status, 401);
+  assert.equal(withSecret.body.error, 'bad_proof');
+
+  /* A different public key, signed by its own private half: a real signature for the wrong
+     account, which is exactly the request that used to install a new credential. */
+  const second = await read(
+    await harness.vault.fetch(
+      request('/account', { body: { accountId: ACCOUNT.accountId, proofKey: other.proofKeyText } })
+    )
+  );
+  assert.equal(second.status, 428);
+  const signature = await proveAuth(other.proofKey, ACCOUNT.accountId, second.body.nonce);
+  const withKey = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.accountId, proofKey: other.proofKeyText, proof: signature }
+      })
+    )
+  );
+  assert.equal(withKey.status, 401);
+  assert.equal(withKey.body.error, 'bad_proof');
+
+  const record = await harness.storage.get('account');
+  assert.equal(record.proofKey, ACCOUNT.proofKeyText, 'the stored key is untouched');
+  assert.equal('authSecret' in record, false, 'no secret was installed');
+  assert.equal((await loginWithKey(harness)).status, 200, 'the real phrase still signs in');
+});
+
+test('a record written before phrase-derived keys still signs in and deletes with its secret', async () => {
+  const harness = object();
+
+  /* The shape `createAccount` wrote before this change, written straight into storage. */
+  await harness.storage.put('account', {
+    accountId: ACCOUNT.accountId,
+    authSecret: ACCOUNT.authSecret,
+    plan: 'free',
+    units: 0,
+    via: 'direct',
+    createdAt: 900_000,
+    lastSeenAt: 900_000,
+    paidUntil: null
+  });
+
+  const session = await login(harness);
+  assert.equal(session.status, 200);
+  assert.equal(
+    (await harness.storage.get('account')).authSecret,
+    ACCOUNT.authSecret,
+    'the legacy record is read, not rewritten'
+  );
+
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', { body: { proof }, headers: withToken(session.body.token) })
+    )
+  );
+  assert.equal(deleted.status, 200);
+  assert.deepEqual([...harness.storage.raw.keys()], ['deleted']);
 });
 
 test('a new account is refused when the registry is full', async () => {
