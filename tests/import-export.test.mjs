@@ -28,8 +28,10 @@ import {
   exportSealed,
   importBrowserBookmarks,
   importPlain,
+  linkHref,
   mergeInto,
-  parseSealed
+  parseSealed,
+  sanitizeDocument
 } from '../public/import-export.js';
 
 const T1 = Date.UTC(2025, 11, 26, 10, 30, 0);
@@ -444,6 +446,80 @@ test('a file stamped past this device clock arrives at the import time, and stay
   const merged = mergeDocuments(deleted, far, () => NOW + 120_000);
   assert.equal(merged.document.bookmarks.length, 0, 'the deletion holds against that copy');
   assert.equal(merged.document.tombstones.length, 1, 'and the tombstone survives the merge');
+});
+
+/* A document that arrived from outside this page: a sealed backup written by an older build, a
+   copy from another device, or a hand-edited file. Three of these four URLs are not bookmarks. */
+function documentWithRefusedUrls() {
+  const at = new Date(T1).toISOString();
+  const record = (id, url, name) => ({
+    id,
+    url,
+    hostname: 'example.com',
+    origin: 'https://example.com',
+    name,
+    createdAt: at,
+    updatedAt: at
+  });
+
+  return {
+    ...createDocument(),
+    prefs: { iconOnly: true, view: 'pills', updatedAt: T1 },
+    activity: [],
+    bookmarks: [
+      record('kept', 'https://example.com/x', 'Example'),
+      record('script', 'javascript:alert(1)', 'Script'),
+      record('data', 'data:text/html,<script>alert(1)</script>', 'Data'),
+      record('vbscript', 'vbscript:msgbox(1)', 'VBScript')
+    ]
+  };
+}
+
+test('a document is sanitised to its http and https entries, and the rest are counted', () => {
+  const { document, dropped } = sanitizeDocument(documentWithRefusedUrls());
+
+  assert.equal(dropped, 3);
+  assert.deepEqual(
+    document.bookmarks.map((bookmark) => bookmark.url),
+    ['https://example.com/x']
+  );
+  /* Everything that is not a bookmark list crosses untouched. */
+  assert.equal(document.schema, createDocument().schema);
+  assert.deepEqual(document.prefs, { iconOnly: true, view: 'pills', updatedAt: T1 });
+  assert.deepEqual(document.activity, []);
+});
+
+test('a browser export writes only the entries that pass the URL rule', () => {
+  const html = exportBrowserBookmarks(documentWithRefusedUrls());
+
+  assert.equal((html.match(/<A HREF=/gi) ?? []).length, 1);
+  assert.match(html, /<A HREF="https:\/\/example\.com\/x"/i);
+  assert.doesNotMatch(html, /javascript:/i);
+  assert.doesNotMatch(html, /data:/i);
+  assert.doesNotMatch(html, /vbscript:/i);
+});
+
+test('sanitising a document leaves the document it was given untouched', () => {
+  const input = documentWithRefusedUrls();
+  const before = structuredClone(input);
+
+  const { document } = sanitizeDocument(input);
+
+  assert.notEqual(document, input);
+  assert.notEqual(document.bookmarks, input.bookmarks);
+  assert.deepEqual(input, before);
+});
+
+/* The row builder asks this before it sets `href`, so a refused URL becomes a row with no live
+   link rather than a link the browser would run. No DOM is needed to state that boundary. */
+test('a row gets an address only when the URL rule would open it', () => {
+  assert.equal(linkHref('https://example.com/x'), 'https://example.com/x');
+  assert.equal(linkHref('example.com'), 'https://example.com/');
+  assert.equal(linkHref('javascript:alert(1)'), null);
+  assert.equal(linkHref('data:text/html,<script>alert(1)</script>'), null);
+  assert.equal(linkHref('vbscript:msgbox(1)'), null);
+  assert.equal(linkHref(''), null);
+  assert.equal(linkHref(undefined), null);
 });
 
 test('a document round-trip keeps the label choice it was exported with', () => {

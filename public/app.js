@@ -55,8 +55,10 @@ import {
   exportSealed,
   importBrowserBookmarks,
   importPlain,
+  linkHref,
   mergeInto,
-  parseSealed
+  parseSealed,
+  sanitizeDocument
 } from './import-export.js';
 import { tileFor } from './tiles.js';
 import {
@@ -302,6 +304,14 @@ function messageFor(error) {
 
 function labelOf(bookmark) {
   return bookmark.name || bookmark.search || bookmark.hostname;
+}
+
+/**
+ * The sentence the import dialog uses for an entry it cannot read, for the same loss when the
+ * entry arrived with a document instead of a file: one refused URL is left out, never fatal.
+ */
+function droppedSentence(dropped) {
+  return `${dropped} could not be read and ${dropped === 1 ? 'was' : 'were'} left out.`;
 }
 
 const ICON_PATHS = {
@@ -1405,6 +1415,12 @@ async function reconcile() {
         'The copy on the server could not be opened with this phrase.'
       );
     }
+    /* A copy from another device is a document like any other: it is read through the URL rule
+       before it is merged, so a refused record cannot ride a merge into the list. */
+    const { document: safeRemote, dropped } = sanitizeDocument(remoteDocument);
+    remoteDocument = safeRemote;
+    if (dropped > 0) announce(droppedSentence(dropped));
+
     const { document: merged } = mergeDocuments(state.document, remoteDocument, Date.now, {
       device: deviceId()
     });
@@ -1443,6 +1459,12 @@ async function reconcile() {
           'The copy on the server could not be opened with this phrase.'
         );
       }
+      /* The copy that won the conflict is read through the same rule; a conflict is not a reason
+         to trust one document more than the other. */
+      const { document: safeConflict, dropped } = sanitizeDocument(conflictDocument);
+      conflictDocument = safeConflict;
+      if (dropped > 0) announce(droppedSentence(dropped));
+
       const { document: merged } = mergeDocuments(state.document, conflictDocument, Date.now, {
         device: deviceId()
       });
@@ -1525,9 +1547,10 @@ function enter({
   state.sealed = sealed;
   /* A vault written before the log existed has no `activity`, and one written by a newer build
      may carry a line this build cannot read: both are read into the shape the page draws. */
+  const { document: safeDocument, dropped } = sanitizeDocument(vaultDocument);
   state.document = fitActivity({
-    ...vaultDocument,
-    activity: normaliseActivity(vaultDocument.activity, Date.now)
+    ...safeDocument,
+    activity: normaliseActivity(safeDocument.activity, Date.now)
   });
 
   lockView.hidden = true;
@@ -1544,7 +1567,7 @@ function enter({
      to open it on every entry, which is why it appeared after a vault was loaded from the
      server. */
   setAddForm(false);
-  if (window.matchMedia?.('(pointer: fine)').matches && vaultDocument.bookmarks.length > 0) {
+  if (window.matchMedia?.('(pointer: fine)').matches && safeDocument.bookmarks.length > 0) {
     searchInput.focus();
   }
 
@@ -1559,6 +1582,10 @@ function enter({
      simply asks again. */
   scheduleIconTopUp().catch(() => {});
   if (runningVersion === '') loadVersion();
+
+  /* The caller says what it was doing; the count of entries the URL rule refused travels back
+     with it, so a drop is reported instead of silently changing the size of the vault. */
+  return dropped;
 }
 
 
@@ -1719,7 +1746,7 @@ async function tryRemembered() {
       localSealVersion(stored),
       { allowLegacy: true }
     );
-    enter({
+    const dropped = enter({
       accountId: remembered.accountId,
       /* A record written under the committed scheme names the server's id and holds the key that
          signs for it; one from before has neither, and the phrase's own id is then the account's
@@ -1733,6 +1760,7 @@ async function tryRemembered() {
       sealed: stored.sealed,
       document: vaultDocument
     });
+    if (dropped > 0) announce(droppedSentence(dropped));
   } catch {
     await store.forget().catch(() => {});
     showLock('This device could not reopen its vault. Enter your phrase.', { hasVault: true });
@@ -1777,7 +1805,7 @@ async function handleUnlock(event) {
       await store.forget();
     }
 
-    enter({
+    const dropped = enter({
       accountId,
       serverId,
       proofKey,
@@ -1798,6 +1826,7 @@ async function handleUnlock(event) {
          switched this account off, so the sentence appears at the moment the person unlocks. */
       void noticeIfDisabled();
     }
+    if (dropped > 0) announce(droppedSentence(dropped));
   } catch (error) {
     showLockError(messageFor(error));
     phraseInput.focus();
@@ -2188,6 +2217,10 @@ async function handleRestore() {
     }
 
     vaultDocument = fitActivity(vaultDocument);
+    /* The backup is read before it is re-sealed, so a URL the page cannot use is left out of the
+       copy written back to this device and not only out of the list drawn from it. */
+    const { document: safeDocument, dropped } = sanitizeDocument(vaultDocument);
+    vaultDocument = safeDocument;
     const version = Math.max(stored.version, 0) + 1;
     /* The backup is re-sealed at the number this device will store it under: the blob it came
        from was bound to its own version, and a record that names a number the bytes were not
@@ -2212,7 +2245,11 @@ async function handleRestore() {
       sealed: resealed,
       document: vaultDocument
     });
-    announce(mergedWithCurrent ? 'Backup restored and merged with this device’s vault.' : 'Backup restored.');
+    announce(
+      `${mergedWithCurrent ? 'Backup restored and merged with this device’s vault.' : 'Backup restored.'}${
+        dropped > 0 ? ` ${droppedSentence(dropped)}` : ''
+      }`
+    );
   } catch (error) {
     showLockError(messageFor(error));
   }
@@ -2304,12 +2341,20 @@ function rowFor(bookmark) {
 
   const name = el('span', { class: 'row-name', text: labelOf(bookmark) });
 
-  const link = el('a', {
-    class: 'row-link',
-    href: bookmark.url,
-    target: '_blank',
-    rel: 'noopener noreferrer'
-  }, [tile, name]);
+  /* The renderer's last line of defence. A document is supposed to be clean by the time it gets
+     here, but a row must not become a live `javascript:` link just because that promise failed:
+     a refused URL still draws the row, with no address to navigate to. */
+  const href = linkHref(bookmark.url);
+  const link = el(
+    'a',
+    {
+      class: 'row-link',
+      ...(href === null
+        ? { 'aria-disabled': 'true' }
+        : { href, target: '_blank', rel: 'noopener noreferrer' })
+    },
+    [tile, name]
+  );
 
   /* An icon-only pill hides its label, and a hidden label leaves the link with no accessible
      name at all — so the name is stated explicitly. */
@@ -3621,7 +3666,9 @@ function handleListClick(event) {
   /* A click on the link counts the visit. It is not prevented: the browser opens the tab, and
      the count is written behind it. The list re-sorts only after the click has been handled. */
   const link = event.target.closest('a.row-link');
-  if (!link) return;
+  /* A row with no address — the URL rule refused it — has nothing to open, so a click on it is
+     not a visit. */
+  if (!link || !link.hasAttribute('href')) return;
 
   const row = link.closest('.row');
   const bookmark = row ? findBookmark(row.dataset.id) : null;
@@ -3711,15 +3758,23 @@ async function handleImport() {
     return;
   }
 
-  if (parsed.document.bookmarks.length === 0) {
-    announce('Nothing in that file could be imported.', { duration: 5000 });
+  /* The file's reader already drops an entry it cannot open; the whole document it built is read
+     through the same rule once more, so a file cannot reach the list through a reader that ever
+     grows laxer than `normalizeUrl`. */
+  const { document: parsedDocument, dropped } = sanitizeDocument(parsed.document);
+
+  if (parsedDocument.bookmarks.length === 0) {
+    announce(
+      `Nothing in that file could be imported.${dropped > 0 ? ` ${droppedSentence(dropped)}` : ''}`,
+      { duration: 5000 }
+    );
     return;
   }
 
   /* Two different collisions, counted apart: the file repeating itself, and the file meeting
      what this vault already holds. Saying "duplicates 1" for either one is what made the dialog
      unreadable. */
-  const incoming = parsed.document.bookmarks;
+  const incoming = parsedDocument.bookmarks;
   const existingUrls = new Set(state.document.bookmarks.map((bookmark) => bookmark.url));
   const alreadyHere = incoming.filter((bookmark) => existingUrls.has(bookmark.url)).length;
   const fresh = incoming.length - alreadyHere;
@@ -3821,16 +3876,18 @@ async function handleImport() {
       });
       if (!sure) return;
     }
-    state.document = parsed.document;
+    state.document = parsedDocument;
   } else {
-    state.document = mergeInto(state.document, parsed.document, Date.now, {
+    state.document = mergeInto(state.document, parsedDocument, Date.now, {
       device: deviceId()
     }).document;
   }
 
   render();
   await saveNow();
-  announce(`Imported ${parsed.document.bookmarks.length} bookmarks.`);
+  announce(
+    `Imported ${parsedDocument.bookmarks.length} bookmarks.${dropped > 0 ? ` ${droppedSentence(dropped)}` : ''}`
+  );
 
   /* An imported file carries no icons of its own — the legacy URLs point at a third party and
      are deliberately not used — so the same fetch the Settings action runs starts here, without
