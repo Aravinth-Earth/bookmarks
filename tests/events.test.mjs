@@ -609,6 +609,61 @@ test('a served request writes no line at all', async () => {
   assert.deepEqual(lines, [], 'the volume follows the refusal, not the traffic');
 });
 
+test('a probe with an unusable account id answers the same refusal and leaves one line', async () => {
+  const env = workerHarness();
+  const unusable = 'not-an-id';
+
+  const { result, lines } = await withEvents(() =>
+    worker.fetch(api(`/a/${unusable}/account`), env)
+  );
+
+  assert.equal(result.status, 400, 'the answer is unchanged');
+  assert.deepEqual(await result.json(), { error: 'bad_account' });
+
+  assert.equal(lines.length, 1, 'one refused probe is one line');
+  const event = parsed(lines)[0];
+  assert.equal(event.event, 'account_refused');
+  assert.equal(event.reason, 'invalid');
+  assert.equal(typeof event.route, 'string');
+  assert.equal('account' in event, false, 'no handle for an id that cannot be an account');
+  assert.equal('source' in event, false);
+  assert.equal(lines[0].includes(unusable), false, 'the value it named is not written');
+});
+
+test('two probes write two lines and neither carries the value', async () => {
+  const env = workerHarness();
+  const unusable = 'also-not-an-id';
+
+  const { result, lines } = await withEvents(async () => {
+    const first = await worker.fetch(api(`/a/${unusable}/account`), env);
+    const second = await worker.fetch(api(`/a/${unusable}/account`), env);
+    return [first, second];
+  });
+
+  assert.deepEqual(
+    result.map((response) => response.status),
+    [400, 400]
+  );
+  assert.equal(lines.length, 2, 'one line per probe');
+  for (const event of parsed(lines)) assert.equal(event.event, 'account_refused');
+  for (const line of lines) assert.equal(line.includes(unusable), false);
+});
+
+test('a well-formed id is not reported as a probe refusal', async () => {
+  const env = workerHarness();
+
+  const { result, lines } = await withEvents(() =>
+    worker.fetch(api(`/a/${ACCOUNT.accountId}/account`), env)
+  );
+
+  assert.notEqual(result.status, 400, 'a routable id reaches the route');
+  assert.deepEqual(
+    parsed(lines).filter((event) => event.event === 'account_refused'),
+    [],
+    'a request that names a real account is not a probe refusal'
+  );
+});
+
 test('a proxy refusal names the route and the reason, never the host', async () => {
   const env = workerHarness();
   const blocked = 'printer.local';

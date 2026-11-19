@@ -1273,7 +1273,12 @@ async function handleApi(request, env, url) {
     if (slash === -1) return json({ error: 'not_found' }, 404);
 
     const accountId = rest.slice(0, slash);
-    if (!ACCOUNT_ID.test(accountId)) return json({ error: 'bad_account' }, 400);
+    if (!ACCOUNT_ID.test(accountId)) {
+      /* The value named cannot be an account, so no object is asked and nothing is counted
+         against one: the refusal is the whole answer, and the line carries no handle for it. */
+      await logEvent('account_refused', { route: routeClassOf(url.pathname), reason: 'invalid' });
+      return json({ error: 'bad_account' }, 400);
+    }
 
     /* The object's operator routes answer only a Worker bound to it; through the public API
        they do not exist. */
