@@ -550,6 +550,28 @@ test('a new account is refused when the registry is full', async () => {
   assert.deepEqual(harness.reserved, [ACCOUNT.accountId]);
 });
 
+test('a registry that cannot read its cap is not reported as a full server', async () => {
+  const harness = object({
+    registry: {
+      idFromName: (name) => ({ name }),
+      get: () => ({
+        fetch: async () =>
+          new Response(JSON.stringify({ error: 'cap_unreadable' }), {
+            status: 500,
+            headers: { 'content-type': 'application/json' }
+          })
+      })
+    }
+  });
+
+  const response = await provision(harness);
+
+  assert.equal(response.status, 500);
+  assert.equal(response.body.error, 'cap_unreadable');
+  assert.deepEqual(harness.reserved, []);
+  assert.equal(harness.storage.raw.has('account'), false);
+});
+
 test('an existing account is unaffected by a full registry', async () => {
   const harness = object();
   assert.equal((await provision(harness)).status, 201);

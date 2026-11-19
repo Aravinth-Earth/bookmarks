@@ -706,7 +706,11 @@ export class Vault {
               ? [422, 'invite_used', 'invite_used']
               : answer.error === 'invite_expired'
                 ? [410, 'invite_expired', 'invite_expired']
-                : [429, 'cap_full', 'full'];
+                /* The server does not know how many accounts it may hold, so nothing was reserved. That is a
+                   broken configuration, not a full server, and the person is told which. */
+                : answer.error === 'cap_unreadable'
+                  ? [500, 'cap_unreadable', 'cap_unreadable']
+                  : [429, 'cap_full', 'full'];
 
         await logEvent('create_refused', {
           route: 'signin',

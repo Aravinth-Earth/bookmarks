@@ -180,6 +180,93 @@ test('stats report the count and the cap', async () => {
   assert.deepEqual(body, { count: 1, max: 3 });
 });
 
+/* A typo in the cap is a server that does not know how many accounts it may hold. Falling back to
+   fifty would answer it by opening more slots than the operator asked for, which is the one
+   direction a cap must never move. */
+test('a cap that cannot be read refuses a new account instead of falling back', async () => {
+  const { registry, storage } = harness({ MAX_ACCOUNTS: '5O' });
+
+  const response = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.body, { error: 'cap_unreadable' });
+  assert.equal(storage.raw.has('accounts'), false);
+});
+
+test('a cap written as words refuses rather than opening fifty slots', async () => {
+  const { registry, storage } = harness({ MAX_ACCOUNTS: 'none' });
+
+  const response = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.body, { error: 'cap_unreadable' });
+  assert.equal(storage.raw.has('accounts'), false);
+});
+
+/* The var is not the stored setting: the operator page writes zero to clear a setting, but a
+   deploy that says zero means zero. */
+test('zero is a cap, not an absent value', async () => {
+  const { registry, storage } = harness({ MAX_ACCOUNTS: '0' });
+
+  const first = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
+  assert.equal(first.status, 429);
+  assert.deepEqual(first.body, { error: 'full', max: 0 });
+
+  const second = await json(await registry.fetch(reserve({ accountId: accountId(2) })));
+  assert.equal(second.status, 429);
+
+  assert.equal(storage.raw.has('accounts'), false);
+});
+
+test('an absent cap still falls back to the built-in default', async () => {
+  const { registry } = harness({});
+
+  const response = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.max, MAX_ACCOUNTS);
+});
+
+test('a padded number is still a number', async () => {
+  const { registry } = harness({ MAX_ACCOUNTS: ' 2 ' });
+
+  assert.equal((await json(await registry.fetch(reserve({ accountId: accountId(1) })))).status, 200);
+  assert.equal((await json(await registry.fetch(reserve({ accountId: accountId(2) })))).status, 200);
+
+  const refused = await json(await registry.fetch(reserve({ accountId: accountId(3) })));
+  assert.equal(refused.status, 429);
+  assert.equal(refused.body.max, 2);
+});
+
+/* Reads stay answerable: the cap is reported as unknown rather than as a number nobody chose, and
+   the room hint stays permissive, because a hint that cannot be computed must not refuse. */
+test('an unreadable cap leaves the read routes answerable', async () => {
+  const { registry } = harness({ MAX_ACCOUNTS: '5O' });
+
+  const stats = await json(await registry.fetch(new Request('https://registry/stats')));
+  assert.equal(stats.status, 200);
+  assert.deepEqual(stats.body, { count: 0, max: null });
+
+  const settings = await json(await registry.fetch(new Request('https://registry/settings')));
+  assert.equal(settings.status, 200);
+  assert.equal(settings.body.max, null);
+
+  const room = await json(await registry.fetch(exists(accountId(1))));
+  assert.equal(room.status, 200);
+  assert.deepEqual(room.body, { exists: false, room: true });
+});
+
+test('a stored cap that cannot be read is refused the same way', async () => {
+  const { registry, storage } = harness();
+  await storage.put('settings', { maxAccounts: 'soon' });
+
+  const response = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.body, { error: 'cap_unreadable' });
+  assert.equal(storage.raw.has('accounts'), false);
+});
+
 test('an unknown route is a 404', async () => {
   const { registry } = harness();
   const response = await registry.fetch(new Request('https://registry/nothing'));

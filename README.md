@@ -141,7 +141,9 @@ before a visit cannot erase that visit. A device that holds no vault simply gets
 
 Creation is open but bounded: one Registry object caps how many accounts may exist. The cap
 is **1 while the service is being tested** — set in `wrangler.toml` as `MAX_ACCOUNTS`, falling
-back to 50 in `src/registry.js` when the var is absent. At the cap the server answers
+back to 50 in `src/registry.js` when the var is absent. A value that is present but not a whole
+number is not a fallback: it refuses new accounts with `500 {"error":"cap_unreadable"}` while the
+server keeps answering reads. At the cap the server answers
 `429 {error:"full"}`. Hosted sync is invite-only during this test, and no one is charged for it.
 
 ## What is free and what is paid
