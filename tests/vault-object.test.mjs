@@ -19,6 +19,7 @@ import {
   MAX_TRACKED_SOURCES,
   MAX_VAULT_BODY,
   OWNER_UNITS,
+  SESSION_TTL_MS,
   UNIT_CT_CHARS,
   UNUSED_RELEASE_MS,
   Vault
@@ -2197,6 +2198,79 @@ test('a wake-up that finds nothing owed keeps no alarm behind', async () => {
 
   assert.deepEqual(harness.released, [], 'there is no marker to ask the Registry about');
   assert.deepEqual(harness.storage.alarms, [], 'and nothing is left to wake the object again');
+});
+
+test('a sign-in arms the alarm for the session record it just wrote', async () => {
+  const harness = object({ start: 1_000_000 });
+  await provision(harness);
+  /* A sign-in comes after the creation, which is what makes the account a used one. */
+  harness.advance(60_000);
+  const loginMoment = 1_060_000;
+
+  const session = await login(harness);
+
+  assert.equal(session.status, 200);
+  assert.deepEqual(
+    harness.storage.alarms,
+    [loginMoment + SESSION_TTL_MS],
+    'the record and the alarm carry the same expiry'
+  );
+});
+
+test('an expired record is deleted by the wake-up, and no alarm is left behind', async () => {
+  const harness = object({ start: 1_000_000 });
+  await provision(harness);
+  harness.advance(60_000);
+  assert.equal((await login(harness)).status, 200);
+
+  harness.advance(SESSION_TTL_MS + 1);
+  await harness.vault.alarm();
+
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('session:')),
+    [],
+    'the record of the device that never came back is gone'
+  );
+  assert.ok(harness.storage.raw.has('account'), 'the account itself is kept');
+  assert.deepEqual(harness.storage.alarms, [], 'nothing is left to wake the object for');
+});
+
+test('a live session survives a mid-life wake-up, which re-arms to its remaining lifetime', async () => {
+  const harness = object({ start: 1_000_000 });
+  await provision(harness);
+  harness.advance(60_000);
+  const loginMoment = 1_060_000;
+  assert.equal((await login(harness)).status, 200);
+
+  harness.advance(10 * DAY);
+  await harness.vault.alarm();
+
+  const sessions = [...harness.storage.raw.keys()].filter((key) => key.startsWith('session:'));
+  assert.equal(sessions.length, 1, 'the place that is still live is not pruned');
+  assert.deepEqual(harness.storage.alarms, [loginMoment + SESSION_TTL_MS], 'held at its expiry');
+});
+
+test('the paid recheck is not lost when the wake-up deletes an expired record', async () => {
+  const harness = object({ ownerId: ACCOUNT.accountId, start: 1_000_000 });
+  await provision(harness);
+  harness.advance(60_000);
+  const session = await login(harness);
+  assert.equal(session.body.plan, 'owner', 'the owner plan is granted at sign-in');
+
+  harness.advance(SESSION_TTL_MS + 1);
+  const now = 1_060_000 + SESSION_TTL_MS + 1;
+  await harness.vault.alarm();
+
+  assert.equal(
+    [...harness.storage.raw.keys()].some((key) => key.startsWith('session:')),
+    false,
+    'the expired record is gone'
+  );
+  assert.deepEqual(
+    harness.storage.alarms,
+    [now + 365 * DAY],
+    'the year recheck is the only deadline left'
+  );
 });
 
 test('an operator removal with no id known gives up the alarm it cannot use', async () => {
