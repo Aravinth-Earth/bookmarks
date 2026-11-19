@@ -16,12 +16,14 @@ import {
   FREE_DOCUMENT_BYTES,
   MAX_COLLECTED_ICONS,
   MAX_COLLECTED_ICON_BYTES,
+  MAX_ICON_TRIES,
   addBookmark,
   collectedIconFor,
   collectedIconsOf,
   createDocument,
   fitActivity,
   fitCollectedIcons,
+  fitIconTries,
   iconTriesOf,
   mergeDocuments,
   withCollectedIcon
@@ -125,8 +127,12 @@ test('the two maps survive a seal and an open, and the sealed bytes name no host
   };
 
   const sealed = await sealVault(key, document, accountId, 1);
-  assert.equal(sealed.ct.includes('itsfoss.com'), false, 'the host is inside the ciphertext');
-  assert.equal(sealed.ct.includes(PICTURE), false, 'the picture is inside the ciphertext');
+  /* `ct` is base64url, so looking for a host in the string alone can only say it is not in the
+     alphabet. Decode it and check the plaintext bytes the seal produced: the host is inside the
+     ciphertext, not beside it. */
+  const sealedText = Buffer.from(sealed.ct, 'base64url').toString('utf8');
+  assert.doesNotMatch(sealedText, /itsfoss\.com/, 'the host is readable inside the ciphertext');
+  assert.doesNotMatch(sealedText, /data:image\/png/, 'the picture is readable inside the ciphertext');
 
   const opened = await openVault(key, sealed, accountId, 1);
   assert.deepEqual(opened.iconTries, { [DIGEST]: T1 });
@@ -332,4 +338,42 @@ test('the pictures have a byte cap of their own, older ones falling first', () =
   assert.equal(pictures.at(-1), hosts.at(-1), 'the newest is still there');
   assert.equal(pictures.includes(hosts[0]), false, 'the oldest is not');
   assert.deepEqual(trimmed.bookmarks, crowded.bookmarks, 'the library itself is untouched');
+});
+
+test('the attempts have a count cap and lose the oldest first', () => {
+  assert.equal(MAX_ICON_TRIES, 512, 'the documented count cap');
+
+  /* A sweep writes one digest per host it asked, and an attempt spends no bytes of its own: six
+     thousand of them is where a page that walked a large history lands. Nothing else in the
+     document grows that way, and that document is past the free copy without a bookmark in it. */
+  const digests = Array.from({ length: 6000 }, (_, index) => index.toString(16).padStart(32, '0'));
+  const document = {
+    ...createDocument(),
+    iconTries: Object.fromEntries(digests.map((digest, index) => [digest, T1 + index * 1000]))
+  };
+
+  const crowded = bytes(document);
+  assert.ok(crowded > FREE_DOCUMENT_BYTES, `the attempts alone are ${crowded} bytes, past the free copy`);
+
+  const fitted = fitActivity(document);
+  const kept = Object.keys(fitted.iconTries);
+
+  assert.ok(bytes(fitted) <= FREE_DOCUMENT_BYTES, 'the document is back inside the free copy');
+  assert.equal(kept.length, MAX_ICON_TRIES, 'the map is bounded by its count cap');
+  assert.equal(kept[0], digests.at(-MAX_ICON_TRIES), 'the first kept attempt is the oldest that still fits');
+  assert.equal(kept.at(-1), digests.at(-1), 'the newest attempt is kept');
+  assert.equal(kept.includes(digests[0]), false, 'the oldest attempt is gone');
+  assert.equal(kept.includes(digests.at(-MAX_ICON_TRIES - 1)), false, 'the one before the cut is gone');
+  assert.equal(fitted.iconTries[kept.at(-1)], T1 + 5999 * 1000, 'the stamp travels with its digest');
+
+  /* Nothing to drop leaves the same document, so a render does not rewrite the vault; a value
+     that is not a stamp is dropped rather than sealed. */
+  const plain = createDocument();
+  assert.equal(fitIconTries(plain), plain, 'a document with no attempts is returned as it is');
+
+  const mixed = {
+    ...createDocument(),
+    iconTries: { [digests[0]]: 'yesterday', [digests[1]]: T1 }
+  };
+  assert.deepEqual(Object.keys(fitIconTries(mixed).iconTries), [digests[1]], 'an unreadable stamp is dropped');
 });

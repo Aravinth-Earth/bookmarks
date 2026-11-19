@@ -18,6 +18,7 @@ import {
   deleteBookmark,
   filterBookmarks,
   fitActivity,
+  fitIconTries,
   mergeDocuments,
   normaliseActivity,
   recordClick,
@@ -3365,9 +3366,14 @@ function writeIconTries(tries) {
   if (!state.document) return;
   /* One entry per host asked in the season; anything older is noise inside a document that is
      sealed and pushed. The document is the map's only home now, and `saveNow` is what seals it:
-     a sweep writes once per batch, and the save coalesces the batches into one seal. */
+     a sweep writes once per batch, and the save coalesces the batches into one seal. The count
+     cap is applied here as well as at the seal, so a long sweep never builds a map the save would
+     then have to cut. */
   const { kept } = pruneIconTries(tries);
-  state.document = { ...state.document, iconTries: kept };
+  state.document = fitIconTries(
+    { ...state.document, iconTries: kept },
+    { maxDocumentBytes: Number.POSITIVE_INFINITY }
+  );
   void saveNow();
 }
 

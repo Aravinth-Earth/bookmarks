@@ -46,6 +46,14 @@ export const FREE_DOCUMENT_BYTES = 117_000;
    seal the thing that refuses a save. */
 export const MAX_COLLECTED_ICONS = 48;
 export const MAX_COLLECTED_ICON_BYTES = 24_000;
+/* The attempt index is a courtesy too: one digest and one millisecond stamp per host asked in the
+   season. It grows with every host a sweep touches, without anyone adding a bookmark, so it needs
+   a bound of its own: 512 entries is a few tens of kilobytes, about a fifth of the document at
+   worst, and the oldest stamp falls first. An entry is a fixed digest and a stamp, so a count
+   bounds the bytes; the room left in the document is checked as well. Without a bound, a page
+   that walked a large history would fill the vault with retry stamps and make the seal the thing
+   that refuses a save. */
+export const MAX_ICON_TRIES = 512;
 export const ACTIVITY_CAUSES = Object.freeze([
   'click',
   'open',
@@ -268,6 +276,54 @@ export function fitCollectedIcons(
 /** One map entry as the JSON will carry it, quotes, colon and comma included. */
 function entryBytes(key, value) {
   return documentBytes({ [key]: value });
+}
+
+/**
+ * Keep the attempt index inside its own budget: a count, and the room left in the document,
+ * oldest stamp first.
+ *
+ * The index is a digest and a millisecond stamp per host, so every entry has the same shape and a
+ * count bounds the bytes. It grows on its own while a sweep walks a library and the rows it
+ * collected, so it is bounded before the seal rather than left to make the seal fail. Entries
+ * whose value is not a finite stamp are dropped, so a document from another build cannot hand the
+ * renderer a key it cannot read.
+ *
+ * The count is the map's own cap; `maxDocumentBytes` is the free copy's size, which a library
+ * already near the cap can exhaust on its own. A vault that filled up on attempts loses the
+ * oldest of them, so the seal is never refused for something that is only a retry courtesy.
+ *
+ * @returns the same document when nothing needed dropping
+ */
+export function fitIconTries(
+  document,
+  { maxEntries = MAX_ICON_TRIES, maxDocumentBytes = FREE_DOCUMENT_BYTES } = {}
+) {
+  const iconTries = iconTriesOf(document);
+  const keys = Object.keys(iconTries);
+  const usable = keys.filter((key) => Number.isFinite(Number(iconTries[key])));
+  /* The stamp is the age, not the insertion order: a merge unions two maps, so the order the keys
+     arrived in says nothing about which host was asked first. */
+  const byAge = [...usable].sort(
+    (left, right) => Number(iconTries[left]) - Number(iconTries[right]) || left.localeCompare(right)
+  );
+
+  let first = 0;
+  while (byAge.length - first > maxEntries) first += 1;
+
+  const withAttempts = (from) => {
+    const kept = {};
+    for (const key of byAge.slice(from)) kept[key] = Number(iconTries[key]);
+    return { ...document, iconTries: kept };
+  };
+
+  let fitted = withAttempts(first);
+  while (first < byAge.length && documentBytes(fitted) > maxDocumentBytes) {
+    first += 1;
+    fitted = withAttempts(first);
+  }
+
+  if (first === 0 && usable.length === keys.length) return document;
+  return fitted;
 }
 
 /**
@@ -599,9 +655,9 @@ function documentBytes(value) {
 /**
  * Drop the oldest lines until the whole document fits the free hosted copy.
  *
- * The collected pictures are trimmed to their own budget first, so a vault that filled up on
- * icons loses the oldest pictures rather than the log, and the size measured below is the size
- * that will be sealed.
+ * The icon maps are trimmed to their own budgets first: the attempts lose their oldest stamps and
+ * the pictures their oldest hosts, so a vault that filled up on icons loses icons rather than the
+ * log, and the size measured below is the size that will be sealed.
  *
  * The log budget above bounds the log on its own; this bounds it against everything else in the
  * vault. A library already near the cap leaves little room, and a log is the part that can go —
@@ -610,7 +666,8 @@ function documentBytes(value) {
  * something the log did not cause.
  */
 export function fitActivity(document, { maxBytes = FREE_DOCUMENT_BYTES } = {}) {
-  const fitted = fitCollectedIcons(document, { maxDocumentBytes: maxBytes });
+  const attempts = fitIconTries(document, { maxDocumentBytes: maxBytes });
+  const fitted = fitCollectedIcons(attempts, { maxDocumentBytes: maxBytes });
   const activity = Array.isArray(fitted.activity) ? fitted.activity : [];
   if (activity.length === 0) return fitted;
 
