@@ -1484,6 +1484,122 @@ test('a paid account is capped by the units it holds', async () => {
   assert.equal(response.body.limit, UNIT_CT_CHARS);
 });
 
+test('a write is refused when the blob and its history together overrun the quota', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  const auth = { authorization: `Bearer ${session.body.token}` };
+
+  /* Two saves that each fit: the second leaves the first beside it in history. */
+  for (const [baseVersion, ct] of [
+    [0, 'a'.repeat(70_000)],
+    [1, 'b'.repeat(40_000)]
+  ]) {
+    const saved = await read(
+      await harness.vault.fetch(
+        request('/vault', { method: 'PUT', headers: auth, body: { baseVersion, iv: IV, ct } })
+      )
+    );
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  }
+
+  /* The incoming blob is under the cap on its own. What it would be stored beside — the blob it
+     replaces and the version history already keeps — is not. */
+  const refused = await read(
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: auth,
+        body: { baseVersion: 2, iv: IV, ct: 'c'.repeat(60_000) }
+      })
+    )
+  );
+
+  assert.equal(refused.status, 413);
+  assert.equal(refused.body.error, 'quota');
+  assert.equal(refused.body.limit, FREE_MAX_CT_CHARS);
+  assert.deepEqual(Object.keys(refused.body).sort(), ['error', 'limit']);
+
+  /* A refusal writes nothing: the current blob and the history are as the accepted saves left
+     them. */
+  const held = await harness.storage.get('vault');
+  assert.equal(held.version, 2);
+  assert.equal(held.ct.length, 40_000);
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('history:')),
+    ['history:1']
+  );
+});
+
+test('a write that fits the whole stored object is accepted and keeps the previous version', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  const auth = { authorization: `Bearer ${session.body.token}` };
+
+  const saves = [
+    { baseVersion: 0, ct: 'a'.repeat(40_000) },
+    { baseVersion: 1, ct: 'b'.repeat(60_000) },
+    /* Exactly at the cap: 60,000 incoming, 60,000 as history, 40,000 older than that. */
+    { baseVersion: 2, ct: 'c'.repeat(60_000) }
+  ];
+
+  for (const body of saves) {
+    const saved = await read(
+      await harness.vault.fetch(request('/vault', { method: 'PUT', headers: auth, body: { ...body, iv: IV } }))
+    );
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  }
+
+  const held = await harness.storage.get('vault');
+  assert.equal(held.version, 3);
+  assert.equal(held.ct, saves[2].ct);
+
+  const kept = await harness.storage.get('history:2');
+  assert.equal(kept.version, 2, 'the version just replaced is the newest history entry');
+  assert.equal(kept.ct, saves[1].ct);
+  assert.equal((await harness.storage.get('history:1')).ct, saves[0].ct);
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('history:')).sort(),
+    ['history:1', 'history:2']
+  );
+});
+
+test('admin stats count the current blob and the history stored beside it', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  const auth = { authorization: `Bearer ${session.body.token}` };
+
+  for (const [version, size] of [30_000, 20_000, 10_000].entries()) {
+    await harness.vault.fetch(
+      request('/vault', {
+        method: 'PUT',
+        headers: auth,
+        body: { baseVersion: version, iv: IV, ct: 'a'.repeat(size) }
+      })
+    );
+  }
+
+  const { status, body } = await read(
+    await harness.vault.fetch(request('/admin-stats', { method: 'GET' }))
+  );
+  assert.equal(status, 200);
+  assert.equal(body.ctChars, 10_000, 'the current blob alone');
+  assert.equal(body.historyChars, 30_000 + 20_000, 'every kept version beside it');
+  assert.equal(body.storedChars, 60_000, 'the whole stored object');
+
+  /* The figures reconcile with the entries the object actually holds. */
+  const vault = await harness.storage.get('vault');
+  const history = [...harness.storage.raw.entries()].filter(([key]) => key.startsWith('history:'));
+  const counted =
+    vault.ct.length + history.reduce((total, [, entry]) => total + entry.ct.length, 0);
+
+  assert.equal(body.storedChars, counted);
+  assert.equal(body.storedChars, body.ctChars + body.historyChars);
+  assert.ok(body.storedChars <= body.capChars, 'what is reported fits the cap it is reported with');
+});
+
 test('an oversized body is refused before it is parsed', async () => {
   const harness = object();
   await provision(harness);
@@ -1688,10 +1804,12 @@ test('admin stats carry dates, sizes and counts, and no secret or blob', async (
     'createdAt',
     'ctChars',
     'disabled',
+    'historyChars',
     'lastSeenAt',
     'paidUntil',
     'plan',
     'sessions',
+    'storedChars',
     'units',
     'updatedAt',
     'vaultVersion',
@@ -1703,6 +1821,8 @@ test('admin stats carry dates, sizes and counts, and no secret or blob', async (
   assert.equal(body.units, 0);
   assert.equal(body.vaultVersion, 1);
   assert.equal(body.ctChars, CT.length);
+  assert.equal(body.historyChars, 0, 'one blob and nothing beside it');
+  assert.equal(body.storedChars, CT.length, 'the whole stored object');
   assert.equal(body.capChars, FREE_MAX_CT_CHARS);
   assert.equal(body.sessions, 1);
   assert.equal(typeof body.createdAt, 'number');
