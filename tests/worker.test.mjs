@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import worker from '../src/index.js';
+import worker, { copyRoom } from '../src/index.js';
 import { MAX_SMALL_BODY, MAX_VAULT_BODY } from '../src/vault.js';
 import { parsed, quiet, withEvents } from './logs.mjs';
 import { withFetch, dnsQueries } from './dns.mjs';
@@ -506,6 +506,76 @@ test('a non-image, an oversized icon and a missing one are each refused', async 
   );
   assert.equal(missing.status, 404);
   assert.match(missing.headers.get('cache-control'), /max-age=600/);
+});
+
+test('a chunk larger than the cap leaves only the room under it in the destination', () => {
+  const max = 64 * 1024;
+  const destination = new Uint8Array(max);
+  const chunk = new Uint8Array(4 * 1024 * 1024).fill(0xab);
+
+  const { copied, exceeded } = copyRoom(destination, chunk, 0, max);
+
+  assert.equal(copied, max, 'the chunk is cut to the room, not kept at its own size');
+  assert.equal(exceeded, true, 'the overshoot is reported so the source can be cancelled');
+  assert.equal(destination.byteLength, max);
+  assert.equal(
+    destination.every((byte) => byte === 0xab),
+    true,
+    'every byte of the destination is one of the copied bytes, and nothing else was kept'
+  );
+});
+
+test('a chunk that fits is copied whole and the next one starts at the offset it left', () => {
+  const max = 64 * 1024;
+  const destination = new Uint8Array(max);
+  const first = new Uint8Array(1000).fill(1);
+  const second = new Uint8Array(500).fill(2);
+
+  const one = copyRoom(destination, first, 0, max);
+  assert.deepEqual(one, { copied: 1000, exceeded: false });
+
+  const two = copyRoom(destination, second, one.copied, max);
+  assert.deepEqual(two, { copied: 500, exceeded: false });
+
+  assert.deepEqual(destination.subarray(0, 1000), first);
+  assert.deepEqual(destination.subarray(1000, 1500), second);
+  assert.equal(destination.subarray(1500).some((byte) => byte !== 0), false);
+});
+
+test('an icon whose first chunk is larger than the cap is refused and its reader cancelled', async () => {
+  const max = 64 * 1024;
+  let cancelled = 0;
+  let reads = 0;
+  const chunk = new Uint8Array(max * 64);
+
+  const body = {
+    getReader() {
+      return {
+        read() {
+          reads += 1;
+          return Promise.resolve({ done: false, value: chunk });
+        },
+        cancel() {
+          cancelled += 1;
+          return Promise.resolve();
+        }
+      };
+    }
+  };
+
+  const response = await withFetch(
+    async () => ({
+      status: 200,
+      ok: true,
+      headers: new Headers({ 'content-type': 'image/png' }),
+      body
+    }),
+    () => worker.fetch(iconRequest(), harness().env)
+  );
+
+  assert.equal(response.status, 413, 'a source past the cap is a refused icon, not a short one');
+  assert.equal(reads, 1, 'the first chunk already overshoots, so it is never read past');
+  assert.equal(cancelled, 1, 'the reader is cancelled instead of being read to the end');
 });
 
 test('an unreachable host is a 502 rather than a crash', async () => {
