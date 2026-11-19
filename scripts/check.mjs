@@ -300,6 +300,120 @@ if (extensionNames.includes('manifest.json')) {
   }
 }
 
+/* 2e. The page loads an exact set of files. Every `<script src>` and `<link href>` in every HTML
+   asset is compared against this list, and the list is the whole of it: a new script, a new
+   stylesheet, or an address assembled from parts fails the guard until someone adds the value
+   here on purpose. Each entry says why it is allowed to load. */
+const pageReferences = new Map([
+  ['/theme.js', 'applies the stored theme before the first paint'],
+  ['/app.js', 'the page module the shell boots'],
+  ['/bookmarks.css', 'the app\'s own stylesheet'],
+  ['/css/tokens.css', 'the colour, spacing and type tokens'],
+  ['/css/themes.css', 'the light and dark palettes'],
+  ['/manifest.webmanifest', 'the installable app\'s manifest'],
+  ['/icon.svg', 'the mark, as the scalable source'],
+  ['/favicon-32.png', 'the 32px tab icon exported from that source'],
+  ['/apple-touch-icon.png', 'the touch icon iOS asks for']
+]);
+
+/* One tag, read whole: the name, its attributes, and the `>` that closes it. `[^>]` spans newlines,
+   so a tag broken across lines is still one tag. A quoted value is taken without its quotes and a
+   bare word is taken as itself, because `src=x.js` names a file just as `src="x.js"` does. */
+const markupTag = /<(script|link|iframe|img)\b([^>]*)>/gi;
+const markupAttribute = /([a-z_:][-a-z0-9_:.]*)\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+)/gi;
+
+function markupTags(text) {
+  const tags = [];
+  for (const tag of text.matchAll(markupTag)) {
+    const attributes = new Map();
+    for (const attribute of tag[2].matchAll(markupAttribute)) {
+      const raw = attribute[2];
+      const quoted = raw.startsWith('"') || raw.startsWith("'");
+      attributes.set(attribute[1].toLowerCase(), quoted ? raw.slice(1, -1) : raw);
+    }
+    tags.push({ name: tag[1].toLowerCase(), attributes, text: tag[0] });
+  }
+  return tags;
+}
+
+/* The tag rules, shared by the page's HTML and by the markup the Worker returns: a script must name
+   a file from the list above and may not carry its body, and any src or href must be one of those
+   values exactly. A value built from parts is not one of them, so `https://${CDN}/a.js` fails. */
+function markupProblems(where, text) {
+  const found = [];
+
+  for (const tag of markupTags(text)) {
+    if (tag.name === 'script' && /\$\{/.test(tag.text)) {
+      found.push(`${where}: <script> attributes name a template expression, so its source is not fixed`);
+      continue;
+    }
+    if (tag.name === 'script' && !tag.attributes.has('src')) {
+      found.push(`${where}: inline <script> with no src, which the CSP refuses and this guard does not ship`);
+      continue;
+    }
+
+    for (const name of ['src', 'href']) {
+      const value = tag.attributes.get(name);
+      if (value === undefined) continue;
+
+      /* A host written out in markup is the shape the page's own rule already speaks about, so it
+         is checked against the allowed hosts first and reported as a third party rather than as a
+         missing list entry. A value built from parts holds no host to compare and fails below. */
+      if (/^https?:\/\//i.test(value)) {
+        let host = null;
+        try {
+          host = new URL(value).hostname.toLowerCase();
+        } catch {
+          host = null;
+        }
+        if (host === null) {
+          found.push(`${where}: unparseable URL ${value}`);
+          continue;
+        }
+        if (!allowedHosts.has(host)) {
+          found.push(`${where}: external URL ${value}`);
+          continue;
+        }
+      }
+
+      if (pageReferences.has(value)) continue;
+      found.push(`${where}: <${tag.name} ${name}="${value}"> is not in the page's allowlist of loadable files`);
+    }
+  }
+
+  return found;
+}
+
+/* 2f. The page. Only HTML assets are scanned here; a manifest or a PNG has no tags to read, and a
+   scan that inspects no file fails rather than passing on an empty reading. */
+const htmlAssets = assets.filter((path) => path.endsWith('.html'));
+if (htmlAssets.length === 0) {
+  problems.push('markup: no HTML assets under public/, so the script and link scan inspected nothing');
+}
+for (const file of htmlAssets) {
+  problems.push(...markupProblems(relative(root, file), readFileSync(file, 'utf8')));
+}
+
+/* 2g. The Worker returns markup of its own — the 404 page is a string in `src/index.js` — so the
+   same tag rules run over every module there. Plain `http(s)://` URLs in `src/` are deliberately
+   not held to the page's host list: they are values this code fetches or routes with, not markup
+   a browser loads. The icon and title proxies build `https://${hostname}/` for a site they were
+   asked about, the resolver is asked at `https://cloudflare-dns.com/dns-query`, and the Durable
+   Object calls go to the binding origins `https://vault` and `https://registry` — none of them can
+   reach a page, and adding them to the page's allowed hosts would weaken the rule that protects
+   the page. A URL that does appear in a tag attribute is checked above: it must be a literal in
+   the allowlist, so a template expression there is refused rather than skipped. */
+const workerDir = join(root, 'src');
+const workerFiles = existsSync(workerDir)
+  ? walk(workerDir).filter((path) => path.endsWith('.js'))
+  : [];
+if (workerFiles.length === 0) {
+  problems.push('markup: no Worker modules under src/, so the markup scan inspected nothing');
+}
+for (const file of workerFiles) {
+  problems.push(...markupProblems(relative(root, file), readFileSync(file, 'utf8')));
+}
+
 /* 3. README.md makes the same promises to a reader who never opens the page, so it is held to
    the same list. It is read directly: a repository with no README fails here rather than
    passing the way an empty scan would. */
@@ -651,6 +765,7 @@ if (problems.length) {
 }
 
 console.log(
-  `check passed: ${assets.length} assets, no third-party references, no overclaiming copy, ` +
+  `check passed: ${assets.length} assets, ${htmlAssets.length} HTML and ${workerFiles.length} Worker ` +
+    `files with no unlisted or inline script, no third-party references, no overclaiming copy, ` +
     `1296 words, request limits match wrangler.toml`
 );
