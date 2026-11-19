@@ -1,12 +1,13 @@
 /**
  * The page's own bookkeeping on this device.
  *
- * Three things live outside the sealed vault because the page needs them before any phrase is
- * entered: how the list looks, which theme is chosen, and when each site was last asked for an
- * icon. None of it is vault data, so none of it is sealed — which makes the icon index the one
- * place a list of sites could sit in the clear. It is keyed by a digest of the hostname for that
- * reason, and every key the page writes is listed here so "Clear this device" can remove all of
- * them rather than the vault alone.
+ * The page needs a few things before any phrase is entered: how the list looks, which theme is
+ * chosen, when each site was last asked for an icon, and the icons its collected links have. None
+ * of it is vault data, so none of it is sealed. Two of these can name a site: the retry index,
+ * which is keyed by a digest of the hostname for that reason, and the collected icons, which are
+ * keyed by host because a row the vault does not hold has no other name to look itself up by.
+ * Every key the page writes is listed here, so "Clear this device" can remove all of them rather
+ * than the vault alone.
  */
 
 export const ICON_TRIES_KEY = 'bookmarks-icon-tries';
@@ -14,9 +15,17 @@ export const VIEW_KEY = 'bookmarks-view';
 export const SIZE_KEY = 'bookmarks-font-size';
 export const THEME_KEY = 'site-theme';
 export const DEVICE_ID_KEY = 'bookmarks-device-id';
+export const COLLECTED_ICON_KEY = 'collected-icons';
 
-/** Every localStorage key the page writes. Clearing a device removes each one. */
-export const DEVICE_KEYS = [ICON_TRIES_KEY, VIEW_KEY, SIZE_KEY, THEME_KEY];
+/**
+ * Every localStorage key the page writes. Clearing a device removes each one.
+ *
+ * The collected icons belong on this list even though the vault does not: they are a copy of what
+ * a proxied response carried, and a copy no clear can reach is exactly what the icon route's
+ * `no-store` exists to prevent. The key name is the one earlier versions wrote, so a device that
+ * already has icons keeps them without a migration.
+ */
+export const DEVICE_KEYS = [ICON_TRIES_KEY, VIEW_KEY, SIZE_KEY, THEME_KEY, COLLECTED_ICON_KEY];
 
 /**
  * This browser profile's own name, made once and kept.
