@@ -70,6 +70,14 @@ const ATTEMPTS_KEY = 'attempts';
    key in the object then, and it is what makes deletion stick against a device that is still
    signed in — login answers `account_deleted`, not `no_account`. */
 const TOMBSTONE_KEY = 'deleted';
+/* A slot the Registry granted and this object has not yet been told is back. The marker is
+   written before the account it belongs to and cleared only once the slot is in use or given
+   back, so an object that dies, throws or loses its account mid-write still carries the record
+   of what it owes — and, with the alarm below, the means to settle it. */
+const SLOT_PREFIX = 'slot:';
+/* How long the retry waits after a release does not land. A Registry that is briefly unavailable
+   frees the slot a little later; one that stays down costs one wake-up an hour, not a loop. */
+const SLOT_RETRY_MS = 60 * 60 * 1000;
 /* The operator's switch. It lives beside the account, not inside the sealed blob: the server
    has to read it before any proof is checked, and it must survive the vault being replaced. */
 const ADMIN_DISABLED_KEY = 'admin-disabled';
@@ -409,6 +417,11 @@ function proofFits(proof, kind) {
   }
 }
 
+/** The marker that says this object still holds a reserved slot for `accountId`. */
+function slotMarker(accountId) {
+  return `${SLOT_PREFIX}${accountId}`;
+}
+
 export class Vault {
   constructor(ctx, env, options = {}) {
     this.ctx = ctx;
@@ -711,6 +724,18 @@ export class Vault {
     const plan = 'free';
     const units = 0;
 
+    /* The slot is owed from the moment the Registry granted it. The marker and the wake-up are
+       written together, before the account exists: if the write below throws, or the object is
+       evicted in between, the alarm is the only thing left that can give the slot back. The
+       deadline is the unused one, because that is when a reservation nobody claimed frees itself.
+       Without a Registry no slot was taken, so nothing here is worth recording. */
+    if (registry) await this.storage.put(slotMarker(accountId), { at: now });
+    if (typeof this.storage.setAlarm === 'function') {
+      /* The only deadline an account ever carries: the release of a slot that was reserved and
+         then never used. Use cancels it, and an account that is used is never scheduled again. */
+      await this.storage.setAlarm(now + UNUSED_RELEASE_MS);
+    }
+
     await this.storage.put('account', {
       accountId,
       /* One credential and never both. A phrase-derived account holds the public key, so a breach
@@ -728,11 +753,9 @@ export class Vault {
        creation it no longer describes. */
     await this.storage.delete(TOMBSTONE_KEY);
 
-    if (typeof this.storage.setAlarm === 'function') {
-      /* The only deadline an account ever carries: the release of a slot that was reserved and
-         then never used. Use cancels it, and an account that is used is never scheduled again. */
-      await this.storage.setAlarm(now + UNUSED_RELEASE_MS);
-    }
+    /* The account exists, so the slot is in use: the marker has nothing left to say, while the
+       alarm stays to release an account that is created and then never used. */
+    if (registry) await this.storage.delete(slotMarker(accountId));
 
     return json({ ok: true, created: true, plan }, 201);
   }
@@ -1281,10 +1304,25 @@ export class Vault {
        is deleted, because deleting while listing would skip entries. */
     const keys = [...(await this.storage.list())].map(([key]) => key);
     for (const key of keys) await this.storage.delete(key);
-    if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
+
+    /* The slot is owed until the Registry confirms it is back, and once the account key is gone
+       this marker is the only thing that can wake the object to ask again. Both are written
+       before the release is asked for, so a throw there leaves the debt readable rather than
+       lost. The alarm is replaced rather than dropped: a wake-up with nothing to read would be
+       as final as no wake-up at all. */
+    await this.storage.put(slotMarker(accountId), { at: deletedAt });
+    if (typeof this.storage.setAlarm === 'function') {
+      await this.storage.setAlarm(deletedAt + SLOT_RETRY_MS);
+    }
 
     await this.storage.put(TOMBSTONE_KEY, { at: deletedAt });
-    await this.releaseSlot(accountId);
+
+    /* A deletion answers ok whether or not the cap was freed; it only decides whether this
+       object still carries the debt. */
+    if (await this.releaseSlot(accountId)) {
+      await this.storage.delete(slotMarker(accountId));
+      if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
+    }
 
     /* The one served request in this file that writes a line: a deletion is not a refusal, but
        it is the event an operator most needs to be able to count. */
@@ -1376,9 +1414,22 @@ export class Vault {
 
     const keys = [...(await this.storage.list())].map(([key]) => key);
     for (const key of keys) await this.storage.delete(key);
-    if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
 
-    if (accountId) await this.releaseSlot(accountId);
+    /* The same debt, recorded the same way: a marker and a wake-up before the release is asked
+       for, cleared only once the Registry confirms the slot is back. An operator's removal has no
+       tombstone, so the marker is the only thing that would survive to retry from. */
+    if (accountId) {
+      const at = this.now();
+      await this.storage.put(slotMarker(accountId), { at });
+      if (typeof this.storage.setAlarm === 'function') {
+        await this.storage.setAlarm(at + SLOT_RETRY_MS);
+      }
+      if (await this.releaseSlot(accountId)) {
+        await this.storage.delete(slotMarker(accountId));
+        if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
+      }
+    }
+
     return json({ ok: true, deleted: keys.length > 0 });
   }
 
@@ -1428,10 +1479,16 @@ export class Vault {
    * Creation arms one alarm, for the release of an account that was never used. An account that
    * has been signed in to or written is never deleted and is not rescheduled; an owner or a
    * paying account is only rechecked a year out, and that check never deletes it either.
+   *
+   * With no account left, the wake-up belongs to a slot that was reserved and not yet given
+   * back: the marker the deletion or the creation wrote is the only thing still here to read.
    */
   async alarm() {
     const account = await this.storage.get('account');
-    if (!account) return;
+    if (!account) {
+      await this.retrySlots();
+      return;
+    }
 
     const now = this.now();
     const paying = account.plan === 'owner' || (account.paidUntil && account.paidUntil > now);
@@ -1449,8 +1506,18 @@ export class Vault {
         await this.storage.setAlarm(releaseAt);
         return;
       }
-      await this.releaseSlot(account.accountId);
+      /* From here the slot is owed until the Registry confirms it back. The marker and the
+         retry are written before the release is asked for, so a Registry that is down leaves the
+         record and the wake-up that will try again, rather than an account wiped with its slot
+         still held. */
+      await this.storage.put(slotMarker(account.accountId), { at: now });
+      if (typeof this.storage.setAlarm === 'function') {
+        await this.storage.setAlarm(now + SLOT_RETRY_MS);
+      }
+      if (!(await this.releaseSlot(account.accountId))) return;
+
       await this.storage.deleteAll();
+      if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
       return;
     }
 
@@ -1468,21 +1535,63 @@ export class Vault {
     return (await this.storage.list({ prefix: 'session:' })).size === 0;
   }
 
-  /** Give the account's slot back, so the cap frees itself as unused accounts are released. */
+  /**
+   * Give the account's slot back, so the cap frees itself as unused accounts are released.
+   *
+   * Answers whether the Registry took it back. A failure is reported rather than thrown, because
+   * no answer to a person may depend on the cap — but the caller still has to know, since an
+   * unconfirmed release is a debt that a marker and an alarm have to carry.
+   */
   async releaseSlot(accountId) {
     const registry = this.env?.REGISTRY;
-    if (!registry) return;
+    /* No Registry means no slot was ever taken, so there is nothing owed and nothing to retry. */
+    if (!registry) return true;
 
     try {
-      await registry.get(registry.idFromName('registry')).fetch(
+      const answer = await registry.get(registry.idFromName('registry')).fetch(
         new Request('https://registry/release', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ accountId })
         })
       );
+      return answer.ok;
     } catch {
       /* The cap is a convenience; a failed release must not stop the deletion. */
+      return false;
+    }
+  }
+
+  /**
+   * Retry the slots this object reserved and was never told are back.
+   *
+   * A marker is written before the account it belongs to and cleared only once the release is
+   * confirmed, which makes it the one thing that can still be read after the account is gone.
+   * The release is asked for only while no account is here: a claim for the same id that landed
+   * in the meantime owns that slot, and taking it back would give away a place that is in use.
+   * The alarm is kept while anything is still owed, and dropped once nothing is — this is the
+   * only wake-up an object without an account ever gets.
+   */
+  async retrySlots() {
+    const markers = [...(await this.storage.list({ prefix: SLOT_PREFIX }))].map(([key]) => key);
+    if (markers.length === 0) return;
+
+    let owed = false;
+    for (const key of markers) {
+      /* Nothing is released, and no alarm is touched, while an account exists here. A marker
+         left beside one is not a debt: the account holds the slot, and the deletion that ends it
+         writes the marker again and settles it then. */
+      if (await this.storage.get('account')) return;
+      if (await this.releaseSlot(key.slice(SLOT_PREFIX.length))) await this.storage.delete(key);
+      else owed = true;
+    }
+
+    if (owed) {
+      if (typeof this.storage.setAlarm === 'function') {
+        await this.storage.setAlarm(this.now() + SLOT_RETRY_MS);
+      }
+    } else if (typeof this.storage.deleteAlarm === 'function') {
+      await this.storage.deleteAlarm();
     }
   }
 
