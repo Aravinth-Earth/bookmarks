@@ -27,7 +27,7 @@ export const FREE_MAX_CT_CHARS = 160_000;
 const OWNER_RECHECK_MS = 365 * 24 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 3;
 const NONCE_TTL_MS = 60_000;
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /* An account that is created and then never signed in to or written is holding a slot it is not
    using. The alarm releases it after this long, so one abandoned creation cannot occupy the cap
    indefinitely. Signing in or writing a vault counts as use and cancels the release; an account
@@ -895,6 +895,10 @@ export class Vault {
     /* So the app can say "3 places" the moment it signs in, without a second request. */
     const places = await this.trimSessions();
 
+    /* The new record carries its own deadline, so the alarm is armed for the earliest of them
+       rather than left at the unused-release moment it may have been holding. */
+    await this.armDeadline(account, now);
+
     return json({
       token,
       expiresAt,
@@ -1502,11 +1506,61 @@ export class Vault {
   }
 
   /**
+   * The earliest moment this object has a reason to be woken for, or null when it has none.
+   *
+   * The object holds exactly one alarm, so every path that arms one has to agree on the same
+   * moment: a later deadline written over an earlier one would postpone the earlier one forever,
+   * and the record it belonged to would outlive the reason it was kept. The candidates are the
+   * account's own — a paying account is rechecked a year out, an unused one released after its
+   * idle window — and the expiry of every live session, which is a deadline for that record and
+   * not for the account.
+   *
+   * Only a session that has not expired is a candidate: a moment already past is not a deadline,
+   * it is a record the next `pruneSessions()` removes.
+   */
+  async earliestDeadline(account, now) {
+    let earliest = null;
+    const take = (at) => {
+      if (typeof at !== 'number' || !Number.isFinite(at)) return;
+      if (earliest === null || at < earliest) earliest = at;
+    };
+
+    if (account.plan === 'owner' || account.plan === 'paid' || (account.paidUntil ?? 0) > now) {
+      take(now + OWNER_RECHECK_MS);
+    }
+    if (await this.isUnused(account)) take((account.createdAt ?? 0) + UNUSED_RELEASE_MS);
+
+    for (const [, session] of await this.storage.list({ prefix: 'session:' })) {
+      const expiresAt = session.expiresAt;
+      if (typeof expiresAt === 'number' && expiresAt > now) take(expiresAt);
+    }
+
+    return earliest;
+  }
+
+  /**
+   * Arm the one alarm to the earliest deadline left, or drop it when there is none.
+   *
+   * This is the only place the kept-account paths arm a wake-up, so a sign-in, a recheck and a
+   * session's expiry cannot each write their own later moment over the others.
+   */
+  async armDeadline(account, now) {
+    const at = await this.earliestDeadline(account, now);
+    if (at === null) {
+      if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
+      return;
+    }
+    if (typeof this.storage.setAlarm === 'function') await this.storage.setAlarm(at);
+  }
+
+  /**
    * The deadline the runtime wakes this object for.
    *
    * Creation arms one alarm, for the release of an account that was never used. An account that
-   * has been signed in to or written is never deleted and is not rescheduled; an owner or a
-   * paying account is only rechecked a year out, and that check never deletes it either.
+   * has been signed in to or written is never deleted; an owner or a paying account is only
+   * rechecked a year out, and that check never deletes it either. What a kept account does have
+   * is the expiry of the sessions recorded on it, which is the only wake-up that ever deletes an
+   * expired record: a device that never comes back leaves nothing else to prune it.
    *
    * With no account left, the wake-up belongs to a slot that was reserved and not yet given
    * back: the marker the deletion or the creation wrote is the only thing still here to read.
@@ -1519,10 +1573,15 @@ export class Vault {
     }
 
     const now = this.now();
+    /* Before any decision below, because every one of them and the deadline they leave behind
+       should read the records that are actually still live. An expired session is nobody's
+       request to answer, so this wake-up is the only place it is ever deleted. */
+    await this.pruneSessions();
+
     const paying = account.plan === 'owner' || (account.paidUntil && account.paidUntil > now);
 
     if (paying) {
-      await this.storage.setAlarm(now + OWNER_RECHECK_MS);
+      await this.armDeadline(account, now);
       return;
     }
 
@@ -1531,7 +1590,7 @@ export class Vault {
     if (await this.isUnused(account)) {
       const releaseAt = (account.createdAt ?? 0) + UNUSED_RELEASE_MS;
       if (now < releaseAt) {
-        await this.storage.setAlarm(releaseAt);
+        await this.armDeadline(account, now);
         return;
       }
       /* From here the slot is owed until the Registry confirms it back. The marker and the
@@ -1550,7 +1609,9 @@ export class Vault {
     }
 
     /* A used account is kept. There is no deadline that deletes it: the local vault is free
-       forever, and the hosted copy of an account that is in use is never taken away by time. */
+       forever, and the hosted copy of an account that is in use is never taken away by time. Its
+       sessions still expire, though, and the next of those is the alarm's own deadline. */
+    await this.armDeadline(account, now);
   }
 
   /**
