@@ -315,6 +315,22 @@ test('a valid proof creates the account exactly once', async () => {
   }
 });
 
+test('the auth secret that signs a session is refused under 32 bytes', async () => {
+  const harness = object();
+  /* Every session proof is an HMAC keyed by this secret, so one observed proof is enough to
+     recover a short key. Forty-two base64url characters decode to 31 bytes: one byte short. */
+  const short = 'x'.repeat(42);
+
+  const refused = await blind(harness, short);
+  assert.equal(refused.status, 400, 'a 31-byte key is not a secret');
+  assert.equal(await harness.storage.get('account'), undefined, 'nothing is written');
+  assert.deepEqual(harness.reserved, [], 'no account slot is taken');
+
+  /* Forty-three characters are the 32 bytes HMAC consumes, and the request gets a challenge. */
+  const exact = await blind(harness);
+  assert.equal(exact.status, 428, '32 bytes is a secret');
+});
+
 test('a proof signed with a different secret is refused and writes nothing', async () => {
   const harness = object();
   const other = await deriveAccount(WORDLIST.slice(13, 26).join(' '));
