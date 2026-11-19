@@ -228,6 +228,12 @@ function routeOf(path) {
   return ROUTES[path] ?? (path.startsWith(SESSION_ONE) ? ROUTES[SESSION_ONE] : null);
 }
 
+/* A shared operator secret is a bearer key, so a short value is one that can be guessed outright.
+   Thirty-two bytes is the floor the operator view puts on the key it signs its own sessions with,
+   and this is the same value: one floor for one secret. The length is counted in the bytes the
+   platform carries, not in characters. */
+const ADMIN_SECRET_MIN_BYTES = 32;
+
 /* Constant-time comparison for the operator secret, so a wrong guess learns nothing from timing. */
 function sameSecret(left, right) {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
@@ -239,11 +245,16 @@ function sameSecret(left, right) {
   return difference === 0;
 }
 
-/** The operator routes are reachable only through a Worker binding and with the shared secret. */
+/**
+ * The operator routes are reachable only through a Worker binding and with a shared secret long
+ * enough to be a key. A missing, short or wrong secret all answer the same refusal.
+ */
 function adminAllowed(request, env) {
-  const secret = typeof env?.ADMIN_SECRET === 'string' ? env.ADMIN_SECRET : '';
+  const configured = env?.ADMIN_SECRET;
+  const secret = typeof configured === 'string' ? configured : '';
   const given = request.headers.get(ADMIN_SECRET_HEADER) ?? '';
-  return secret.length >= 16 && sameSecret(given, secret);
+  if (encoder.encode(secret).length < ADMIN_SECRET_MIN_BYTES) return false;
+  return sameSecret(given, secret);
 }
 
 function toBase64Url(bytes) {

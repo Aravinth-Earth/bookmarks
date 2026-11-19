@@ -93,7 +93,7 @@ function object(overrides = {}) {
 
   const env = {
     OWNER_ACCOUNT_ID: overrides.ownerId ?? '',
-    ADMIN_SECRET: overrides.adminSecret ?? 'test-admin-secret-0123456789',
+    ADMIN_SECRET: overrides.adminSecret ?? 'test-admin-secret-0123456789abcdef',
     ...(overrides.invitesRequired ? { INVITES_REQUIRED: 'true' } : {}),
     REGISTRY: overrides.registry ?? {
       idFromName: (name) => ({ name }),
@@ -153,7 +153,7 @@ async function read(response) {
   return { status: response.status, body: await response.json() };
 }
 
-function adminRequest(path, body, secret = 'test-admin-secret-0123456789') {
+function adminRequest(path, body, secret = 'test-admin-secret-0123456789abcdef') {
   return request(path, {
     method: 'POST',
     body,
@@ -1942,6 +1942,42 @@ test('a wrong or missing operator secret changes nothing', async () => {
   assert.equal((await loginAs(harness, 'desktop')).status, 200);
 });
 
+test('an operator secret shorter than 32 bytes refuses every operator action, like a missing one', async () => {
+  /* The value is the configured one, spelled exactly, so only its length can be what refuses it. */
+  const short = 'short-operator-secret-012345678';
+  const harness = object({ adminSecret: short });
+  await provision(harness);
+
+  for (const [path, body] of [
+    ['/admin-disable', { reason: 'x' }],
+    ['/admin-enable', {}],
+    ['/admin-delete', {}]
+  ]) {
+    const refused = await read(await harness.vault.fetch(adminRequest(path, body, short)));
+    assert.equal(refused.status, 401, `${path} is refused even with the exact value`);
+    assert.equal(refused.body.error, 'unauthorized', path);
+  }
+
+  const stats = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(stats.body.disabled, null, 'nothing was disabled');
+  assert.equal((await loginAs(harness, 'desktop')).status, 200, 'the account is untouched');
+});
+
+test('the floor is counted in bytes, so a 32-byte secret of 16 two-byte characters is a key', async () => {
+  /* Sixteen `é` are sixteen characters and thirty-two bytes: a floor counted in characters would
+     refuse a key the platform carries in full. */
+  const wide = 'é'.repeat(16);
+  assert.equal(new TextEncoder().encode(wide).length, 32);
+  assert.equal(wide.length, 16);
+
+  const harness = object({ adminSecret: wide });
+  await provision(harness);
+
+  const enabled = await read(await harness.vault.fetch(adminRequest('/admin-enable', {}, wide)));
+  assert.equal(enabled.status, 200);
+  assert.equal(enabled.body.ok, true);
+});
+
 test('the operator can delete a vault and free its slot, and a second call is a no-op', async () => {
   const harness = object();
   await provision(harness);
@@ -2200,7 +2236,7 @@ function unbound() {
   const store = storage();
   const vault = new Vault(
     { storage: store, id: { name: ACCOUNT.accountId } },
-    { OWNER_ACCOUNT_ID: '', ADMIN_SECRET: 'test-admin-secret-0123456789' },
+    { OWNER_ACCOUNT_ID: '', ADMIN_SECRET: 'test-admin-secret-0123456789abcdef' },
     { now: () => 1_000_000 }
   );
   return { vault, storage: store };
