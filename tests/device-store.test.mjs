@@ -4,11 +4,13 @@
  * Neither icon map is device-side any more — both live inside the sealed document — so the cases
  * that matter here are that the two old key names are still reachable by a clear, that opening a
  * vault deletes a leftover instead of reading it, that a map written before the digest existed
- * does not survive its first read, and that the retry index is bounded to its season.
+ * does not survive its first read, that the retry index is bounded to its season, and that the page
+ * itself has no device key to write that index to.
  */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   COLLECTED_ICON_KEY,
@@ -197,4 +199,69 @@ test('clearing a device survives storage that refuses to be read', () => {
     }
   };
   assert.doesNotThrow(() => clearDeviceStorage(storage));
+});
+
+/* The page module is read as text, because the two icon-map functions are private to it and there
+   is no document to run them in here. What is asserted is the shape that keeps the map out of
+   storage: it has no device key to be written to, its only writer is the document the seal covers,
+   and every key the page does write is one a clear can reach. A change that reaches for
+   localStorage again fails here rather than in a profile copy. */
+const page = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+
+/** The brace-balanced body of a top-level `function name(…)`, comments included. */
+function bodyOf(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `public/app.js has no ${name}`);
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let at = open; at < source.length; at += 1) {
+    if (source[at] === '{') depth += 1;
+    else if (source[at] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, at + 1);
+    }
+  }
+  throw new Error(`${name} has no closing brace`);
+}
+
+test('the host-to-timestamp map has no home on the device', () => {
+  for (const name of ['readIconTries', 'writeIconTries']) {
+    const body = bodyOf(page, name);
+    assert.doesNotMatch(body, /localStorage|sessionStorage/, `${name} touches device storage`);
+    assert.match(body, /state\.document/, `${name} does not go through the sealed document`);
+  }
+
+  /* The map travels only with the seal: a write that never reaches `saveNow` would leave it in
+     memory and lose it, and one that reaches a device key would name every site. */
+  assert.match(bodyOf(page, 'writeIconTries'), /saveNow\(\)/, 'the attempt index is not sealed');
+
+  /* Every place in the page that writes localStorage takes its key from the list a clear removes.
+     A new writer, or a key outside that list, is the defect returning: the map would outlive both
+     Lock and the action that promises to remove everything. */
+  const literalKeys = [...page.matchAll(/localStorage\.setItem\(\s*'([^']+)'/g)].map((match) => match[1]);
+  for (const key of literalKeys) {
+    assert.equal(DEVICE_KEYS.includes(key), true, `'${key}' is written where a clear cannot reach it`);
+  }
+
+  const writePref = bodyOf(page, 'writePref');
+  assert.match(writePref, /localStorage\.setItem\(key, value\)/, 'the pref helper no longer writes by key');
+  assert.doesNotMatch(writePref, /JSON\.stringify/, 'a map is being written through the pref helper');
+
+  const prefKeys = [...page.matchAll(/writePref\(([A-Z_]+),/g)].map((match) => match[1]);
+  assert.ok(prefKeys.length > 0, 'no preference writes were found to check');
+  for (const name of prefKeys) {
+    /* The name has to be one device-store.js exports, and its value has to be on the clear list:
+       a preference written under a key nobody else knows is a key a clear cannot reach. */
+    const value = { VIEW_KEY, SIZE_KEY, THEME_KEY, ICON_TRIES_KEY, COLLECTED_ICON_KEY }[name];
+    assert.ok(value, `${name} is not a device key this page shares`);
+    assert.equal(DEVICE_KEYS.includes(value), true, `${name} is written where a clear cannot reach it`);
+  }
+
+  /* The only keys the page writes at all are a preference and the theme. Anything else — and a
+     host is the one that matters — would have to name itself here first. */
+  const writers = [...page.matchAll(/localStorage\.setItem\(\s*(?:'([^']+)'|key,)/g)];
+  assert.equal(writers.length, literalKeys.length + 1, 'a localStorage write this case does not read');
+
+  /* The old name is still on the clear list, so an upgraded profile loses its leftover map. */
+  assert.equal(DEVICE_KEYS.includes(ICON_TRIES_KEY), true);
 });
