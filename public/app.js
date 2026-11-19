@@ -2745,12 +2745,15 @@ async function loadCollectedIcon(host, { attempt = 0 } = {}) {
   const outcome = await fetchIconOutcome(host);
 
   if (outcome.kind !== OUTCOME_VALUE) {
-    collectedIconTries.delete(host);
+    /* A host that answered "no icon" keeps its mark: the lettered tile is its answer for this
+       page, and re-asking on every render would spend the budget on hosts with nothing to give. */
+    if (isAnswer(outcome)) return;
 
-    /* The edge refused us, or the request never left. That says nothing about the host, so it is
-       asked again after the backoff icons.js derives — a few seconds, doubling — and no more than
-       a few times. A host that answered "no icon" simply stays lettered, which is normal. */
-    if (!isAnswer(outcome) && attempt < ICON_RETRY_ATTEMPTS) {
+    /* The edge refused us, or the request never left. That says nothing about the host, so the
+       mark goes and it is asked again after the backoff icons.js derives — a few seconds,
+       doubling — no more than a few times. */
+    collectedIconTries.delete(host);
+    if (attempt < ICON_RETRY_ATTEMPTS) {
       setTimeout(() => {
         void loadCollectedIcon(host, { attempt: attempt + 1 });
       }, retryDelayMs(attempt, outcome.retryAfterMs));
