@@ -21,7 +21,7 @@ import {
   OWNER_UNITS,
   SESSION_TTL_MS,
   UNIT_CT_CHARS,
-  UNUSED_RELEASE_MS,
+  IDLE_RELEASE_MS,
   Vault
 } from '../src/vault.js';
 import { Registry } from '../src/registry.js';
@@ -1302,7 +1302,7 @@ test('an account older than any former trial length still writes', async () => {
   assert.equal(again.body.version, 2);
 });
 
-test('the alarm does not delete an account that has been used, however old', async () => {
+test('the alarm releases an account that was used and then left idle for two years', async () => {
   const harness = object();
   await provision(harness);
   const session = await login(harness);
@@ -1318,9 +1318,10 @@ test('the alarm does not delete an account that has been used, however old', asy
   harness.advance(2 * 365 * DAY);
   await harness.vault.alarm();
 
-  assert.ok(harness.storage.raw.has('account'), 'the account is kept');
-  assert.ok(harness.storage.raw.has('vault'), 'the hosted copy is kept');
-  assert.deepEqual(harness.released, [], 'the slot is not given back');
+  assert.equal(harness.storage.raw.has('account'), false, 'the account is gone');
+  assert.equal(harness.storage.raw.has('vault'), false, 'the hosted copy goes with it');
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the slot goes back to the cap');
+  assert.deepEqual(harness.storage.alarms, [], 'and nothing is left to wake');
 });
 
 test('an account created and never used releases its slot after the idle window', async () => {
@@ -1328,7 +1329,7 @@ test('an account created and never used releases its slot after the idle window'
   await provision(harness);
   assert.deepEqual(harness.reserved, [ACCOUNT.accountId]);
 
-  harness.advance(UNUSED_RELEASE_MS - 1);
+  harness.advance(IDLE_RELEASE_MS - 1);
   await harness.vault.alarm();
   assert.ok(harness.storage.raw.has('account'), 'still inside the idle window');
   assert.deepEqual(harness.released, []);
@@ -1339,17 +1340,57 @@ test('an account created and never used releases its slot after the idle window'
   assert.deepEqual(harness.released, [ACCOUNT.accountId]);
 });
 
-test('an account that signed in keeps its slot past the idle window', async () => {
-  const harness = object();
+test('a single sign-in does not cancel the release for good', async () => {
+  const harness = object({ start: 1_000_000 });
   await provision(harness);
-  const session = await login(harness);
-  assert.equal(session.status, 200);
+  harness.advance(60_000);
+  assert.equal((await login(harness)).status, 200);
 
-  harness.advance(UNUSED_RELEASE_MS + 1);
+  /* Nothing after the sign-in. The wake-up armed at creation finds the account idle for a whole
+     window, so it releases it: one sign-in is not a use that keeps the slot forever. */
+  harness.advance(IDLE_RELEASE_MS);
   await harness.vault.alarm();
 
-  assert.ok(harness.storage.raw.has('account'));
+  assert.equal(harness.storage.raw.size, 0, 'the account holds nothing more');
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the slot goes back to the cap');
+  assert.deepEqual(harness.storage.alarms, [], 'and nothing is left to wake');
+});
+
+test('a request under a live session postpones the release by one window', async () => {
+  const harness = object({ start: 1_000_000 });
+  await provision(harness);
+  harness.advance(60_000);
+  const session = await login(harness);
+  assert.equal(session.status, 200);
+  await harness.vault.fetch(
+    request('/vault', {
+      method: 'PUT',
+      headers: withToken(session.body.token),
+      body: { baseVersion: 0, iv: IV, ct: CT }
+    })
+  );
+
+  /* A read writes the session's stamp and never the account's. It is still use, and the account
+     must not be released while a device is reading it. */
+  harness.advance(12 * 60 * 60 * 1000);
+  const readBack = await read(
+    await harness.vault.fetch(
+      request('/vault', { method: 'GET', headers: withToken(session.body.token) })
+    )
+  );
+  assert.equal(readBack.status, 200);
+  const usedAt = 1_000_000 + 60_000 + 12 * 60 * 60 * 1000;
+
+  harness.advance(12 * 60 * 60 * 1000 + 1);
+  await harness.vault.alarm();
+
+  assert.ok(harness.storage.raw.has('account'), 'the account is still in use');
   assert.deepEqual(harness.released, []);
+  assert.deepEqual(
+    harness.storage.alarms,
+    [usedAt + IDLE_RELEASE_MS],
+    'the next window is counted from the read'
+  );
 });
 
 test('a released unused account leaves no entry in the registry list', async () => {
@@ -1366,7 +1407,7 @@ test('a released unused account leaves no entry in the registry list', async () 
   const before = await (await registry.fetch(new Request('https://registry/admin-list'))).json();
   assert.deepEqual(before.ids, [ACCOUNT.accountId]);
 
-  harness.advance(UNUSED_RELEASE_MS + 1);
+  harness.advance(IDLE_RELEASE_MS + 1);
   await harness.vault.alarm();
 
   const after = await (await registry.fetch(new Request('https://registry/admin-list'))).json();
@@ -2316,7 +2357,7 @@ test('an unused account whose release fails is not wiped before its slot is free
   const harness = object({ registryFails: (path) => path === '/release' && down });
   await provision(harness);
 
-  harness.advance(UNUSED_RELEASE_MS + 1);
+  harness.advance(IDLE_RELEASE_MS + 1);
   await harness.vault.alarm();
 
   assert.equal(harness.storage.raw.has('account'), true, 'the record stays while the slot is held');
@@ -2344,8 +2385,8 @@ test('a normal creation and a normal deletion leave no marker and no alarm behin
   );
   assert.deepEqual(
     harness.storage.alarms,
-    [created.createdAt + UNUSED_RELEASE_MS],
-    'exactly the one unused-release alarm is armed'
+    [created.createdAt + IDLE_RELEASE_MS],
+    'exactly the one idle-release alarm is armed'
   );
 
   const session = await loginAs(harness, 'desktop');
@@ -2374,7 +2415,7 @@ test('a wake-up that finds nothing owed keeps no alarm behind', async () => {
   /* An object with neither a record nor a marker: the deadline that woke it is the only thing
      here, and nothing under it can be settled. */
   await harness.storage.delete('account');
-  assert.equal(harness.storage.alarms.length, 1, 'the unused-release alarm is still armed');
+  assert.equal(harness.storage.alarms.length, 1, 'the idle-release alarm is still armed');
 
   await harness.vault.alarm();
 
@@ -2382,7 +2423,7 @@ test('a wake-up that finds nothing owed keeps no alarm behind', async () => {
   assert.deepEqual(harness.storage.alarms, [], 'and nothing is left to wake the object again');
 });
 
-test('a sign-in arms the alarm for the session record it just wrote', async () => {
+test('a sign-in arms the alarm for the end of the idle window, not the record expiry', async () => {
   const harness = object({ start: 1_000_000 });
   await provision(harness);
   /* A sign-in comes after the creation, which is what makes the account a used one. */
@@ -2394,17 +2435,19 @@ test('a sign-in arms the alarm for the session record it just wrote', async () =
   assert.equal(session.status, 200);
   assert.deepEqual(
     harness.storage.alarms,
-    [loginMoment + SESSION_TTL_MS],
-    'the record and the alarm carry the same expiry'
+    [loginMoment + IDLE_RELEASE_MS],
+    'the earlier of the idle window and the record expiry is armed'
   );
 });
 
-test('an expired record is deleted by the wake-up, and no alarm is left behind', async () => {
+test('a wake-up past the idle window clears the expired record and lets the account go', async () => {
   const harness = object({ start: 1_000_000 });
   await provision(harness);
   harness.advance(60_000);
   assert.equal((await login(harness)).status, 200);
 
+  /* The device never came back: the session expires, and the account has done nothing since the
+     sign-in, so the same wake-up that removes the record releases the slot it was holding. */
   harness.advance(SESSION_TTL_MS + 1);
   await harness.vault.alarm();
 
@@ -2413,18 +2456,37 @@ test('an expired record is deleted by the wake-up, and no alarm is left behind',
     [],
     'the record of the device that never came back is gone'
   );
-  assert.ok(harness.storage.raw.has('account'), 'the account itself is kept');
+  assert.equal(harness.storage.raw.has('account'), false, 'and the idle account with it');
+  assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the slot goes back');
   assert.deepEqual(harness.storage.alarms, [], 'nothing is left to wake the object for');
 });
 
-test('a live session survives a mid-life wake-up, which re-arms to its remaining lifetime', async () => {
+test('a live session survives a mid-life wake-up, which re-arms to its expiry', async () => {
   const harness = object({ start: 1_000_000 });
   await provision(harness);
   harness.advance(60_000);
   const loginMoment = 1_060_000;
-  assert.equal((await login(harness)).status, 200);
 
-  harness.advance(10 * DAY);
+  const session = await login(harness);
+  assert.equal(session.status, 200);
+  await harness.vault.fetch(
+    request('/vault', {
+      method: 'PUT',
+      headers: withToken(session.body.token),
+      body: { baseVersion: 0, iv: IV, ct: CT }
+    })
+  );
+
+  /* Nearly the whole session has passed and the device reads again. The record is live and its
+     expiry falls before the end of the idle window that read opens. */
+  harness.advance(29 * DAY + 12 * 60 * 60 * 1000);
+  const readBack = await read(
+    await harness.vault.fetch(
+      request('/vault', { method: 'GET', headers: withToken(session.body.token) })
+    )
+  );
+  assert.equal(readBack.status, 200);
+
   await harness.vault.alarm();
 
   const sessions = [...harness.storage.raw.keys()].filter((key) => key.startsWith('session:'));

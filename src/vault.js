@@ -28,11 +28,11 @@ const OWNER_RECHECK_MS = 365 * 24 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 3;
 const NONCE_TTL_MS = 60_000;
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-/* An account that is created and then never signed in to or written is holding a slot it is not
-   using. The alarm releases it after this long, so one abandoned creation cannot occupy the cap
-   indefinitely. Signing in or writing a vault counts as use and cancels the release; an account
-   that is ever used is kept for good. */
-export const UNUSED_RELEASE_MS = 24 * 60 * 60 * 1000;
+/* A slot belongs to an account that is in use. An account that has done nothing for this long —
+   no sign-in, no vault write, no request under a live session — is holding a slot nobody is
+   using, so the alarm gives it back. Idleness is the whole test: an abandoned creation and an
+   account that was used once and then left go back to the cap alike. */
+export const IDLE_RELEASE_MS = 24 * 60 * 60 * 1000;
 /* A session's last-seen stamp is written only when it is this stale, so an ordinary read or
    write does not each cost a storage write. */
 const LAST_SEEN_STEP_MS = 60 * 60 * 1000;
@@ -744,13 +744,14 @@ export class Vault {
     /* The slot is owed from the moment the Registry granted it. The marker and the wake-up are
        written together, before the account exists: if the write below throws, or the object is
        evicted in between, the alarm is the only thing left that can give the slot back. The
-       deadline is the unused one, because that is when a reservation nobody claimed frees itself.
+       deadline is the idle one, because that is when a reservation nobody claimed frees itself.
        Without a Registry no slot was taken, so nothing here is worth recording. */
     if (registry) await this.storage.put(slotMarker(accountId), { at: now });
     if (typeof this.storage.setAlarm === 'function') {
-      /* The only deadline an account ever carries: the release of a slot that was reserved and
-         then never used. Use cancels it, and an account that is used is never scheduled again. */
-      await this.storage.setAlarm(now + UNUSED_RELEASE_MS);
+      /* One idle window from the record's own creation, which is one idle window from its last
+         activity. Every wake-up judges idleness again, so use postpones this deadline instead of
+         cancelling it. */
+      await this.storage.setAlarm(now + IDLE_RELEASE_MS);
     }
 
     await this.storage.put('account', {
@@ -771,7 +772,7 @@ export class Vault {
     await this.storage.delete(TOMBSTONE_KEY);
 
     /* The account exists, so the slot is in use: the marker has nothing left to say, while the
-       alarm stays to release an account that is created and then never used. */
+       alarm stays to release the account if nothing ever uses it. */
     if (registry) await this.storage.delete(slotMarker(accountId));
 
     return json({ ok: true, created: true, plan }, 201);
@@ -1564,9 +1565,9 @@ export class Vault {
    * The object holds exactly one alarm, so every path that arms one has to agree on the same
    * moment: a later deadline written over an earlier one would postpone the earlier one forever,
    * and the record it belonged to would outlive the reason it was kept. The candidates are the
-   * account's own — a paying account is rechecked a year out, an unused one released after its
-   * idle window — and the expiry of every live session, which is a deadline for that record and
-   * not for the account.
+   * account's own — a paying account is rechecked a year out, every other account is released one
+   * idle window after its last activity — and the expiry of every live session, which is a
+   * deadline for that record and not for the account.
    *
    * Only a session that has not expired is a candidate: a moment already past is not a deadline,
    * it is a record the next `pruneSessions()` removes.
@@ -1580,8 +1581,12 @@ export class Vault {
 
     if (account.plan === 'owner' || account.plan === 'paid' || (account.paidUntil ?? 0) > now) {
       take(now + OWNER_RECHECK_MS);
+    } else {
+      /* Recomputed from the last activity every time an alarm is armed. This is the deadline the
+         release is decided on, so arming it from anything but activity would schedule a wake-up
+         that could never release, or cancel one that should have. */
+      take(await this.idleReleaseAt(account, now));
     }
-    if (await this.isUnused(account)) take((account.createdAt ?? 0) + UNUSED_RELEASE_MS);
 
     for (const [, session] of await this.storage.list({ prefix: 'session:' })) {
       const expiresAt = session.expiresAt;
@@ -1609,11 +1614,12 @@ export class Vault {
   /**
    * The deadline the runtime wakes this object for.
    *
-   * Creation arms one alarm, for the release of an account that was never used. An account that
-   * has been signed in to or written is never deleted; an owner or a paying account is only
-   * rechecked a year out, and that check never deletes it either. What a kept account does have
-   * is the expiry of the sessions recorded on it, which is the only wake-up that ever deletes an
-   * expired record: a device that never comes back leaves nothing else to prune it.
+   * Every wake-up judges one thing about a free account: how long it has been idle. One that has
+   * done nothing for a window — never used, or used once and then left — is holding a slot, so
+   * the slot goes back. One that is still in use is kept: its next deadline is the end of its next
+   * idle window, or the expiry of a session that falls first, because that expiry is the only
+   * wake-up that ever removes an expired record. An owner or a paying account is only rechecked a
+   * year out, and that check never deletes it.
    *
    * With no account left, the wake-up belongs to a slot that was reserved and not yet given
    * back: the marker the deletion or the creation wrote is the only thing still here to read.
@@ -1638,14 +1644,10 @@ export class Vault {
       return;
     }
 
-    /* An account nobody signed in to and nobody wrote to is only holding a slot. Release it
-       after the idle window instead of reserving the cap indefinitely. */
-    if (await this.isUnused(account)) {
-      const releaseAt = (account.createdAt ?? 0) + UNUSED_RELEASE_MS;
-      if (now < releaseAt) {
-        await this.armDeadline(account, now);
-        return;
-      }
+    /* Idleness is measured from the last thing the account did — a sign-in, a write, or a request
+       under a live session — and never from whether it was used at all. One sign-in buys one idle
+       window, not the slot forever. */
+    if (now >= (await this.idleReleaseAt(account, now))) {
       /* From here the slot is owed until the Registry confirms it back. The marker and the
          retry are written before the release is asked for, so a Registry that is down leaves the
          record and the wake-up that will try again, rather than an account wiped with its slot
@@ -1661,20 +1663,33 @@ export class Vault {
       return;
     }
 
-    /* A used account is kept. There is no deadline that deletes it: the local vault is free
-       forever, and the hosted copy of an account that is in use is never taken away by time. Its
-       sessions still expire, though, and the next of those is the alarm's own deadline. */
+    /* The account is in use, so it is kept. Its next deadline is the end of the idle window this
+       wake-up came too early for, or a live session's expiry if that falls first — that expiry is
+       the only wake-up that ever removes an expired record. */
     await this.armDeadline(account, now);
   }
 
   /**
-   * Created and never used: no sign-in, no vault. `lastSeenAt` moves on the first login, which
-   * is what separates an abandoned creation from a device that simply has not written yet.
+   * The moment this account's idle window closes: one window after the last thing it did.
+   *
+   * `lastSeenAt` moves on a sign-in and on a vault write, which covers the two ways an account is
+   * used. An ordinary read writes only the session's own stamp — stepped hourly, so a read costs
+   * at most one write an hour — so the live session records are read here too: a device that is
+   * polling the vault is using the account even when it writes nothing, and releasing it under
+   * that device would delete a vault in use. An expired session is not activity: it is a record
+   * `pruneSessions()` is about to remove, and counting it would keep an abandoned account alive.
+   *
+   * The vault is deliberately not consulted: whether a blob is stored says what the account
+   * holds, not whether anybody is still using it.
    */
-  async isUnused(account) {
-    if ((account.lastSeenAt ?? 0) > (account.createdAt ?? 0)) return false;
-    if (await this.storage.get('vault')) return false;
-    return (await this.storage.list({ prefix: 'session:' })).size === 0;
+  async idleReleaseAt(account, now) {
+    let last = Math.max(account.lastSeenAt ?? 0, account.createdAt ?? 0);
+    for (const [, session] of await this.storage.list({ prefix: 'session:' })) {
+      if (typeof session.expiresAt === 'number' && session.expiresAt <= now) continue;
+      const stamp = Math.max(session.lastSeenAt ?? 0, session.createdAt ?? 0);
+      if (stamp > last) last = stamp;
+    }
+    return last + IDLE_RELEASE_MS;
   }
 
   /**
