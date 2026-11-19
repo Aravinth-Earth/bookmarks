@@ -149,8 +149,9 @@ export function retryDelayMs(attempt, retryAfterMs = 0) {
  * eligible instead of being skipped for the seven days a real answer earns, and comes back in the
  * returned list with the pause it should be tried after.
  *
- * `tries` is the digest-keyed map device-store.js keeps, `results` is `[{ host, outcome, attempt }]`
- * in the order they were asked, and `at` is when the answers arrived.
+ * `tries` is the document's `iconTries` map — digest-keyed, sealed with the vault — `results` is
+ * `[{ host, outcome, attempt }]` in the order they were asked, and `at` is when the answers
+ * arrived. The caller owns the map and what happens to it; this only folds the answers in.
  */
 export async function stampAnswers(tries, results, at) {
   const retry = [];
