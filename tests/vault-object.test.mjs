@@ -739,11 +739,13 @@ test('a wrong proof is refused, and five in a row from the object lock the accou
   const harness = object();
   await provision(harness);
 
+  /* The right length and the wrong value, so each of these is an attempt. */
+  const wrong = 'x'.repeat(43);
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     const challenge = await read(await harness.vault.fetch(request('/challenge')));
     assert.equal(challenge.status, 200, `challenge ${attempt}`);
     const response = await read(
-      await harness.vault.fetch(request('/login', { body: { proof: 'not-the-proof' } }))
+      await harness.vault.fetch(request('/login', { body: { proof: wrong } }))
     );
     assert.equal(response.status, 401, `attempt ${attempt}`);
     assert.equal(response.body.error, 'bad_proof');
@@ -752,9 +754,7 @@ test('a wrong proof is refused, and five in a row from the object lock the accou
   const locked = await read(await harness.vault.fetch(request('/challenge')));
   assert.equal(locked.status, 200, 'a challenge still arrives while locked');
 
-  const refused = await read(
-    await harness.vault.fetch(request('/login', { body: { proof: 'not-the-proof' } }))
-  );
+  const refused = await read(await harness.vault.fetch(request('/login', { body: { proof: wrong } })));
   assert.equal(refused.status, 429);
   assert.ok(refused.body.retryAfter > 0);
 
@@ -780,10 +780,12 @@ async function failedLoginFrom(harness, source) {
     await harness.vault.fetch(request('/challenge', { headers: { 'x-vault-source': source } }))
   );
   assert.equal(challenge.status, 200, 'a challenge arrives');
+  /* The right length and the wrong value. A string that could not be the proof at all is not an
+     attempt at this nonce, so it is not counted, and these tests are about the count. */
   return read(
     await harness.vault.fetch(
       request('/login', {
-        body: { proof: 'not-the-proof' },
+        body: { proof: 'x'.repeat(43) },
         headers: { 'x-vault-source': source }
       })
     )

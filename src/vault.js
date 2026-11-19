@@ -384,6 +384,31 @@ async function verifyRecordProof(account, accountId, nonce, proof) {
   return verifyProof(account?.authSecret, accountId, nonce, proof);
 }
 
+/* How many bytes a credential of each kind produces: one Ed25519 signature, or one HMAC-SHA256. */
+const PROOF_BYTES = Object.freeze({ signature: 64, hmac: 32 });
+
+/**
+ * Whether a proof could be the one this credential would produce.
+ *
+ * A challenge is spent by the proof that is presented for it, not by any string that arrives while
+ * it is live. An Ed25519 signature is 64 bytes and so 86 base64url characters; an HMAC-SHA256 is 32
+ * bytes and 43. A one-character string matches the alphabet and nothing else, so it cannot be the
+ * proof the nonce was minted for: refusing it must not spend the challenge, mint a replacement or
+ * count against the caller's source. The rule is the same on every route that spends a nonce — no
+ * unauthenticated request of any shape may delete or rotate a challenge another party is holding.
+ *
+ * The one thing this does let an observer tell is whether the challenge survived, by trying to use
+ * it afterwards. The refusal itself is identical either way, so nothing about the record's
+ * credential kind is learned from the answer.
+ */
+function proofFits(proof, kind) {
+  try {
+    return fromBase64Url(proof, 'the proof').length === PROOF_BYTES[kind];
+  } catch {
+    return false;
+  }
+}
+
 export class Vault {
   constructor(ctx, env, options = {}) {
     this.ctx = ctx;
@@ -586,14 +611,21 @@ export class Vault {
       await this.storage.put('create-nonce', { value: nonce, expiresAt });
       return json({ error: 'proof_required', nonce, expiresAt }, 428);
     }
-    /* Single use, spent whether the proof is right or wrong, exactly as `/login` spends its own. */
-    await this.storage.delete('create-nonce');
+    /* Spent by a proof of the shape the body's own credential names, and by nothing else: a key's
+       signature is 64 bytes and 86 characters, a secret's HMAC 32 bytes and 43. A string that fits
+       neither cannot be the proof this challenge was minted for, so refusing it must not take the
+       challenge from the person who is signing — the same rule `/login` and `/delete` apply. A
+       plausible proof still spends it whether it verifies or not, which is what keeps the
+       challenge single-use. */
+    const presented = proofFits(proof, usesProofKey ? 'signature' : 'hmac');
+    if (presented) await this.storage.delete('create-nonce');
 
     const existing = await this.storage.get('account');
     /* For an existing account the proof is checked against what that record carries — its public
        key, or the secret it was created with — and never against the body, so presenting the same
        id with a different credential can never re-claim it. Only a first claim is checked against
-       what the caller presented, and that is the one moment a credential is chosen. */
+       what the caller presented, and that is the one moment a credential is chosen — and the
+       checks above have already tied a presented key to the id it is claiming. */
     const verified = existing
       ? await verifyRecordProof(existing, accountId, challenge.value, proof)
       : usesProofKey
@@ -781,7 +813,10 @@ export class Vault {
     }
 
     const proof = body.value?.proof;
-    const presented = typeof proof === 'string' && BASE64URL.test(proof);
+    /* Spent by a proof that could be this record's, and by nothing else. The record's own
+       credential decides which shape that is, so a caller cannot spend an account's challenge with
+       a string the account could never have signed. */
+    const presented = proofFits(proof, account.proofKey !== undefined ? 'signature' : 'hmac');
     if (presented) await this.storage.delete('nonce');
 
     const client = CLIENT_KINDS.has(body.value?.client) ? body.value.client : 'unknown';
@@ -798,8 +833,10 @@ export class Vault {
       });
 
       /* Five from one source is that source's lock; a correct proof is what clears it, and the
-         count also ages out on its own. */
-      await this.recordBadProof(account.accountId, source, now);
+         count also ages out on its own. A string that never could have been the proof is not an
+         attempt at this nonce, so it is not counted — otherwise the count itself would be a way
+         to lock a person out without ever guessing. */
+      if (presented) await this.recordBadProof(account.accountId, source, now);
       return json({ error: 'bad_proof' }, 401);
     }
 
@@ -1184,7 +1221,10 @@ export class Vault {
     if (body.tooLarge) return json({ error: 'too_large' }, 413);
 
     const proof = body.value?.proof;
-    const presented = typeof proof === 'string' && BASE64URL.test(proof);
+    /* The same rule `/login` applies: only a proof the record's own credential could have produced
+       may spend the challenge, so a string of any other shape cannot cancel a deletion that was
+       about to be proven. */
+    const presented = proofFits(proof, account.proofKey !== undefined ? 'signature' : 'hmac');
     if (presented) await this.storage.delete('nonce');
 
     const ok = presented
@@ -1198,7 +1238,7 @@ export class Vault {
         account: account.accountId,
         source
       });
-      await this.recordBadProof(account.accountId, source, now);
+      if (presented) await this.recordBadProof(account.accountId, source, now);
       return json({ error: 'bad_proof' }, 401);
     }
 
