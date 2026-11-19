@@ -18,8 +18,10 @@ export const STORE = 'vault';
 /* Five previous versions is enough to undo a bad import or a mistaken clear, and small enough
    that the whole store stays a few hundred kilobytes. */
 export const HISTORY_LIMIT = 5;
-/* A remembered device is a convenience with an expiry, not a permanent key: after thirty days
-   the phrase is asked for again, so a browser profile copied once stops being a way in. */
+/* A remembered device is a convenience with an expiry, not a permanent key: a record is used for
+   at most thirty days of forward clock movement, and a record dated later than the clock is
+   treated as expired rather than trusted, so the phrase is asked for again and a browser profile
+   copied once stops being a way in. */
 export const REMEMBER_LIFETIME_DAYS = 30;
 export const REMEMBER_LIFETIME_MS = REMEMBER_LIFETIME_DAYS * 24 * 60 * 60 * 1000;
 
@@ -149,7 +151,9 @@ export function createVault(adapter, { now = () => Date.now() } = {}) {
 
   function isFresh(savedAt) {
     if (typeof savedAt !== 'number' || !Number.isFinite(savedAt)) return false;
-    return now() - savedAt < REMEMBER_LIFETIME_MS;
+    /* A record dated after the clock has no age a lifetime can bound, so it is stale, not fresh. */
+    const age = now() - savedAt;
+    return age >= 0 && age < REMEMBER_LIFETIME_MS;
   }
 
   /**

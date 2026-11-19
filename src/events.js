@@ -11,7 +11,7 @@
  * The shape, one line per event and no nested object:
  *
  *   event        signin_failed | signin_locked | create_refused | rate_limited |
- *                proxy_refused | server_error
+ *                proxy_refused | account_refused | server_error
  *   route        the class the route is counted as — signin, fetch or vault — or `api` when the
  *                exception surfaced before a class was known
  *   reason       the fixed code the refusing branch answered with: bad_proof,
@@ -31,7 +31,9 @@
  * digest prefix. The rate limiter already keys on its own digest; that value never arrives here.
  * `source` is digested here too, so a value that was not already a digest could still not be
  * written as one. What the Worker sends is an account-keyed digest of an address, never the
- * address and never a value that reads the same for another account.
+ * address and never a value that reads the same for another account. A refused probe that names
+ * an id which cannot be an account is written without any handle at all, because the value it
+ * named could not be an account to group.
  *
  * A refused request writes one line and a served one writes none, so the volume follows how
  * rare the event is rather than how much traffic there is. Nothing here returns a value or may
