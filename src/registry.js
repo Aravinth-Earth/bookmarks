@@ -20,6 +20,29 @@ const DAY_MS = 86_400_000;
 /* A var of the same name can override this without a code change. */
 export const MAX_ACCOUNTS = 50;
 
+/* A cap is written as a whole decimal number and nothing else. `Number()` would read "5.5" as five
+   and a half, "1e3" as a thousand, and "" as zero, and every one of those is a value an operator
+   did not mean. Surrounding whitespace is the one thing tolerated, because a config file may
+   carry it and it changes nothing. */
+const CAP_TEXT = /^[0-9]+$/;
+
+/**
+ * What one source says about the cap, before the next source is consulted.
+ *
+ * `absent` — nothing was written here, so the next source applies.
+ * `max` — the number the source states, zero included: taking no new accounts is a real cap.
+ * `unreadable` — something was written and it is not a whole number. That is a configuration
+ * error to report, never a value to skip, round, or replace by a larger default.
+ */
+export function readCap(value) {
+  if (value === undefined || value === null) return { absent: true };
+  const text = String(value).trim();
+  if (text === '') return { absent: true };
+  if (!CAP_TEXT.test(text)) return { unreadable: true };
+  const max = Number(text);
+  return Number.isSafeInteger(max) ? { max } : { unreadable: true };
+}
+
 /* How many released ids are remembered. A deleted id keeps a tombstone in its object and must keep
    answering `410 account_deleted` instead of `404 no_account`, so the edge needs to know the id was
    here even though its slot is gone. The list is bounded: past this many deletions the oldest id
@@ -76,16 +99,37 @@ export class Registry {
   }
 
   /**
+   * Which source states the cap, and what it says.
+   *
+   * The operator's page outranks the deploy, and the deploy outranks the built-in default. A
+   * stored zero is how the page clears the setting (see `saveSettings`), so it means "no setting"
+   * and the next source applies; a zero in the var is a cap like any other. An unreadable source
+   * stops the search: it is the answer, and the only answer, until someone fixes it.
+   */
+  async resolveCap() {
+    const stored = readCap((await this.settings()).maxAccounts);
+    if (stored.unreadable) return stored;
+    if (!stored.absent && stored.max !== 0) return stored;
+
+    const configured = readCap(this.env?.MAX_ACCOUNTS);
+    if (configured.unreadable || !configured.absent) return configured;
+
+    return { max: MAX_ACCOUNTS };
+  }
+
+  /**
    * The number of accounts this server will hold.
    *
    * The operator's page can set it, and a set value outranks the deploy: raising a cap should not need a deploy, and
    * lowering it never deletes an account that already exists — it only stops the next one.
+   *
+   * `null` when the configured cap cannot be read. That is not a cap of zero and not a cap of
+   * fifty: it is a server that does not know how many accounts it may hold, and `reserve` refuses
+   * rather than guessing. Read routes report the null instead of failing.
    */
   async max() {
-    const stored = Number((await this.settings()).maxAccounts);
-    if (Number.isInteger(stored) && stored > 0) return stored;
-    const configured = Number(this.env?.MAX_ACCOUNTS);
-    return Number.isInteger(configured) && configured > 0 ? configured : MAX_ACCOUNTS;
+    const cap = await this.resolveCap();
+    return cap.unreadable ? null : cap.max;
   }
 
   async settings() {
@@ -148,10 +192,14 @@ export class Registry {
 
     const accounts = (await this.storage.get('accounts')) ?? [];
     const released = (await this.storage.get('released')) ?? [];
+    const cap = await this.resolveCap();
 
+    /* `room: false` is what the edge turns into a refusal without asking the object (src/index.js),
+       so an unreadable cap must not answer it: the question cannot be computed here, and a hint
+       that cannot be computed must not refuse. */
     return json({
       exists: accounts.includes(accountId) || released.includes(accountId),
-      room: accounts.length < await this.max()
+      room: cap.unreadable ? true : accounts.length < cap.max
     });
   }
 
@@ -168,10 +216,16 @@ export class Registry {
       return json({ ok: true, alreadyReserved: true, count: accounts.length, max: await this.max() });
     }
 
+    /* A cap that cannot be read is refused as its own state: it is not a full server, and telling
+       the person it is would answer a typo with "come back when a slot frees". Nothing is written
+       and no slot is promised. */
+    const cap = await this.resolveCap();
+    if (cap.unreadable) return json({ error: 'cap_unreadable' }, 500);
+
     /* The cap is counted over accounts only: a code already handed out is a promise of a slot, which is why the
        generator will not promise more of them than there are slots (see `/invites/new`). */
-    if (accounts.length >= await this.max()) {
-      return json({ error: 'full', max: await this.max() }, 429);
+    if (accounts.length >= cap.max) {
+      return json({ error: 'full', max: cap.max }, 429);
     }
 
     /* How this account came to exist is written down with it, so the operator view can say whether a vault paid for
@@ -252,10 +306,14 @@ export class Registry {
     const accounts = (await this.storage.get('accounts')) ?? [];
     const invites = (await this.invites()).filter((entry) => entry.usedAt || entry.expiresAt > now);
 
+    /* A code is a promise of a slot, so a cap that cannot be read cannot promise one either. */
+    const cap = await this.resolveCap();
+    if (cap.unreadable) return json({ error: 'cap_unreadable' }, 500);
+
     const live = invites.filter((entry) => !entry.usedAt).length;
-    const room = (await this.max()) - accounts.length - live;
+    const room = cap.max - accounts.length - live;
     if (room <= 0) {
-      return json({ error: 'no_room_for_codes', accounts: accounts.length, live, max: await this.max() }, 429);
+      return json({ error: 'no_room_for_codes', accounts: accounts.length, live, max: cap.max }, 429);
     }
 
     const made = Math.min(count, room);
