@@ -758,6 +758,46 @@ try {
 }
 
 
+/* 9. The deploy path runs this guard and the test suite. Workers Builds deploys with
+   `npx wrangler deploy` and its own build command empty, so the `[build]` step in `wrangler.toml`
+   is the only place the repository can put its own gates on the path that ships bytes: whatever CI
+   says about a pull request, the merge build is what reaches the host. `npm run check` runs over
+   the tree first and `npm test` follows; a command that drops either half leaves the other half's
+   checks off the deploy, which is the failure this section exists to refuse. */
+try {
+  const config = readFileSync(join(root, 'wrangler.toml'), 'utf8');
+  const build = config.split(/^\[build\]\s*$/m)[1]?.split(/^\[/m)[0];
+
+  if (build === undefined) {
+    problems.push('deploy: wrangler.toml has no [build] block, so a deploy would run no check');
+  } else {
+    const declared = build.match(/^\s*command\s*=\s*(?:"([^"]*)"|'([^']*)')/m);
+    const command = declared?.[1] ?? declared?.[2] ?? '';
+    if (command === '') {
+      problems.push('deploy: [build] declares no command, so a deploy would run no check');
+    } else {
+      /* Read as a command step rather than a substring: `npm test` has to be a step of its own,
+         not a word inside another script's name. */
+      const runs = (step) =>
+        command.split(/&&|\|\||;|\|/).some((part) => part.trim() === step);
+      if (!runs('npm run check')) {
+        problems.push(
+          `deploy: the build command "${command}" does not run \`npm run check\`, so the deploy ` +
+            'would ship what the guard refuses'
+        );
+      }
+      if (!runs('npm test')) {
+        problems.push(
+          `deploy: the build command "${command}" does not run \`npm test\`, so the deploy ` +
+            'would ship what the suite refuses'
+        );
+      }
+    }
+  }
+} catch (error) {
+  problems.push(`deploy: ${error.message}`);
+}
+
 if (problems.length) {
   console.error('check failed:');
   for (const problem of problems) console.error(`  - ${problem}`);

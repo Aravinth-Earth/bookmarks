@@ -90,6 +90,39 @@ test('markup a Worker returns is scanned like the page', (t) => {
   assert.match(result.output, /src\/index\.js: inline <script>/);
 });
 
+test('a deploy whose build step runs neither gate fails the guard', (t) => {
+  const dir = copyOfTree(t);
+  const path = join(dir, 'wrangler.toml');
+  const text = readFileSync(path, 'utf8');
+  const stripped = text.replace(/^\[build\][\s\S]*?(?=^\[)/m, '');
+  assert.notEqual(
+    stripped,
+    text,
+    'wrangler.toml declares no [build] block, so this case cannot plant'
+  );
+  writeFileSync(path, stripped);
+
+  const result = guard(dir);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /deploy: wrangler\.toml has no \[build\] block/);
+});
+
+test('a deploy whose build step runs the guard but not the tests fails the guard', (t) => {
+  const dir = copyOfTree(t);
+  const path = join(dir, 'wrangler.toml');
+  const text = readFileSync(path, 'utf8');
+  const amended = text.replace(
+    /^(\s*command\s*=\s*")[^"]*(")/m,
+    '$1npm run check$2'
+  );
+  assert.notEqual(amended, text, 'wrangler.toml has no [build] command, so this case cannot plant');
+  writeFileSync(path, amended);
+
+  const result = guard(dir);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /deploy: the build command .* does not run `npm test`/);
+});
+
 test('an unmodified copy passes the guard', (t) => {
   const dir = copyOfTree(t);
 

@@ -9,7 +9,7 @@
     "dev": "wrangler dev",
     "test": "node --test tests/*.test.mjs",
     "check": "node scripts/check.mjs",
-    "deploy": "node scripts/check.mjs && wrangler deploy",
+    "deploy": "wrangler deploy",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium",
     "package:extension": "node scripts/package-extension.mjs"

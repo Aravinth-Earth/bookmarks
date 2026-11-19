@@ -7,6 +7,15 @@ name = "bookmarks"
 main = "src/index.js"
 compatibility_date = "2026-10-30"
 
+# The deploy path runs the gates this repository already has. Workers Builds deploys this Worker
+# with `npx wrangler deploy` and its own build command empty, so the checks never ran on the path
+# that ships bytes: a merge could reach the host with the guard or a test failing, however green the
+# pull request's CI was. Wrangler runs this command itself before it bundles, for a production
+# deploy, a preview upload, and `wrangler dev`, so the guard and the suite are on every path that
+# produces a version. `npm run check` runs first because it reads the tree the tests then exercise.
+[build]
+command = "npm run check && npm test"
+
 [vars]
 # One account while the service is being tested. The Registry enforces it and answers
 # 429 {error:"full"} at the cap; raise it to open creation to others.
