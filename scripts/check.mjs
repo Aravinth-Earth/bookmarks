@@ -399,6 +399,46 @@ try {
   problems.push(`cap: ${error.message}`);
 }
 
+/* 5d. The account cap is a Durable Object binding, so a deployment that omits REGISTRY creates
+   accounts with nothing counting them. The name and the class are checked together, because a
+   renamed binding fails at runtime while the configuration still looks present; a preview is
+   checked when it declares bindings of its own, since a preview that inherits nothing can create
+   uncapped accounts too. */
+try {
+  const file = 'wrangler.toml';
+  const config = readFileSync(join(root, file), 'utf8');
+  const blocksUnder = (header) =>
+    config
+      .split(header)
+      .slice(1)
+      .map((part) => part.split(/^\s*\[/m)[0]);
+  const bindsRegistry = (blocks) =>
+    blocks.some(
+      (block) =>
+        /^\s*name\s*=\s*"REGISTRY"\s*$/m.test(block) &&
+        /^\s*class_name\s*=\s*"Registry"\s*$/m.test(block)
+    );
+
+  if (!bindsRegistry(blocksUnder('[[durable_objects.bindings]]'))) {
+    problems.push(
+      `${file}: no [[durable_objects.bindings]] entry binds name = "REGISTRY" to class_name = "Registry", ` +
+        'so the account cap would not exist'
+    );
+  }
+
+  if (
+    config.includes('[[previews.durable_objects.bindings]]') &&
+    !bindsRegistry(blocksUnder('[[previews.durable_objects.bindings]]'))
+  ) {
+    problems.push(
+      `${file}: no [[previews.durable_objects.bindings]] entry binds name = "REGISTRY" to ` +
+        'class_name = "Registry", so a preview would create accounts uncapped'
+    );
+  }
+} catch (error) {
+  problems.push(`registry binding: ${error.message}`);
+}
+
 /* 6. Invocation logging must stay off. Every account route carries `/a/<accountId>/`, and the
    invocation line is written from the request path, so a config edit that turns it back on
    publishes the id that `src/events.js` digests on purpose. The event stream is the intended
