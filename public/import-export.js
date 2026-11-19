@@ -501,6 +501,59 @@ export function mergeInto(existing, incoming, now = Date.now, options = {}) {
 }
 
 /**
+ * A whole document read through the one URL rule.
+ *
+ * A document does not always arrive through the add form: a sealed backup, a copy from another
+ * device and a merged import all reach the list without ever being typed. A record whose URL
+ * `normalizeUrl` would refuse is not a bookmark, so it is dropped here and counted, the way the
+ * importer already drops a malformed entry instead of losing the rest of the file.
+ *
+ * The input is left alone; the document and each kept record come back as new objects, with the
+ * URL, hostname and origin taken from `normalizeUrl` so a file cannot keep the three disagreeing.
+ *
+ * @returns {{document: object, dropped: number}}
+ */
+export function sanitizeDocument(document) {
+  /* A shape this function cannot read is handed back as it came rather than turned into an empty
+     document: the callers already refuse a document with no list, and dropping every field here
+     would turn one bad record into a lost vault. */
+  if (!document || typeof document !== 'object' || !Array.isArray(document.bookmarks)) {
+    return { document, dropped: 0 };
+  }
+
+  const bookmarks = [];
+  let dropped = 0;
+
+  for (const entry of document.bookmarks) {
+    try {
+      const { url, hostname, origin } = normalizeUrl(entry?.url);
+      bookmarks.push({ ...entry, url, hostname, origin });
+    } catch {
+      dropped += 1;
+    }
+  }
+
+  return { document: { ...document, bookmarks }, dropped };
+}
+
+/**
+ * The address a row may point at, or `null` when the URL rule refuses it.
+ *
+ * The renderer's last line of defence: a row is drawn from a record, not from a form, so it
+ * cannot assume the record was checked on the way in. A refused URL still gets a row — the
+ * bookmark is visible and deletable — but the row carries no live link.
+ *
+ * @returns {string | null}
+ */
+export function linkHref(input) {
+  try {
+    return normalizeUrl(input).url;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Every anchor in a browser export, scanned once from left to right.
  *
  * The expression this replaced had to rescan the tail from every `<a` that never closed, so a
@@ -595,7 +648,9 @@ export function exportBrowserBookmarks(document) {
     '<DL><p>'
   ];
 
-  for (const bookmark of [...document.bookmarks].sort((left, right) =>
+  /* The file is the one thing another browser trusts without asking, so the same rule runs here
+     even when the caller hands over a document that never met a loader. */
+  for (const bookmark of [...sanitizeDocument(document).document.bookmarks].sort((left, right) =>
     (left.name || left.hostname).localeCompare(right.name || right.hostname)
   )) {
     const name = (bookmark.name || bookmark.hostname)

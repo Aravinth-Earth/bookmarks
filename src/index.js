@@ -800,6 +800,28 @@ async function readPrefix(response, max, signal) {
   return bytes;
 }
 
+/**
+ * Copy at most the room left under `max` from `chunk` into `destination` at `offset`.
+ *
+ * The caller holds one buffer sized for `max`, so a chunk that overshoots the room must never be
+ * written whole: only `max - offset` of its bytes are kept, and the overshoot is reported so the
+ * caller can cancel the source rather than buffer the rest of it. Nothing past the room is read.
+ */
+export function copyRoom(destination, chunk, offset, max) {
+  const room = Math.max(0, max - offset);
+  const copied = Math.min(chunk.byteLength, room);
+  if (copied > 0) destination.set(chunk.subarray(0, copied), offset);
+  return { copied, exceeded: chunk.byteLength > copied };
+}
+
+/**
+ * The icon bytes, refusing and cancelling a source that sends more than `max`.
+ *
+ * The destination is allocated for `max` up front and every chunk is cut to the room left in it
+ * before it is kept, so the memory this holds is bounded by the cap rather than by the largest
+ * chunk an upstream chooses to send. A source that overshoots answers `null`, which the caller
+ * turns into a refused icon.
+ */
 async function readCapped(response, max, signal) {
   if (!response.body) return new Uint8Array(0);
 
@@ -809,7 +831,7 @@ async function readCapped(response, max, signal) {
   };
   signal?.addEventListener('abort', close, { once: true });
 
-  const chunks = [];
+  const bytes = new Uint8Array(max);
   let total = 0;
 
   try {
@@ -817,24 +839,18 @@ async function readCapped(response, max, signal) {
       const { done, value } = await untilAborted(reader.read(), signal);
       if (done) break;
 
-      total += value.byteLength;
-      if (total > max) {
+      const { copied, exceeded } = copyRoom(bytes, value, total, max);
+      total += copied;
+      if (exceeded) {
         await reader.cancel();
         return null;
       }
-      chunks.push(value);
     }
   } finally {
     signal?.removeEventListener('abort', close);
   }
 
-  const bytes = new Uint8Array(total);
-  let at = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, at);
-    at += chunk.byteLength;
-  }
-  return bytes;
+  return bytes.subarray(0, total);
 }
 
 function iconTypeOf(response) {

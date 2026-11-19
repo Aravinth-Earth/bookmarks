@@ -299,6 +299,42 @@ test('releasing an unknown id is harmless, an invalid one is refused', async () 
   assert.equal(invalid.status, 400);
 });
 
+/* A body is not typed. A one-element array stringifies to a valid id, so a check made with
+   `ACCOUNT_ID.test(value ?? '')` accepts it and stores the array: the entry then never matches a
+   plain string id, so the slot it takes can never be counted out or released. */
+test('a reserve naming an account id in an array is refused and takes no slot', async () => {
+  const { registry, storage } = harness();
+
+  const response = await json(await registry.fetch(reserve({ accountId: [accountId(1)] })));
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(response.body, { error: 'invalid' });
+  assert.equal(storage.raw.has('accounts'), false);
+});
+
+test('a release naming an account id in an array is refused and frees nothing', async () => {
+  const { registry, storage } = harness();
+
+  await registry.fetch(reserve({ accountId: accountId(1) }));
+  const response = await json(await registry.fetch(release({ accountId: [accountId(1)] })));
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(storage.raw.get('accounts'), [accountId(1)]);
+});
+
+test('a plain string id still reserves and releases normally', async () => {
+  const { registry, storage } = harness();
+
+  const reserved = await json(await registry.fetch(reserve({ accountId: accountId(1) })));
+  assert.equal(reserved.status, 200);
+  assert.deepEqual(storage.raw.get('accounts'), [accountId(1)]);
+
+  const released = await json(await registry.fetch(release({ accountId: accountId(1) })));
+  assert.equal(released.status, 200);
+  assert.equal(released.body.count, 0);
+  assert.deepEqual(storage.raw.get('accounts'), []);
+});
+
 test('an oversized reserve body is refused', async () => {
   const { registry, storage } = harness();
   const response = await registry.fetch(
