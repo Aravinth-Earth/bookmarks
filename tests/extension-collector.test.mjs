@@ -9,7 +9,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCollector } from '../extension/collector-core.js';
+import { createCollector, importHistory } from '../extension/collector-core.js';
+import { DEFAULT_POLICY } from '../extension/policy.js';
 
 function memory() {
   const map = new Map();
@@ -315,4 +316,198 @@ test('the entry cap reaches the store on a tidy, not on every visit', async () =
   assert.equal(await collector.tidy(), 2);
   const rows = Object.entries(await persistent.all()).filter(([key]) => key.startsWith('u:'));
   assert.deepEqual(rows.map(([, row]) => row.host).sort(), ['b.example', 'c.example']);
+});
+
+/* A history import is a fold over values, so every case below hands it entries and rows and reads the answer. */
+
+const AT = Date.parse('2026-06-01T12:00:00.000Z');
+const withPolicy = (patch = {}) => ({ ...DEFAULT_POLICY, enabled: true, ...patch });
+const iso = (at) => new Date(at).toISOString();
+
+test('history entries become rows with the counts they already had', () => {
+  const { items, counts } = importHistory({
+    entries: [
+      { url: 'https://a.example/read', visitCount: 7, lastVisitTime: AT - 60_000 },
+      { url: 'https://b.example/read', visitCount: 1, lastVisitTime: AT }
+    ],
+    policy: withPolicy(),
+    at: AT
+  });
+
+  assert.deepEqual(counts, { imported: 2, merged: 0, excluded: 0, capped: 0, invalid: 0 });
+  assert.deepEqual(Object.keys(items).sort(), ['https://a.example/read', 'https://b.example/read']);
+  assert.deepEqual(items['https://a.example/read'], {
+    url: 'https://a.example/read',
+    host: 'a.example',
+    visits: 7,
+    firstSeenAt: iso(AT - 60_000),
+    lastSeenAt: iso(AT - 60_000),
+    private: false
+  });
+  assert.equal(items['https://b.example/read'].visits, 1, 'the count is the history count, not one visit');
+  assert.equal(items['https://b.example/read'].lastSeenAt, iso(AT));
+});
+
+test('a credential query parameter never reaches a row', () => {
+  const { items } = importHistory({
+    entries: [{ url: 'https://a.example/reset?token=s3cret-value&page=2', visitCount: 2, lastVisitTime: AT }],
+    policy: withPolicy(),
+    at: AT
+  });
+
+  const [row] = Object.values(items);
+  assert.equal(row.url.includes('token'), false, 'the parameter is dropped with the rest of the credentials');
+  assert.equal(JSON.stringify(items).includes('s3cret-value'), false, 'the value is nowhere in the result');
+});
+
+test('an excluded site leaves no row and is counted', () => {
+  const { items, counts } = importHistory({
+    entries: [{ url: 'https://bank.example/statement', visitCount: 3, lastVisitTime: AT }],
+    policy: withPolicy({ exclude: [{ scope: 'site', value: 'bank.example' }] }),
+    at: AT
+  });
+
+  assert.equal(counts.excluded, 1);
+  assert.equal(counts.imported, 0);
+  assert.deepEqual(items, {});
+});
+
+test('an address that is not a link is counted, not stored', () => {
+  const { items, counts } = importHistory({
+    entries: ['chrome://settings', 'file:///x', 'not a url'].map((url) => ({
+      url,
+      visitCount: 1,
+      lastVisitTime: AT
+    })),
+    policy: withPolicy(),
+    at: AT
+  });
+
+  assert.equal(counts.invalid, 3);
+  assert.equal(counts.imported, 0);
+  assert.deepEqual(items, {});
+
+  /* A null entry, an entry with no address and an entry with no count are refused rather than guessed at. */
+  const odd = importHistory({
+    entries: [null, {}, { url: 'https://countless.example/' }],
+    policy: withPolicy(),
+    at: AT
+  });
+  assert.equal(odd.counts.invalid, 3);
+  assert.deepEqual(odd.items, {});
+});
+
+test('a held row keeps the larger count and the later time', () => {
+  const day = 86_400_000;
+  const held = {
+    url: 'https://a.example/held',
+    host: 'a.example',
+    visits: 3,
+    firstSeenAt: iso(AT - 5 * day),
+    lastSeenAt: iso(AT - 2 * day),
+    private: true
+  };
+  const items = { 'https://a.example/held': held };
+
+  const later = importHistory({
+    entries: [{ url: 'https://a.example/held', visitCount: 9, lastVisitTime: AT }],
+    policy: withPolicy(),
+    items,
+    at: AT
+  });
+
+  assert.equal(later.counts.merged, 1);
+  assert.equal(later.items['https://a.example/held'].visits, 9, 'the larger count wins');
+  assert.equal(later.items['https://a.example/held'].lastSeenAt, iso(AT), 'the later time wins');
+  assert.equal(later.items['https://a.example/held'].firstSeenAt, iso(AT - 5 * day), 'the earlier sighting stands');
+  assert.equal(later.items['https://a.example/held'].private, true, 'a held row stays as private as it was');
+
+  const earlier = importHistory({
+    entries: [{ url: 'https://a.example/held', visitCount: 2, lastVisitTime: AT - 3 * day }],
+    policy: withPolicy(),
+    items,
+    at: AT
+  });
+
+  assert.equal(earlier.items['https://a.example/held'].visits, 3, 'a smaller history count does not lower it');
+  assert.equal(earlier.items['https://a.example/held'].lastSeenAt, held.lastSeenAt, 'an older entry does not go back');
+  assert.equal(held.visits, 3, 'the row handed in is not written to');
+});
+
+test('two entries for one address fold into one row', () => {
+  const { items, counts } = importHistory({
+    entries: [
+      { url: 'https://a.example/repeat', visitCount: 2, lastVisitTime: AT - 60_000 },
+      { url: 'https://a.example/repeat#again', visitCount: 5, lastVisitTime: AT }
+    ],
+    policy: withPolicy(),
+    at: AT
+  });
+
+  assert.equal(counts.imported, 1);
+  assert.equal(counts.merged, 1);
+  assert.deepEqual(Object.keys(items), ['https://a.example/repeat']);
+  assert.equal(items['https://a.example/repeat'].visits, 5, 'the larger of the two counts');
+  assert.equal(items['https://a.example/repeat'].lastSeenAt, iso(AT));
+});
+
+test('retention and the entry cap still bound what is imported', () => {
+  const day = 86_400_000;
+  const { items, counts } = importHistory({
+    entries: [
+      { url: 'https://stale.example/', visitCount: 4, lastVisitTime: AT - 20 * day },
+      { url: 'https://a.example/', visitCount: 1, lastVisitTime: AT - 3 * day },
+      { url: 'https://b.example/', visitCount: 1, lastVisitTime: AT - 2 * day },
+      { url: 'https://c.example/', visitCount: 1, lastVisitTime: AT - day }
+    ],
+    policy: withPolicy({ retentionDays: 10, maxEntries: 2 }),
+    at: AT
+  });
+
+  assert.equal(counts.imported, 4);
+  assert.equal(counts.capped, 2, 'one row left the window and one lost the cap');
+  assert.deepEqual(Object.keys(items).sort(), ['https://b.example/', 'https://c.example/'], 'the newest two survive');
+});
+
+test('an import with the policy off changes nothing', () => {
+  const items = {
+    'https://a.example/': {
+      url: 'https://a.example/',
+      host: 'a.example',
+      visits: 2,
+      firstSeenAt: iso(AT - 1_000),
+      lastSeenAt: iso(AT - 1_000),
+      private: false
+    }
+  };
+
+  const result = importHistory({
+    entries: [{ url: 'https://b.example/', visitCount: 4, lastVisitTime: AT }],
+    policy: { ...DEFAULT_POLICY, enabled: false },
+    items,
+    at: AT
+  });
+
+  assert.deepEqual(Object.keys(result.items), ['https://a.example/']);
+  assert.deepEqual(result.items, items);
+  assert.deepEqual(result.counts, { imported: 0, merged: 0, excluded: 0, capped: 0, invalid: 0 });
+});
+
+test('an empty history is a no-op', () => {
+  const items = {
+    'https://a.example/': {
+      url: 'https://a.example/',
+      host: 'a.example',
+      visits: 1,
+      firstSeenAt: iso(AT),
+      lastSeenAt: iso(AT),
+      private: false
+    }
+  };
+
+  const result = importHistory({ entries: [], policy: withPolicy(), items, at: AT });
+
+  assert.deepEqual(result.items, items);
+  assert.deepEqual(Object.keys(result.items), Object.keys(items));
+  assert.deepEqual(result.counts, { imported: 0, merged: 0, excluded: 0, capped: 0, invalid: 0 });
 });
