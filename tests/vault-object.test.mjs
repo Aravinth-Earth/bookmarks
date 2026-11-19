@@ -2318,6 +2318,91 @@ test('a body that lands after the operator ended the account is refused, not wri
   );
 });
 
+/**
+ * Hold one key's write open, so a test can act on the account in the window between the body
+ * read and the account write. The fake storage is shared with the object, so replacing `put` on
+ * it is what the object calls. `arrived` resolves when the object reaches the held write — a
+ * fixed sleep would let the test act before the request had authorised, which proves nothing.
+ */
+function holdPut(harness, key) {
+  const realPut = harness.storage.put.bind(harness.storage);
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let reached;
+  const arrived = new Promise((resolve) => {
+    reached = resolve;
+  });
+  harness.storage.put = async (name, value) => {
+    if (name === key) {
+      reached();
+      await gate;
+    }
+    return realPut(name, value);
+  };
+  return { arrived, release };
+}
+
+test('an owner claim made just before the vault write survives the write', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  assert.equal((await harness.storage.get('account')).plan, 'free');
+
+  harness.env.OWNER_ACCOUNT_ID = ACCOUNT.accountId;
+
+  const { arrived, release } = holdPut(harness, 'vault');
+  const pending = harness.vault.fetch(
+    request('/vault', {
+      method: 'PUT',
+      headers: withToken(session.body.token),
+      body: { baseVersion: 0, iv: IV, ct: CT }
+    })
+  );
+  await arrived;
+
+  /* The claim lands after the account read this route makes for its quota check. */
+  await harness.vault.claimOwner(await harness.storage.get('account'));
+  release();
+  const response = await read(await pending);
+
+  assert.equal(response.status, 200);
+  const stored = await harness.storage.get('account');
+  assert.equal(stored.plan, 'owner', 'the claim is still there');
+  assert.equal(stored.units, OWNER_UNITS);
+});
+
+test('a deletion that lands just before the vault write is not undone by it', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+
+  const { arrived, release } = holdPut(harness, 'vault');
+  const pending = harness.vault.fetch(
+    request('/vault', {
+      method: 'PUT',
+      headers: withToken(session.body.token),
+      body: { baseVersion: 0, iv: IV, ct: CT }
+    })
+  );
+  await arrived;
+
+  const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
+  assert.equal(removed.status, 200);
+  release();
+  const response = await read(await pending);
+
+  assert.ok(response.status === 404 || response.status === 410, `answered ${response.status}`);
+  assert.equal(harness.storage.raw.has('account'), false, 'the ended account stays ended');
+  assert.equal(harness.storage.raw.has('vault'), false, 'the envelope written in the gap is gone');
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('history:')),
+    [],
+    'and no history entry from this request is left'
+  );
+});
+
 test('an ordinary write still records its version and its time', async () => {
   const harness = object();
   await provision(harness);
