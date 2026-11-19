@@ -23,6 +23,9 @@ import { keyFromBytes, open, proveAuth, seal } from '../public/crypto.js';
 const ACCOUNT_A = 'accountAaccountAaccoun';
 const ACCOUNT_B = 'accountBaccountBaccoun';
 
+/* A named clock for the expiry cases, so "later than now" is a plain number and not a sleep. */
+const BASE = 1_700_000_000_000;
+
 /* 32 random bytes, base64url: the material a remembered record used to hold as text. */
 function secretText() {
   return Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
@@ -252,6 +255,58 @@ test('an expired record written in the old shape is deleted, not migrated', asyn
   const vault = createVault(adapter, { now: () => 1_000 + REMEMBER_LIFETIME_MS });
   assert.equal(await vault.readRemembered(), null);
   assert.equal(adapter.raw.has('remembered'), false);
+});
+
+test('a remembered record dated after the clock is expired, not trusted', async () => {
+  const adapter = memoryAdapter();
+  adapter.raw.set('remembered', {
+    accountId: ACCOUNT_A,
+    key: {},
+    authKey: {},
+    savedAt: BASE + 60_000
+  });
+
+  const vault = createVault(adapter, { now: () => BASE });
+  assert.equal(await vault.readRemembered(), null, 'a future date is not a permanent sign-in');
+  assert.equal(adapter.raw.has('remembered'), false, 'the future-dated record is deleted');
+});
+
+test('a record one second inside the lifetime is still used', async () => {
+  const adapter = memoryAdapter();
+  const record = {
+    accountId: ACCOUNT_A,
+    key: {},
+    authKey: {},
+    savedAt: BASE - (REMEMBER_LIFETIME_MS - 1_000)
+  };
+  adapter.raw.set('remembered', record);
+
+  const vault = createVault(adapter, { now: () => BASE });
+  assert.deepEqual(await vault.readRemembered(), record);
+  assert.equal(adapter.raw.has('remembered'), true);
+});
+
+test('a record past the lifetime is deleted', async () => {
+  const adapter = memoryAdapter();
+  adapter.raw.set('remembered', {
+    accountId: ACCOUNT_A,
+    key: {},
+    authKey: {},
+    savedAt: BASE - REMEMBER_LIFETIME_MS - 1_000
+  });
+
+  const vault = createVault(adapter, { now: () => BASE });
+  assert.equal(await vault.readRemembered(), null);
+  assert.equal(adapter.raw.has('remembered'), false);
+});
+
+test('a record written now is fresh', async () => {
+  const adapter = memoryAdapter();
+  const record = { accountId: ACCOUNT_A, key: {}, authKey: {}, savedAt: BASE };
+  adapter.raw.set('remembered', record);
+
+  const vault = createVault(adapter, { now: () => BASE });
+  assert.deepEqual(await vault.readRemembered(), record);
 });
 
 test('clear removes the vault, its history and the remembered key', async () => {
