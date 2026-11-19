@@ -1137,7 +1137,19 @@ export class Vault {
     if (typeof ct !== 'string' || ct.length === 0 || !BASE64URL.test(ct)) {
       return json({ error: 'bad_ct' }, 400);
     }
-    const limit = this.capChars(account);
+
+    /* The record read above is a gate, not the record this write is built from: the object may
+       serve a sign-in, a grant or a deletion while the body was still arriving. Read the account
+       again now that the body is in hand, and let every check below see that copy. A record that
+       is gone stays gone — a save is not a way to bring an ended account back. */
+    const live = await this.storage.get('account');
+    if (!live) {
+      const gone = await this.tombstone();
+      if (gone) return this.deletedRefusal(gone);
+      return json({ error: 'no_account' }, 404);
+    }
+
+    const limit = this.capChars(live);
     if (ct.length > limit) return json({ error: 'quota', limit }, 413);
 
     const current = (await this.storage.get('vault')) ?? { version: 0 };
@@ -1163,7 +1175,26 @@ export class Vault {
 
     const vault = { version, iv, ct, updatedAt };
     await this.storage.put('vault', vault);
-    await this.storage.put('account', { ...account, lastSeenAt: updatedAt });
+
+    /* Every await above can be a seam for another request: a claim, a grant or an operator's
+       deletion that lands after the read at the top of this method is not in `live`. So the
+       account is read once more, as the last read of this request, and the write below applies
+       one field to that copy. Nothing is awaited between the read and the put, so the runtime's
+       input gate covers the pair. */
+    const final = await this.storage.get('account');
+    if (!final) {
+      /* The account ended while this save was in flight. The envelope and the history entry
+         written above belong to a record that no longer exists, so they go with it: a save is not
+         a way to bring an ended account back. */
+      await this.storage.delete('vault');
+      if (current.version > 0) await this.storage.delete(`history:${current.version}`);
+      const gone = await this.tombstone();
+      if (gone) return this.deletedRefusal(gone);
+      return json({ error: 'no_account' }, 404);
+    }
+
+    /* Only the field this route owns is applied, to the record as it stands at that moment. */
+    await this.storage.put('account', { ...final, lastSeenAt: updatedAt });
 
     return json(vault);
   }
