@@ -2162,6 +2162,53 @@ test('a normal creation and a normal deletion leave no marker and no alarm behin
   assert.deepEqual([...harness.storage.raw.keys()], ['deleted'], 'nor touch the tombstone');
 });
 
+test('a wake-up that finds nothing owed keeps no alarm behind', async () => {
+  const harness = object();
+  await provision(harness);
+
+  /* An object with neither a record nor a marker: the deadline that woke it is the only thing
+     here, and nothing under it can be settled. */
+  await harness.storage.delete('account');
+  assert.equal(harness.storage.alarms.length, 1, 'the unused-release alarm is still armed');
+
+  await harness.vault.alarm();
+
+  assert.deepEqual(harness.released, [], 'there is no marker to ask the Registry about');
+  assert.deepEqual(harness.storage.alarms, [], 'and nothing is left to wake the object again');
+});
+
+test('an operator removal with no id known gives up the alarm it cannot use', async () => {
+  const harness = object({ name: '' });
+  await harness.storage.setAlarm(1_000_000);
+
+  const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
+
+  assert.equal(removed.status, 200);
+  assert.equal(removed.body.deleted, false, 'there was nothing to delete');
+  assert.deepEqual(harness.released, [], 'a release needs an id to name');
+  assert.deepEqual([...harness.storage.raw.keys()], [], 'and no marker is written without one');
+  assert.deepEqual(harness.storage.alarms, [], 'the deadline this removal ended is not kept');
+});
+
+test('an operator removal settles a slot an earlier creation left recorded', async () => {
+  const harness = object();
+  await provision(harness);
+
+  /* A reservation whose account write never landed outlives it as a marker on the object. */
+  await harness.storage.put('slot:an-earlier-account', { at: 1 });
+
+  const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
+
+  assert.equal(removed.status, 200);
+  assert.deepEqual(
+    [...harness.released].sort(),
+    [ACCOUNT.accountId, 'an-earlier-account'].sort(),
+    'the account and the reservation it outlived both go back'
+  );
+  assert.deepEqual([...harness.storage.raw.keys()], [], 'no marker is left to retry from');
+  assert.deepEqual(harness.storage.alarms, [], 'and a settled debt arms nothing');
+});
+
 test('a creation with an invite clears the tombstone on an invite-only server', async () => {
   const harness = object({ invitesRequired: true });
   assert.equal((await provision(harness)).status, 201);

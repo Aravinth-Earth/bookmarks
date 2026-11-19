@@ -1412,23 +1412,47 @@ export class Vault {
     const account = await this.storage.get('account');
     const accountId = account?.accountId ?? this.ctx?.id?.name ?? '';
 
+    /* Every slot this object owes, named by its marker rather than by a record the wipe is about
+       to take away: a reservation an earlier creation or deletion left here is still this
+       object's to give back, and forgetting it would leave the place nobody can use that the
+       marker exists to prevent. The account's own id is added because it is the slot this
+       removal is ending. A marker without an id to name it is dropped with the rest of the keys,
+       since no request could ask for it back. */
+    const owed = new Set(
+      [...(await this.storage.list({ prefix: SLOT_PREFIX }))]
+        .map(([key]) => key.slice(SLOT_PREFIX.length))
+        .filter((id) => id !== '')
+    );
+    if (accountId) owed.add(accountId);
+
     const keys = [...(await this.storage.list())].map(([key]) => key);
     for (const key of keys) await this.storage.delete(key);
+
+    /* With no id and nothing recorded there is no slot to give back, and no marker to write one
+       from. The alarm goes anyway: it belongs to a deadline this removal has just ended, and a
+       wake-up now would find an empty object with nothing to settle. */
+    if (owed.size === 0) {
+      if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
+      return json({ ok: true, deleted: keys.length > 0 });
+    }
 
     /* The same debt, recorded the same way: a marker and a wake-up before the release is asked
        for, cleared only once the Registry confirms the slot is back. An operator's removal has no
        tombstone, so the marker is the only thing that would survive to retry from. */
-    if (accountId) {
-      const at = this.now();
-      await this.storage.put(slotMarker(accountId), { at });
-      if (typeof this.storage.setAlarm === 'function') {
-        await this.storage.setAlarm(at + SLOT_RETRY_MS);
-      }
-      if (await this.releaseSlot(accountId)) {
-        await this.storage.delete(slotMarker(accountId));
-        if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
-      }
+    const at = this.now();
+    for (const id of owed) await this.storage.put(slotMarker(id), { at });
+    if (typeof this.storage.setAlarm === 'function') {
+      await this.storage.setAlarm(at + SLOT_RETRY_MS);
     }
+
+    /* The alarm is dropped only when every marker was settled: one that stayed behind is a debt
+       still owed, and it is what the next wake-up reads. */
+    let settled = true;
+    for (const id of owed) {
+      if (await this.releaseSlot(id)) await this.storage.delete(slotMarker(id));
+      else settled = false;
+    }
+    if (settled && typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
 
     return json({ ok: true, deleted: keys.length > 0 });
   }
@@ -1574,13 +1598,20 @@ export class Vault {
    */
   async retrySlots() {
     const markers = [...(await this.storage.list({ prefix: SLOT_PREFIX }))].map(([key]) => key);
-    if (markers.length === 0) return;
+
+    /* Nothing is owed here, so no deadline is either: the alarm that woke this object would only
+       find the same empty answer at its next call. */
+    if (markers.length === 0) {
+      if (typeof this.storage.deleteAlarm === 'function') await this.storage.deleteAlarm();
+      return;
+    }
 
     let owed = false;
     for (const key of markers) {
-      /* Nothing is released, and no alarm is touched, while an account exists here. A marker
-         left beside one is not a debt: the account holds the slot, and the deletion that ends it
-         writes the marker again and settles it then. */
+      /* Read again for every marker, because each release is an await and a claim only has to
+         land across one of them to own the slot. While an account is here nothing is released:
+         it holds the slot the marker names, and the creation that wrote it armed the deadline
+         this wake-up now carries, so that alarm is the account's and is left where it is. */
       if (await this.storage.get('account')) return;
       if (await this.releaseSlot(key.slice(SLOT_PREFIX.length))) await this.storage.delete(key);
       else owed = true;
