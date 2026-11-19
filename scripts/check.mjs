@@ -377,6 +377,28 @@ try {
   problems.push(`limits: ${error.message}`);
 }
 
+/* 5c. The account cap this deployment relies on is declared, and declared as a number. A missing
+   entry leaves the built-in default in force, and an entry that is not a whole number refuses
+   every new account — both would otherwise be found by the first visitor rather than by the
+   deploy. The check reads the block itself, so a `[vars]` block that vanished fails here instead
+   of passing on an empty read. */
+try {
+  const config = readFileSync(join(root, 'wrangler.toml'), 'utf8');
+  const vars = config.split(/^\[vars\]$/m)[1]?.split(/^\[[^\]]+\]$/m)[0];
+  if (vars === undefined) {
+    problems.push('cap: wrangler.toml has no [vars] block, so MAX_ACCOUNTS is not declared');
+  } else {
+    const declared = vars.match(/^[ \t]*MAX_ACCOUNTS[ \t]*=[ \t]*(.*)$/m)?.[1]?.trim();
+    if (declared === undefined) {
+      problems.push('cap: [vars] does not declare MAX_ACCOUNTS, so the built-in default would apply');
+    } else if (!/^"[0-9]+"$/.test(declared)) {
+      problems.push(`cap: MAX_ACCOUNTS is ${declared || '(empty)'}, which is not a quoted decimal integer`);
+    }
+  }
+} catch (error) {
+  problems.push(`cap: ${error.message}`);
+}
+
 /* 6. Invocation logging must stay off. Every account route carries `/a/<accountId>/`, and the
    invocation line is written from the request path, so a config edit that turns it back on
    publishes the id that `src/events.js` digests on purpose. The event stream is the intended
