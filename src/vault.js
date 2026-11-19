@@ -657,6 +657,19 @@ export class Vault {
       return json({ ok: true, created: false, plan: existing.plan ?? 'free' }, 200);
     }
 
+    /* The cap lives in the Registry, so a deployment that binds no Registry cannot cap at all.
+       Creating there would hand out free storage with nothing counting it, which is why creation
+       is refused rather than left uncapped. An account that already exists was answered above,
+       and a challenge stores nothing, so only this branch is refused. */
+    if (!this.env?.REGISTRY) {
+      await logEvent('create_refused', {
+        route: 'signin',
+        reason: 'registry_unavailable',
+        account: accountId
+      });
+      return json({ error: 'registry_unavailable' }, 503);
+    }
+
     /* A deleted id is not re-created unless this server hands out codes and the code passed the
        Registry below. On a server without codes only the operator's route clears the tombstone;
        that is the documented way back, and it is deliberate rather than an oversight. */
