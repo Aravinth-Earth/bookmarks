@@ -27,7 +27,7 @@ import {
 import { Registry } from '../src/registry.js';
 import { deriveAccount, proveAuth } from '../public/crypto.js';
 import { WORDLIST } from '../public/wordlist.js';
-import { quiet } from './logs.mjs';
+import { quiet, withEvents } from './logs.mjs';
 
 /* These tests are about what the object answers and stores; the lines its refusals write are
    tested in events.test.mjs. */
@@ -93,7 +93,7 @@ function object(overrides = {}) {
 
   const env = {
     OWNER_ACCOUNT_ID: overrides.ownerId ?? '',
-    ADMIN_SECRET: overrides.adminSecret ?? 'test-admin-secret-0123456789',
+    ADMIN_SECRET: overrides.adminSecret ?? 'test-admin-secret-0123456789abcdef',
     ...(overrides.invitesRequired ? { INVITES_REQUIRED: 'true' } : {}),
     REGISTRY: overrides.registry ?? {
       idFromName: (name) => ({ name }),
@@ -153,7 +153,7 @@ async function read(response) {
   return { status: response.status, body: await response.json() };
 }
 
-function adminRequest(path, body, secret = 'test-admin-secret-0123456789') {
+function adminRequest(path, body, secret = 'test-admin-secret-0123456789abcdef') {
   return request(path, {
     method: 'POST',
     body,
@@ -1942,6 +1942,71 @@ test('a wrong or missing operator secret changes nothing', async () => {
   assert.equal((await loginAs(harness, 'desktop')).status, 200);
 });
 
+test('an operator secret shorter than 32 bytes opens no operator route', async () => {
+  /* Twenty-four bytes is longer than the old sixteen-character floor, so this environment is
+     accepted unless the gate measures the configured key in bytes before comparing it. */
+  const short = 'operator-secret-24-bytes';
+  assert.equal(new TextEncoder().encode(short).length, 24);
+  const harness = object({ adminSecret: short });
+  await provision(harness);
+
+  for (const [path, body] of [
+    ['/admin-disable', { reason: 'too short' }],
+    ['/admin-enable', {}],
+    ['/admin-delete', {}]
+  ]) {
+    const refused = await read(await harness.vault.fetch(adminRequest(path, body, short)));
+    assert.equal(refused.status, 401, `${path} refuses a short configured secret`);
+    assert.deepEqual(refused.body, { error: 'unauthorized' });
+  }
+
+  const stats = await read(await harness.vault.fetch(request('/admin-stats', { method: 'GET' })));
+  assert.equal(stats.body.disabled, null, 'nothing was disabled');
+  assert.equal((await loginAs(harness, 'desktop')).status, 200, 'the account is untouched');
+
+  /* One byte under the floor is still under it, so the refusal is not an accident of the number
+     chosen above. */
+  const justShort = 's'.repeat(31);
+  const boundary = object({ adminSecret: justShort });
+  await provision(boundary);
+  const refused = await read(
+    await boundary.vault.fetch(adminRequest('/admin-disable', {}, justShort))
+  );
+  assert.equal(refused.status, 401);
+});
+
+test('an operator secret of exactly 32 bytes is accepted, so the floor is the only refusal', async () => {
+  const floor = 's'.repeat(32);
+  const harness = object({ adminSecret: floor });
+  await provision(harness);
+
+  const disabled = await read(
+    await harness.vault.fetch(adminRequest('/admin-disable', { reason: 'at the floor' }, floor))
+  );
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.disabled.reason, 'at the floor');
+
+  const enabled = await read(
+    await harness.vault.fetch(adminRequest('/admin-enable', {}, floor))
+  );
+  assert.equal(enabled.status, 200);
+  assert.deepEqual(enabled.body, { ok: true });
+});
+
+test('a refused operator call answers one unchanged body and writes no line', async () => {
+  const short = 'operator-secret-24-bytes';
+  const harness = object({ adminSecret: short });
+  await provision(harness);
+
+  const { result, lines } = await withEvents(async () =>
+    read(await harness.vault.fetch(adminRequest('/admin-disable', { reason: 'x' }, short)))
+  );
+
+  assert.equal(result.status, 401);
+  assert.deepEqual(result.body, { error: 'unauthorized' }, 'the answer says nothing about the configuration');
+  assert.deepEqual(lines, [], 'no event line, so the secret has no echo');
+});
+
 test('the operator can delete a vault and free its slot, and a second call is a no-op', async () => {
   const harness = object();
   await provision(harness);
@@ -2200,7 +2265,7 @@ function unbound() {
   const store = storage();
   const vault = new Vault(
     { storage: store, id: { name: ACCOUNT.accountId } },
-    { OWNER_ACCOUNT_ID: '', ADMIN_SECRET: 'test-admin-secret-0123456789' },
+    { OWNER_ACCOUNT_ID: '', ADMIN_SECRET: 'test-admin-secret-0123456789abcdef' },
     { now: () => 1_000_000 }
   );
   return { vault, storage: store };

@@ -228,22 +228,43 @@ function routeOf(path) {
   return ROUTES[path] ?? (path.startsWith(SESSION_ONE) ? ROUTES[SESSION_ONE] : null);
 }
 
-/* Constant-time comparison for the operator secret, so a wrong guess learns nothing from timing. */
-function sameSecret(left, right) {
+/* A shared operator secret is a bearer key: short enough and it can be guessed outright, and every
+   operator action then answers to whoever guessed it. Thirty-two bytes is the floor the operator
+   view puts on its own session key, so neither half of the pair can be the weak one. The length is
+   measured in the bytes the platform carries, not in characters. */
+const ADMIN_SECRET_MIN_BYTES = 32;
+
+/**
+ * Compare two secrets in constant time and in constant work.
+ *
+ * Each value is digested first and the fixed 32-byte digests are compared, so the walk is the same
+ * whatever the candidate's length. An early return on a length mismatch would tell a caller how
+ * long the configured secret is, and a length is a fingerprint of the deployment even when the
+ * value itself never leaves it.
+ */
+async function sameSecret(left, right) {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
-  const a = encoder.encode(left);
-  const b = encoder.encode(right);
-  if (a.length === 0 || a.length !== b.length) return false;
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(left)),
+    crypto.subtle.digest('SHA-256', encoder.encode(right))
+  ]);
+  const given = new Uint8Array(a);
+  const secret = new Uint8Array(b);
   let difference = 0;
-  for (let index = 0; index < a.length; index += 1) difference |= a[index] ^ b[index];
+  for (let index = 0; index < given.length; index += 1) difference |= given[index] ^ secret[index];
   return difference === 0;
 }
 
-/** The operator routes are reachable only through a Worker binding and with the shared secret. */
-function adminAllowed(request, env) {
+/**
+ * The operator actions are reachable only through a Worker binding and with a shared secret long
+ * enough to be a key. A missing, short or wrong secret all answer the same refusal, and no branch
+ * writes the value or its length anywhere.
+ */
+async function adminAllowed(request, env) {
   const secret = typeof env?.ADMIN_SECRET === 'string' ? env.ADMIN_SECRET : '';
   const given = request.headers.get(ADMIN_SECRET_HEADER) ?? '';
-  return secret.length >= 16 && sameSecret(given, secret);
+  const matches = await sameSecret(given, secret);
+  return encoder.encode(secret).length >= ADMIN_SECRET_MIN_BYTES && matches;
 }
 
 function toBase64Url(bytes) {
@@ -1404,7 +1425,7 @@ export class Vault {
    * permanent and does not cost the slot.
    */
   async adminDisable(request) {
-    if (!adminAllowed(request, this.env)) return json({ error: 'unauthorized' }, 401);
+    if (!(await adminAllowed(request, this.env))) return json({ error: 'unauthorized' }, 401);
     const body = await readJson(request, 4096);
     if (body.tooLarge) return json({ error: 'too_large' }, 413);
 
@@ -1419,7 +1440,7 @@ export class Vault {
   }
 
   async adminEnable(request) {
-    if (!adminAllowed(request, this.env)) return json({ error: 'unauthorized' }, 401);
+    if (!(await adminAllowed(request, this.env))) return json({ error: 'unauthorized' }, 401);
     await this.storage.delete(ADMIN_DISABLED_KEY);
     return json({ ok: true });
   }
@@ -1432,7 +1453,7 @@ export class Vault {
    * come back. A second call is a no-op, so a double submit cannot fail halfway.
    */
   async adminDelete(request) {
-    if (!adminAllowed(request, this.env)) return json({ error: 'unauthorized' }, 401);
+    if (!(await adminAllowed(request, this.env))) return json({ error: 'unauthorized' }, 401);
     const body = await readJson(request, 4096);
     if (body.tooLarge) return json({ error: 'too_large' }, 413);
 

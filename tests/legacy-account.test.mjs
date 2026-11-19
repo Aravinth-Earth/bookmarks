@@ -87,7 +87,7 @@ function object() {
 
   const env = {
     OWNER_ACCOUNT_ID: '',
-    ADMIN_SECRET: 'test-admin-secret-0123456789',
+    ADMIN_SECRET: 'test-admin-secret-0123456789abcdef',
     REGISTRY: {
       idFromName: (name) => ({ name }),
       get: () => ({

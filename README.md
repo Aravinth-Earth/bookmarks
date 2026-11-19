@@ -184,8 +184,12 @@ Ownership is named, never positional. Copy the Account id from Settings, then se
 
 ```sh
 npx wrangler secret put OWNER_ACCOUNT_ID   # paste the id from Settings
-npx wrangler secret put ADMIN_SECRET       # the operator view's VAULT_ADMIN_SECRET, same value
+npx wrangler secret put ADMIN_SECRET       # 32 bytes or more; the operator view's VAULT_ADMIN_SECRET
 ```
+
+The operator secret is a key, not a password prompt: while it is missing or shorter than 32 bytes,
+every operator action — disable, enable and end — answers the same refusal, so a weak value cannot
+be used at all.
 
 The id routes requests to the account and cannot log in. If the account already exists on the
 member plan, the next login upgrades it to the owner plan. No one can become the owner by
