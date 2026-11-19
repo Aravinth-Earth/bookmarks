@@ -2320,14 +2320,32 @@ test('ending a place needs a session, and an unknown id is a 404 that changes no
  * around a stream the test controls: the object can reach the body read and wait there while the
  * test acts on the account, and only then does the body arrive. `duplex: 'half'` is what Node's
  * fetch requires of a stream body.
+ *
+ * `arrived` resolves when the object asks the stream for the body, which is after it has
+ * authorised the request and read the account ahead of the body. Waiting for that, rather than for
+ * a timer, is what makes these tests deterministic: a timer can fire while the object is still
+ * hashing the session, and the test then acts on an account the request never got as far as.
  */
 function openWrite(headers = {}) {
   let controller;
-  const body = new ReadableStream({
-    start(open) {
-      controller = open;
-    }
+  let reached;
+  const arrived = new Promise((resolve) => {
+    reached = resolve;
   });
+  const body = new ReadableStream(
+    {
+      start(open) {
+        controller = open;
+      },
+      /* The reader is waiting for a chunk, so the object is parked at its body read. */
+      pull() {
+        reached();
+      }
+    },
+    /* A queued chunk is what `highWaterMark: 0` forbids, so `pull` is called only by a reader that
+       is waiting, never when the request is merely constructed. */
+    { highWaterMark: 0 }
+  );
   const encoder = new TextEncoder();
 
   return {
@@ -2337,6 +2355,7 @@ function openWrite(headers = {}) {
       body,
       duplex: 'half'
     }),
+    arrived,
     send(value) {
       controller.enqueue(encoder.encode(JSON.stringify(value)));
     },
@@ -2344,11 +2363,6 @@ function openWrite(headers = {}) {
       controller.close();
     }
   };
-}
-
-/** Let the object reach its body read before the test changes the account underneath it. */
-function settle() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 test('an owner claim made while a save is in flight survives the save', async () => {
@@ -2361,7 +2375,7 @@ test('an owner claim made while a save is in flight survives the save', async ()
 
   const held = openWrite(withToken(session.body.token));
   const pending = harness.vault.fetch(held.request);
-  await settle();
+  await held.arrived;
 
   /* The sign-in that lands while this body is still in the air is the only writer of the plan. */
   await harness.vault.claimOwner(await harness.storage.get('account'));
@@ -2389,7 +2403,7 @@ test('a units and paid-until grant made while a save is in flight survives the s
 
   const held = openWrite(withToken(session.body.token));
   const pending = harness.vault.fetch(held.request);
-  await settle();
+  await held.arrived;
 
   const granted = { ...(await harness.storage.get('account')), units: 3, paidUntil: 9_000_000 };
   await harness.storage.put('account', granted);
@@ -2422,7 +2436,7 @@ test('a body that lands after the operator ended the account is refused, not wri
 
   const held = openWrite(withToken(session.body.token));
   const pending = harness.vault.fetch(held.request);
-  await settle();
+  await held.arrived;
 
   const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
   assert.equal(removed.status, 200);
