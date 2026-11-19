@@ -22,6 +22,8 @@ import {
   createDocument,
   fitActivity,
   mergeBookmark,
+  mergeCollectedIcons,
+  mergeIconTries,
   normaliseActivity,
   normaliseUses,
   normalizeUrl,
@@ -487,6 +489,11 @@ export function mergeInto(existing, incoming, now = Date.now, options = {}) {
     );
   }
 
+  /* `...existing` carries the local icon maps over as they are; a file that travelled from another
+     device may carry its own, and a merge unions the two rather than dropping either. */
+  const iconTries = mergeIconTries(existing, incoming);
+  const collectedIcons = mergeCollectedIcons(existing, incoming);
+
   return {
     document: fitActivity({
       ...existing,
@@ -494,7 +501,9 @@ export function mergeInto(existing, incoming, now = Date.now, options = {}) {
       activity: normaliseActivity(
         [...events, ...carried, ...(Array.isArray(existing.activity) ? existing.activity : [])],
         now
-      )
+      ),
+      ...(Object.keys(iconTries).length > 0 ? { iconTries } : {}),
+      ...(Object.keys(collectedIcons).length > 0 ? { collectedIcons } : {})
     }),
     statistics
   };
