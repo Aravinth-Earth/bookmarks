@@ -17,6 +17,13 @@ import { MAX_CODES_PER_CALL, MAX_INVITES, INVITE_TTL_MS, hashCode, newCode, shor
 const ACCOUNT_ID = /^(?:[A-Za-z0-9_-]{22}|[0-9a-f]{64})$/;
 const DAY_MS = 86_400_000;
 
+/* A request body is not typed, so a value that merely stringifies to an id is not one: an array
+   holding an id passes `ACCOUNT_ID.test(String(value))` and would then be stored as an array,
+   where every later comparison against a plain string id fails. */
+function isAccountId(value) {
+  return typeof value === 'string' && ACCOUNT_ID.test(value);
+}
+
 /* A var of the same name can override this without a code change. */
 export const MAX_ACCOUNTS = 50;
 
@@ -209,7 +216,7 @@ export class Registry {
 
     const accountId = body.value?.accountId;
 
-    if (!ACCOUNT_ID.test(accountId ?? '')) return json({ error: 'invalid' }, 400);
+    if (!isAccountId(accountId)) return json({ error: 'invalid' }, 400);
 
     const accounts = (await this.storage.get('accounts')) ?? [];
     if (accounts.includes(accountId)) {
@@ -381,7 +388,7 @@ export class Registry {
 
     const accountId = body.value?.accountId;
 
-    if (!ACCOUNT_ID.test(accountId ?? '')) return json({ error: 'invalid' }, 400);
+    if (!isAccountId(accountId)) return json({ error: 'invalid' }, 400);
 
     const accounts = (await this.storage.get('accounts')) ?? [];
     const remaining = accounts.filter((id) => id !== accountId);
