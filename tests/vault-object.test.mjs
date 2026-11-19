@@ -2073,6 +2073,68 @@ test('a deleted account is not recreated by another sync, and only an invite or 
   assert.equal(nowPossible.status, 201, 'the id can be created again once the tombstone is gone');
 });
 
+/* ------------------------------- a deployment with no Registry binding */
+
+/** An object whose environment carries no REGISTRY, which is what a preview or a fork gets. */
+function unbound() {
+  const store = storage();
+  const vault = new Vault(
+    { storage: store, id: { name: ACCOUNT.accountId } },
+    { OWNER_ACCOUNT_ID: '', ADMIN_SECRET: 'test-admin-secret-0123456789' },
+    { now: () => 1_000_000 }
+  );
+  return { vault, storage: store };
+}
+
+test('a deployment with no Registry binding refuses to create an account', async () => {
+  const harness = unbound();
+
+  /* A challenge stores nothing, so it is still answered on a server that cannot cap accounts. */
+  const challenge = await blind(harness);
+  assert.equal(challenge.status, 428);
+  assert.equal(challenge.body.error, 'proof_required');
+
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const refused = await read(
+    await harness.vault.fetch(
+      request('/account', {
+        body: { accountId: ACCOUNT.accountId, authSecret: ACCOUNT.authSecret, proof }
+      })
+    )
+  );
+
+  assert.equal(refused.status, 503);
+  assert.deepEqual(refused.body, { error: 'registry_unavailable' });
+  assert.equal(harness.storage.raw.has('account'), false, 'no account is written without a cap');
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('slot:')),
+    [],
+    'and no slot marker is written'
+  );
+});
+
+test('a deployment with no Registry binding still signs in an account that already exists', async () => {
+  const harness = unbound();
+  await harness.storage.put('account', {
+    accountId: ACCOUNT.accountId,
+    authSecret: ACCOUNT.authSecret,
+    plan: 'free',
+    units: 0,
+    via: 'direct',
+    createdAt: 900_000,
+    lastSeenAt: 900_000,
+    paidUntil: null
+  });
+
+  const signed = await provision(harness);
+  assert.equal(signed.status, 200, 'only making a new account is refused');
+  assert.equal(signed.body.created, false);
+  assert.equal(signed.body.plan, 'free');
+
+  const session = await login(harness);
+  assert.equal(session.status, 200);
+});
+
 /* ------------------------------- a slot that is reserved and must not be lost */
 
 test('a creation whose account write fails gives the slot back on the next wake-up', async () => {
