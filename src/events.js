@@ -21,7 +21,8 @@
  *   account      the first 12 hex characters of SHA-256(account id). Present when the branch
  *                holds the account, absent when it does not. Never the id itself.
  *   source       the first 12 hex characters of SHA-256 over the source digest the Worker
- *                forwarded. Present when the branch counted a sign-in against a source.
+ *                forwarded, which is keyed to the account it was forwarded for. Present when the
+ *                branch counted a sign-in against a source.
  *   retry_after  whole seconds; only on `rate_limited` and `signin_locked`
  *
  * Deliberately absent, and never accepted as a field: the account id, the phrase, the auth
@@ -29,7 +30,8 @@
  * address. Callers pass a fixed code and at most an account id, and the id leaves only as a
  * digest prefix. The rate limiter already keys on its own digest; that value never arrives here.
  * `source` is digested here too, so a value that was not already a digest could still not be
- * written as one.
+ * written as one. What the Worker sends is an account-keyed digest of an address, never the
+ * address and never a value that reads the same for another account.
  *
  * A refused request writes one line and a served one writes none, so the volume follows how
  * rare the event is rather than how much traffic there is. Nothing here returns a value or may

@@ -304,10 +304,10 @@ async function sessionHash(token) {
  * The source a sign-in is counted against, or null when the request did not come through the
  * Worker.
  *
- * The Worker digests the caller's address and forwards only that digest, replacing any value
- * the caller sent, so this reads a digest and never an address. A request that reaches the
- * object without the header — a test, or an operator call through the binding — has nothing to
- * distinguish it from another such request, so they share one bucket.
+ * The Worker keys the caller's address to the account and forwards only that digest, replacing
+ * any value the caller sent, so this reads a digest and never an address. A request that reaches
+ * the object without the header — a test, or an operator call through the binding — has nothing
+ * to distinguish it from another such request, so they share one bucket.
  */
 function sourceOf(request) {
   const header = request.headers.get('x-vault-source') ?? '';
