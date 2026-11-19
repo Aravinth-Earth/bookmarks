@@ -2188,3 +2188,163 @@ test('ending a place needs a session, and an unknown id is a 404 that changes no
   const still = await places(harness, session.body.token);
   assert.equal(still.body.count, 1, 'the unknown id revoked nothing');
 });
+
+/**
+ * A write whose body is still arriving.
+ *
+ * `request()` hands over a finished string, which cannot be held open, so this builds the request
+ * around a stream the test controls: the object can reach the body read and wait there while the
+ * test acts on the account, and only then does the body arrive. `duplex: 'half'` is what Node's
+ * fetch requires of a stream body.
+ */
+function openWrite(headers = {}) {
+  let controller;
+  const body = new ReadableStream({
+    start(open) {
+      controller = open;
+    }
+  });
+  const encoder = new TextEncoder();
+
+  return {
+    request: new Request('https://vault/vault', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...headers },
+      body,
+      duplex: 'half'
+    }),
+    send(value) {
+      controller.enqueue(encoder.encode(JSON.stringify(value)));
+    },
+    close() {
+      controller.close();
+    }
+  };
+}
+
+/** Let the object reach its body read before the test changes the account underneath it. */
+function settle() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test('an owner claim made while a save is in flight survives the save', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  assert.equal((await harness.storage.get('account')).plan, 'free');
+
+  harness.env.OWNER_ACCOUNT_ID = ACCOUNT.accountId;
+
+  const held = openWrite(withToken(session.body.token));
+  const pending = harness.vault.fetch(held.request);
+  await settle();
+
+  /* The sign-in that lands while this body is still in the air is the only writer of the plan. */
+  await harness.vault.claimOwner(await harness.storage.get('account'));
+
+  held.send({ baseVersion: 0, iv: IV, ct: CT });
+  held.close();
+  const response = await read(await pending);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.version, 1);
+
+  const stored = await harness.storage.get('account');
+  assert.equal(stored.plan, 'owner', 'the claim is still there');
+  assert.equal(stored.units, OWNER_UNITS);
+});
+
+test('a units and paid-until grant made while a save is in flight survives the save', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+
+  const first = await harness.storage.get('account');
+  await harness.storage.put('account', { ...first, plan: 'paid', units: 1, paidUntil: 4_000_000 });
+  harness.advance(120_000);
+
+  const held = openWrite(withToken(session.body.token));
+  const pending = harness.vault.fetch(held.request);
+  await settle();
+
+  const granted = { ...(await harness.storage.get('account')), units: 3, paidUntil: 9_000_000 };
+  await harness.storage.put('account', granted);
+  const beforeWrite = structuredClone(granted);
+
+  held.send({ baseVersion: 0, iv: IV, ct: CT });
+  held.close();
+  const response = await read(await pending);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.updatedAt, 1_120_000);
+
+  const stored = await harness.storage.get('account');
+  assert.equal(stored.units, 3, 'the granted units are still there');
+  assert.equal(stored.paidUntil, 9_000_000, 'the grant date is still there');
+  assert.equal(stored.plan, 'paid');
+  assert.equal(stored.accountId, beforeWrite.accountId);
+  assert.equal(stored.createdAt, beforeWrite.createdAt);
+
+  /* The write owns one field on the account, and this is the only one it moved. */
+  assert.equal(stored.lastSeenAt, 1_120_000);
+  assert.deepEqual({ ...stored, lastSeenAt: beforeWrite.lastSeenAt }, beforeWrite);
+});
+
+test('a body that lands after the operator ended the account is refused, not written', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  assert.equal(harness.storage.raw.has('vault'), false);
+
+  const held = openWrite(withToken(session.body.token));
+  const pending = harness.vault.fetch(held.request);
+  await settle();
+
+  const removed = await read(await harness.vault.fetch(adminRequest('/admin-delete', {})));
+  assert.equal(removed.status, 200);
+
+  held.send({ baseVersion: 0, iv: IV, ct: CT });
+  held.close();
+  const response = await read(await pending);
+
+  assert.equal(response.status, 404);
+  assert.equal(response.body.error, 'no_account');
+  assert.equal(harness.storage.raw.has('account'), false, 'the account that ended stays ended');
+  assert.equal(harness.storage.raw.has('vault'), false, 'no envelope was left behind');
+  assert.deepEqual(
+    [...harness.storage.raw.keys()].filter((key) => key.startsWith('history:')),
+    [],
+    'no history was left behind either'
+  );
+});
+
+test('an ordinary write still records its version and its time', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await login(harness);
+  const auth = withToken(session.body.token);
+
+  harness.at(2_000_000);
+  const first = await read(
+    await harness.vault.fetch(
+      request('/vault', { method: 'PUT', headers: auth, body: { baseVersion: 0, iv: IV, ct: CT } })
+    )
+  );
+
+  assert.equal(first.status, 200);
+  assert.equal(first.body.version, 1);
+  assert.equal(first.body.updatedAt, 2_000_000);
+  assert.equal(harness.storage.raw.get('vault').updatedAt, 2_000_000);
+  assert.equal(harness.storage.raw.get('account').lastSeenAt, 2_000_000);
+
+  harness.advance(1_000);
+  const second = await read(
+    await harness.vault.fetch(
+      request('/vault', { method: 'PUT', headers: auth, body: { baseVersion: 1, iv: IV, ct: CT } })
+    )
+  );
+
+  assert.equal(second.status, 200);
+  assert.equal(second.body.version, 2);
+  assert.equal(second.body.updatedAt, 2_001_000);
+});
