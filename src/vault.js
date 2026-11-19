@@ -682,10 +682,14 @@ export class Vault {
       });
       return json({ error: 'challenge_expired' }, 401);
     }
-    /* Single use: spent whether the proof is right or wrong, so a captured proof cannot be
-       replayed and a guess cannot be retried against the same challenge. */
-    await this.storage.delete('nonce');
 
+    /* The body is read before the challenge is spent. Spending it first is what let one
+       unauthenticated request end a sign-in that was in progress: `/challenge` hands the live
+       nonce to anyone, so a caller who only had to post an empty body could spend it and leave
+       the person's signed proof answering `challenge_expired` forever. A request that presents no
+       proof is therefore not an attempt at this nonce, while a request that does present one
+       still spends it before it is compared — single use, spent whether the proof is right or
+       wrong, so a captured proof cannot be replayed and a guess cannot be retried. */
     const body = await readJson(request, MAX_SMALL_BODY);
     if (body.tooLarge) {
       await logEvent('signin_failed', {
@@ -697,11 +701,13 @@ export class Vault {
     }
 
     const proof = body.value?.proof;
+    const presented = typeof proof === 'string' && BASE64URL.test(proof);
+    if (presented) await this.storage.delete('nonce');
+
     const client = CLIENT_KINDS.has(body.value?.client) ? body.value.client : 'unknown';
-    const ok =
-      typeof proof === 'string' && proof.length > 0
-        ? await verifyRecordProof(account, account.accountId, nonce.value, proof)
-        : false;
+    const ok = presented
+      ? await verifyRecordProof(account, account.accountId, nonce.value, proof)
+      : false;
 
     if (!ok) {
       await logEvent('signin_failed', {
@@ -1090,17 +1096,20 @@ export class Vault {
       });
       return json({ error: 'challenge_expired' }, 401);
     }
-    /* Spent before it is compared, like every other proof: one nonce, one attempt. */
-    await this.storage.delete('nonce');
-
+    /* Spent before it is compared, like every other proof: one nonce, one attempt. The body is
+       read first, though, for the reason `/login` gives: a request that carries no proof is not an
+       attempt, and spending the challenge for it would let an empty post cancel a deletion that
+       was about to be proven. */
     const body = await readJson(request, MAX_SMALL_BODY);
     if (body.tooLarge) return json({ error: 'too_large' }, 413);
 
     const proof = body.value?.proof;
-    const ok =
-      typeof proof === 'string' && proof.length > 0
-        ? await verifyRecordProof(account, account.accountId, nonce.value, proof)
-        : false;
+    const presented = typeof proof === 'string' && BASE64URL.test(proof);
+    if (presented) await this.storage.delete('nonce');
+
+    const ok = presented
+      ? await verifyRecordProof(account, account.accountId, nonce.value, proof)
+      : false;
 
     if (!ok) {
       await logEvent('signin_failed', {

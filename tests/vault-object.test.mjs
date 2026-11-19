@@ -637,6 +637,63 @@ test('the right proof logs in, and the same proof cannot be replayed', async () 
   assert.equal(replay.body.error, 'challenge_expired');
 });
 
+test('an empty post to the login route does not end a sign-in that is in progress', async () => {
+  const harness = object();
+  await provision(harness);
+
+  /* The person holds a nonce; a stranger who can reach the route posts nothing at all. */
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const stored = structuredClone(harness.storage.raw.get('nonce'));
+
+  const empty = await read(await harness.vault.fetch(request('/login', { body: {} })));
+  const bodyless = await read(await harness.vault.fetch(request('/login')));
+
+  assert.equal(empty.status, 401);
+  assert.equal(empty.body.error, 'bad_proof');
+  assert.equal(bodyless.status, 401);
+  assert.equal(bodyless.body.error, 'bad_proof');
+  assert.deepEqual(harness.storage.raw.get('nonce'), stored, 'the challenge is still there');
+
+  /* And the proof the person had already signed still signs in. */
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const login = await read(await harness.vault.fetch(request('/login', { body: { proof } })));
+  assert.equal(login.status, 200);
+});
+
+test('a login body that is refused as too large leaves the challenge standing', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const stored = structuredClone(harness.storage.raw.get('nonce'));
+
+  const huge = await read(
+    await harness.vault.fetch(request('/login', { body: { proof: 'a'.repeat(5 * 1024) } }))
+  );
+  assert.equal(huge.status, 413);
+  assert.deepEqual(harness.storage.raw.get('nonce'), stored);
+
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  assert.equal((await read(await harness.vault.fetch(request('/login', { body: { proof } })))).status, 200);
+});
+
+test('a presented proof still spends the challenge, so a guess is not retried against it', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const wrong = await proveAuth('A'.repeat(43), ACCOUNT.accountId, challenge.body.nonce);
+
+  const refused = await read(await harness.vault.fetch(request('/login', { body: { proof: wrong } })));
+  assert.equal(refused.status, 401);
+  assert.equal(refused.body.error, 'bad_proof');
+  assert.equal(await harness.storage.get('nonce'), undefined, 'the attempt spent it');
+
+  const second = await read(await harness.vault.fetch(request('/login', { body: { proof: wrong } })));
+  assert.equal(second.status, 401);
+  assert.equal(second.body.error, 'challenge_expired');
+});
+
 test('a wrong proof is refused, and five in a row from the object lock the account it reached', async () => {
   const harness = object();
   await provision(harness);
@@ -1723,6 +1780,30 @@ async function proofFor(harness) {
 function withToken(token) {
   return { authorization: `Bearer ${token}` };
 }
+
+test('a delete that presents no proof leaves the challenge it will need', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+  const token = session.body.token;
+
+  const challenge = await read(await harness.vault.fetch(request('/challenge')));
+  const stored = structuredClone(harness.storage.raw.get('nonce'));
+
+  const empty = await read(
+    await harness.vault.fetch(request('/delete', { body: {}, headers: withToken(token) }))
+  );
+  assert.equal(empty.status, 401);
+  assert.equal(empty.body.error, 'bad_proof');
+  assert.deepEqual(harness.storage.raw.get('nonce'), stored, 'the challenge is still there');
+
+  const proof = await proveAuth(ACCOUNT.authSecret, ACCOUNT.accountId, challenge.body.nonce);
+  const deleted = await read(
+    await harness.vault.fetch(request('/delete', { body: { proof }, headers: withToken(token) }))
+  );
+  assert.equal(deleted.status, 200);
+  assert.equal(deleted.body.ok, true);
+});
 
 test('an account is deleted behind a live session and a fresh proof, leaving only a tombstone', async () => {
   const harness = object();
