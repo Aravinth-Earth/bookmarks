@@ -364,6 +364,93 @@ test('the app is routed on one host and one path set, and no other', async () =>
   const patterns = [...config.matchAll(/^pattern = "([^"]+)"$/gm)].map((match) => match[1]);
 
   assert.deepEqual(patterns, ['bookmarks.332321.xyz/*', 'bookmarks.332321.xyz']);
+
+  /* An asset served before the Worker would reach the browser without the headers this file sets. */
+  assert.match(config, /^run_worker_first = true$/m);
+});
+
+/* The routes are not the whole deployment surface. A Worker is also published at
+   `<name>.<subdomain>.workers.dev` unless `workers_dev` says otherwise, and every uploaded version
+   can be answered at `<version>-<name>.<subdomain>.workers.dev` when `preview_urls` is on. Either
+   one serves this app on a second origin, and because the vault lives in that origin's storage, the
+   same phrase opened there is a second, empty vault. Both switches are stated in the configuration
+   rather than left to a default, so a change of default cannot open a host this design has not
+   spoken about. */
+test('the deployment publishes no host beside the app\'s own', () => {
+  const config = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+
+  assert.match(config, /^workers_dev = false$/m, 'workers_dev would answer on <name>.<subdomain>.workers.dev');
+  assert.match(config, /^preview_urls = false$/m, 'preview_urls would answer on <version>-<name>.<subdomain>.workers.dev');
+});
+
+/* The asset tree is not only bytes: a header rule beside it can add or replace the headers of every
+   asset response, and the Worker used to forward that response's headers wholesale. What reaches
+   the browser is then not what this file set. The response is built from the representation
+   metadata a reader needs and from the Worker's own headers, so a rule at the asset layer cannot
+   put a policy, a CORS grant or a year-long cache on the app. */
+test('a header set beside the assets does not reach the browser', async () => {
+  const env = {
+    ASSETS: {
+      fetch: async () =>
+        new Response('<!doctype html><title>app</title>', {
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            etag: '"app-v1"',
+            'content-length': '31',
+            'cache-control': 'public, max-age=31536000, immutable',
+            'access-control-allow-origin': '*',
+            'x-frame-options': 'SAMEORIGIN',
+            'content-security-policy': "default-src *; frame-ancestors *"
+          }
+        })
+    }
+  };
+
+  const response = await worker.fetch(new Request('https://bookmarks.332321.xyz/'), env);
+
+  assert.equal(response.headers.get('access-control-allow-origin'), null);
+  assert.equal(response.headers.get('x-frame-options'), null);
+
+  const policy = response.headers.get('content-security-policy');
+  assert.match(policy, /default-src 'self'/);
+  assert.match(policy, /frame-ancestors 'none'/);
+  assert.doesNotMatch(policy, /\*/);
+
+  assert.equal(response.headers.get('cache-control'), 'public, max-age=0, must-revalidate');
+
+  /* The representation still arrives: a browser can read it and revalidate it. */
+  assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.equal(response.headers.get('content-length'), '31');
+  assert.equal(response.headers.get('etag'), '"app-v1"');
+});
+
+/* The 404 is the Worker's own document, so its headers are the Worker's too: the asset response's
+   length and validators describe a body that is no longer sent. */
+test('the 404 page carries the Worker\'s headers, not the asset response\'s', async () => {
+  const env = {
+    ASSETS: {
+      fetch: async () =>
+        new Response('not found', {
+          status: 404,
+          headers: {
+            'content-type': 'text/plain',
+            'content-length': '9',
+            etag: '"missing"',
+            'access-control-allow-origin': '*'
+          }
+        })
+    }
+  };
+
+  const response = await worker.fetch(new Request('https://bookmarks.332321.xyz/gone'), env);
+
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('content-length'), null, 'the asset body\'s length is not the page\'s');
+  assert.equal(response.headers.get('etag'), null);
+  assert.equal(response.headers.get('access-control-allow-origin'), null);
+  assert.match(response.headers.get('content-security-policy'), /default-src 'self'/);
 });
 
 /* An unknown path is answered by the asset tree's 404, which the Worker turns into its own page:
@@ -1571,6 +1658,48 @@ test('a GET or HEAD that carries a body is refused as a caller mistake, not answ
       `${method} wrote no internal fault`
     );
   }
+});
+
+/* Signing out is a POST, so a URL alone cannot cause it — but a form on any page is a simple
+   request the browser will send without asking this server first. The origin the browser states
+   is what tells this app's own sign-out apart from one a page elsewhere caused. */
+test('a logout from a foreign origin is refused before the object', async () => {
+  const { env, calls } = harness({ doStatus: 200 });
+  const auth = { authorization: `Bearer ${'x'.repeat(43)}` };
+
+  for (const headers of [
+    { ...auth, origin: 'https://elsewhere.example' },
+    { ...auth, referer: 'https://elsewhere.example/page' },
+    { ...auth, origin: 'null' },
+    { ...auth, referer: 'not a url' }
+  ]) {
+    const response = await worker.fetch(
+      api(`/a/${ACCOUNT}/logout`, { method: 'POST', headers }),
+      env
+    );
+
+    const named = JSON.stringify(headers);
+    assert.equal(response.status, 403, named);
+    assert.deepEqual(await response.json(), { error: 'forbidden_origin' }, named);
+  }
+
+  assert.equal(calls.length, 0, 'no refused request reached the object');
+
+  /* The page's own POST, and one from a client that is not a browser and states no origin. */
+  for (const headers of [
+    { ...auth, origin: 'https://bookmarks.332321.xyz' },
+    { ...auth, referer: 'https://bookmarks.332321.xyz/settings' },
+    auth
+  ]) {
+    const response = await worker.fetch(
+      api(`/a/${ACCOUNT}/logout`, { method: 'POST', headers }),
+      env
+    );
+    assert.equal(response.status, 200, JSON.stringify(headers));
+  }
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls.every((call) => call.path === '/logout'), true);
 });
 
 /* The neighbouring path the fetch API can build: a verb that may carry a body, carrying none. The
