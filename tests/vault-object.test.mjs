@@ -1167,6 +1167,53 @@ test('logout ends the session, and an expired one is refused', async () => {
   assert.equal(expired.status, 401);
 });
 
+/*
+ * A session is a stored record, not a value the server can check on its own.
+ *
+ * The token names a key, and the presence of that key is the whole of what grants access. That is
+ * what makes logout and "sign out this place" mean anything: a server that re-derived its answer
+ * from something the caller was holding would keep serving a token whose record had already been
+ * deleted, and a copied cookie would stay good until it aged out.
+ */
+test('a token authorizes only while its record exists, and one that was never issued is refused', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const session = await loginAs(harness, 'desktop');
+  const auth = withToken(session.body.token);
+
+  const keys = [...harness.storage.raw.keys()].filter((key) => key.startsWith('session:'));
+  assert.equal(keys.length, 1, 'the sign-in wrote one record');
+  assert.equal(
+    (await read(await harness.vault.fetch(request('/sessions', { method: 'GET', headers: auth })))).status,
+    200,
+    'that record is what authorizes the token'
+  );
+
+  /* Deleted behind the object's back: no route ran, so nothing but the record could refuse. */
+  for (const key of keys) await harness.storage.delete(key);
+
+  for (const path of ['/sessions', '/vault']) {
+    const refused = await harness.vault.fetch(request(path, { method: 'GET', headers: auth }));
+    assert.equal(refused.status, 401, `${path} is refused once the record behind the token is gone`);
+  }
+
+  /* A well-formed token that no sign-in produced names no record either. */
+  const unissued = await harness.vault.fetch(
+    request('/sessions', { method: 'GET', headers: withToken('A'.repeat(43)) })
+  );
+  assert.equal(unissued.status, 401, 'a token that was never issued is not a session');
+
+  /* A new sign-in writes a new record; it does not revive the one that was deleted. */
+  const fresh = await loginAs(harness, 'desktop');
+  const old = await harness.vault.fetch(request('/sessions', { method: 'GET', headers: auth }));
+  assert.equal(old.status, 401, 'the deleted token stays dead');
+  const current = await harness.vault.fetch(
+    request('/sessions', { method: 'GET', headers: withToken(fresh.body.token) })
+  );
+  assert.equal(current.status, 200, 'the record the new sign-in wrote is live');
+});
+
 /* A prefetcher, a cache, an image tag or a third-party script can put a URL in front of a
    browser, and a GET it causes must not end the session the page is holding. */
 test('a logout is a POST; a GET or any other verb is refused and ends nothing', async () => {
