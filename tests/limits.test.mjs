@@ -72,6 +72,28 @@ function harness(limiters = {}) {
   return { env, calls };
 }
 
+/**
+ * The same harness with the Registry the Worker asks before it names an object.
+ *
+ * Its answer is the one that costs nothing either way — no account, room to make one — so what
+ * the tests count is how often the question itself is put, not what it decided.
+ */
+function withRegistry(env) {
+  const asked = [];
+  env.REGISTRY = {
+    idFromName: (name) => ({ name }),
+    get: (id) => ({
+      fetch: async (request) => {
+        asked.push({ name: id.name, account: new URL(request.url).searchParams.get('account') });
+        return new Response(JSON.stringify({ exists: false, room: true }), {
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+    })
+  };
+  return asked;
+}
+
 function api(path, { method = 'GET', source = SOURCE, body, headers = {} } = {}) {
   return new Request(`https://bookmarks.332321.xyz/api${path}`, {
     method,
@@ -411,4 +433,51 @@ test('deleting spends the sign-in budget, and ending a place spends the vault bu
   assert.equal(stillListed.status, 429, 'the same vault class is spent, as documented');
   const challenge = await worker.fetch(api(`/a/${ACCOUNT}/challenge`, { method: 'POST' }), env);
   assert.equal(challenge.status, 429, 'the sign-in class is spent by the deletions');
+});
+
+/**
+ * The Registry is one object for the whole service, and every account path is put to it before
+ * an object is named. That question is therefore part of the cost of a request: a caller whose
+ * class is spent must be refused before it is asked, and a path no route answers must not be
+ * worth asking for at all.
+ */
+test('a caller over its budget asks the registry nothing', async () => {
+  const { env: limiters } = limits();
+  const { env, calls } = harness(limiters);
+  const asked = withRegistry(env);
+
+  /* No account answers to this id, so each served request is a 404 and stops at the registry. */
+  for (let at = 0; at < LIMITS.signin.limit; at += 1) {
+    const response = await worker.fetch(
+      api(`/a/${ACCOUNT}/login`, { method: 'POST', body: { proof: 'a' } }),
+      env
+    );
+    assert.equal(response.status, 404, `request ${at + 1} is served`);
+  }
+  assert.equal(asked.length, LIMITS.signin.limit, 'each served request was put to the registry');
+  assert.equal(calls.length, 0, 'and none of them named an object');
+
+  const refused = await worker.fetch(
+    api(`/a/${ACCOUNT}/login`, { method: 'POST', body: { proof: 'a' } }),
+    env
+  );
+  assert.equal(refused.status, 429);
+  assert.equal(refused.headers.get('retry-after'), '60');
+  assert.equal(asked.length, LIMITS.signin.limit, 'the refused request asked nothing');
+  assert.equal(calls.length, 0, 'the refused request named nothing');
+});
+
+test('an account path no route answers is a 404 without asking the registry', async () => {
+  const { env: limiters } = limits();
+  const { env, calls } = harness(limiters);
+  const asked = withRegistry(env);
+
+  for (const path of [`/a/${ACCOUNT}/nothing`, `/a/${ACCOUNT}/admin-list`]) {
+    const response = await worker.fetch(api(path), env);
+    assert.equal(response.status, 404, path);
+    assert.deepEqual(await response.json(), { error: 'not_found' }, path);
+  }
+
+  assert.equal(asked.length, 0, 'a path the object cannot answer is not worth a registry question');
+  assert.equal(calls.length, 0, 'and it is not forwarded to the object either');
 });
