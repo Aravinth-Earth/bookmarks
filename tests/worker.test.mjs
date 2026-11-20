@@ -1660,6 +1660,48 @@ test('a GET or HEAD that carries a body is refused as a caller mistake, not answ
   }
 });
 
+/* Signing out is a POST, so a URL alone cannot cause it — but a form on any page is a simple
+   request the browser will send without asking this server first. The origin the browser states
+   is what tells this app's own sign-out apart from one a page elsewhere caused. */
+test('a logout from a foreign origin is refused before the object', async () => {
+  const { env, calls } = harness({ doStatus: 200 });
+  const auth = { authorization: `Bearer ${'x'.repeat(43)}` };
+
+  for (const headers of [
+    { ...auth, origin: 'https://elsewhere.example' },
+    { ...auth, referer: 'https://elsewhere.example/page' },
+    { ...auth, origin: 'null' },
+    { ...auth, referer: 'not a url' }
+  ]) {
+    const response = await worker.fetch(
+      api(`/a/${ACCOUNT}/logout`, { method: 'POST', headers }),
+      env
+    );
+
+    const named = JSON.stringify(headers);
+    assert.equal(response.status, 403, named);
+    assert.deepEqual(await response.json(), { error: 'forbidden_origin' }, named);
+  }
+
+  assert.equal(calls.length, 0, 'no refused request reached the object');
+
+  /* The page's own POST, and one from a client that is not a browser and states no origin. */
+  for (const headers of [
+    { ...auth, origin: 'https://bookmarks.332321.xyz' },
+    { ...auth, referer: 'https://bookmarks.332321.xyz/settings' },
+    auth
+  ]) {
+    const response = await worker.fetch(
+      api(`/a/${ACCOUNT}/logout`, { method: 'POST', headers }),
+      env
+    );
+    assert.equal(response.status, 200, JSON.stringify(headers));
+  }
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls.every((call) => call.path === '/logout'), true);
+});
+
 /* The neighbouring path the fetch API can build: a verb that may carry a body, carrying none. The
    forwarded request is read directly rather than through the harness, because the thing being
    checked is that no body and no duplex flag were attached at all. */
