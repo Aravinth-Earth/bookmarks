@@ -22,6 +22,11 @@ the file stays on the device.
 - `storage` — the list itself.
 - `alarms` — the tidy that runs every six hours and applies the retention you set.
 
+The policy the store asks for is one page on the vault's own origin:
+<https://bookmarks.332321.xyz/privacy/>. It is the section above written out — the address, the count, the
+settings and the daily counter, beside what is *not* read — with the justification for `tabs` in full. That
+address is the one for the listing's privacy-policy field.
+
 ## Install from a release zip
 
 A release carries `bookmarks-extension-<version>.zip`, built from this `extension/` folder and nothing else.
