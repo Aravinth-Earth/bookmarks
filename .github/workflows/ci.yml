@@ -21,9 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The major comes from `.nvmrc`, the same file Workers Builds reads for the deploy, so the
+      # gate and the build that ships run on one Node version.
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
           cache: npm
 
       - name: install
