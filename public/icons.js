@@ -114,6 +114,35 @@ export function isAnswer(outcome) {
 }
 
 /**
+ * The hosts a sweep may ask for, decided by who asked.
+ *
+ * Every request names a host, so a sweep is a list of the sites in a vault, handed to the server one
+ * request at a time. It runs only for a person's own request — the Settings action that fetches the
+ * missing icons. An import is not that request: one file names a whole library at once, and the
+ * person has not looked at it yet. Neither is a page open. Both reach this with no grant and get no
+ * host back.
+ *
+ * The default is empty on purpose. A caller that does not say who asked makes no request, rather
+ * than a quiet one nobody can see; a caller that means it passes `explicit: true`.
+ *
+ * @param {Iterable<string>} hosts
+ * @param {{explicit?: boolean}} [options] `explicit` is true only for a person's own request.
+ * @returns {string[]} the hosts to ask, without repeats and without the empty ones.
+ */
+export function sweepHosts(hosts, { explicit = false } = {}) {
+  if (explicit !== true) return [];
+
+  const asked = [];
+  const seen = new Set();
+  for (const host of hosts) {
+    if (typeof host !== 'string' || host === '' || seen.has(host)) continue;
+    seen.add(host);
+    asked.push(host);
+  }
+  return asked;
+}
+
+/**
  * How long the edge asked this page to wait, in milliseconds.
  *
  * `tooMany()` in src/index.js sends `retry-after` as whole seconds. Anything unreadable is no
