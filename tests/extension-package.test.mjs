@@ -8,9 +8,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { lstatSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, sep } from 'node:path';
+import { basename, dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -108,4 +109,39 @@ test('a symlink is refused rather than followed out of the repository', () => {
   mkdirSync(join(fixture, 'icons'));
 
   assert.throws(() => buildExtensionZip({ extensionDir: fixture, outDir: join(fixture, 'dist') }), /symlink/);
+});
+
+/*
+ * The release page is what a stranger reads before downloading, and the digest in it is the only
+ * way to tell the file they got is the file this checkout builds. A page that names an older
+ * parcel is worse than no page: the download looks tampered with when it is correct, and a real
+ * substitution would match the stale line. So the stated version, file, size and digest are read
+ * back from the markdown and compared with a build of `extension/` as it is now.
+ */
+test('the release page states the parcel this checkout builds', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'bookmarks-parcel-release-'));
+  const built = buildExtensionZip({ outDir });
+  const digest = createHash('sha256').update(built.bytes).digest('hex');
+
+  const page = readFileSync(join(ROOT, 'docs', 'release-extension-0.2.5.md'), 'utf8');
+  const row = (label) => {
+    const match = page.match(new RegExp(`^\\| ${label} \\| (.*?) \\|$`, 'm'));
+    assert.ok(match, `the release page has a ${label} row`);
+    return match[1];
+  };
+  const quoted = (label) => {
+    const match = row(label).match(/^`([^`]+)`/);
+    assert.ok(match, `the ${label} row starts with a backticked value`);
+    return match[1];
+  };
+
+  assert.equal(quoted('Version'), built.version, 'the stated version is the manifest version');
+  assert.equal(quoted('File'), basename(built.file), 'the stated file is the one the build writes');
+
+  const size = row('Size').match(/^([\d,]+) bytes, (\d+) files,/);
+  assert.ok(size, 'the Size row reads "N bytes, M files, ..."');
+  assert.equal(Number(size[1].replaceAll(',', '')), built.bytes.length, 'the stated size is the parcel bytes');
+  assert.equal(Number(size[2]), built.entries.length, 'the stated file count is the parcel entries');
+
+  assert.equal(quoted('SHA-256'), digest, 'the stated digest is the parcel this checkout builds');
 });

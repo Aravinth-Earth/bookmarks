@@ -8,9 +8,9 @@ heading removed.
 |---|---|
 | Version | `0.2.5` (from `extension/manifest.json`) |
 | File | `bookmarks-extension-0.2.5.zip` |
-| Size | 54,921 bytes, 12 files, stored (uncompressed, fixed timestamps) |
-| SHA-256 | `ad6d4813a8b6ae73fbf6b92d89e7417c00426f49ffdcb2ae3d224c0fa26c3b1c` |
-| Built from | `extension/` on the branch `release/extension-0.2.5`, merged as `main` before publishing |
+| Size | 59,449 bytes, 12 files, stored (uncompressed, fixed timestamps) |
+| SHA-256 | `dcaaa5d56039c7e9366c9f174279c94da80ec3c6211e0d98d3749647415bbbe1` |
+| Built from | `extension/` at the commit tagged `extension-v0.2.5` on `main` |
 | Browsers | Chromium 116 or newer, unpacked — tested on Brave and Chrome |
 
 ## Install
