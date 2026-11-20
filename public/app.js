@@ -43,10 +43,10 @@ import { createLockSignal } from './lock-signal.js';
 import {
   SIZE_KEY,
   VIEW_KEY,
+  clearDevice,
   clearDeviceStorage,
   deviceId,
   forgetLegacyIconMaps,
-  hostKey,
   pruneIconTries
 } from './device-store.js';
 import { createVault, indexedDbAdapter } from './vault.js';
@@ -69,7 +69,8 @@ import {
   fetchPageTitle,
   isAnswer,
   retryDelayMs,
-  stampAnswers
+  stampAnswers,
+  sweepHosts
 } from './icons.js';
 import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
@@ -125,13 +126,9 @@ let syncLabel = '';
    Worker's own ceiling — and it is not a reason to think of the run as parallel. */
 const ICON_BATCH = 4;
 const ICON_SAVE_EVERY = 5;
-/* A host that failed is not asked again on every launch: once a week, and only a few at a time.
-   The index of when each host was asked lives in device-store.js, keyed by a digest. */
-const ICON_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 /* A refusal is not a failure of the host, so it is retried rather than stamped — this is how many
-   times, at the pauses icons.js derives (`retryDelayMs`), before the next sweep takes over. */
+   times, at the pauses icons.js derives (`retryDelayMs`), before the run gives up. */
 const ICON_RETRY_ATTEMPTS = 3;
-const ICON_TOPUP_HOSTS = 20;
 let iconsBusy = false;
 /* True once a name has been typed for the bookmark being added, so a suggestion never wins. */
 let nameTouched = false;
@@ -1594,9 +1591,6 @@ function enter({
   maybeCollectorSetup();
 
   if (syncEnabled()) syncNow();
-  /* A top-up that cannot read its own index is not an error worth showing: the next launch
-     simply asks again. */
-  scheduleIconTopUp().catch(() => {});
   if (runningVersion === '') loadVersion();
 
   /* The caller says what it was doing; the count of entries the URL rule refused travels back
@@ -3380,7 +3374,7 @@ function writeIconTries(tries) {
   void saveNow();
 }
 
-async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {}) {
+async function fetchMissingIcons({ announceDone = true, explicit = false } = {}) {
   if (iconsBusy) return 0;
 
   const missing = state.document.bookmarks.filter((bookmark) => !bookmark.icon);
@@ -3398,9 +3392,9 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
     else byHost.set(bookmark.hostname, [bookmark.id]);
   }
 
-  const hosts = onlyHosts
-    ? [...byHost.keys()].filter((hostname) => onlyHosts.includes(hostname))
-    : [...byHost.keys()];
+  /* Every host in this map is a site named to the server, so the list is empty unless the person
+     asked for this run. See `sweepHosts`. */
+  const hosts = sweepHosts(byHost.keys(), { explicit });
   if (hosts.length === 0) return 0;
   const tries = readIconTries();
   let done = 0;
@@ -3456,9 +3450,9 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
             : `Retrying ${pending.length} refused ${pending.length === 1 ? 'host' : 'hosts'}…`
         );
 
-        /* A host that answered — with an icon or with "no icon" — is not worth asking again this
-           week. A refusal is not an answer: it leaves the index alone and comes back scheduled.
-           Written per batch so a closed tab does not lose what it already spent. */
+        /* A host that answered — with an icon or with "no icon" — is stamped, so the document says
+           which sites have been asked. A refusal is not an answer: it leaves the entry alone and
+           comes back scheduled. Written per batch so a closed tab does not lose what it spent. */
         refused.push(...(await stampAnswers(tries, results, Date.now())));
         if (results.some(({ outcome }) => isAnswer(outcome))) writeIconTries(tries);
       }
@@ -3478,38 +3472,6 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
     iconsBusy = false;
     updateStatusLine();
   }
-}
-
-/**
- * Icons that never arrived — a host with none, a fetch that failed while offline, an import cut
- * short by a closed tab — are topped up when the vault opens: a few hosts at a time, and no host
- * more than once a week. Quiet, because nobody asked for this run.
- */
-async function scheduleIconTopUp() {
-  if (!state.document) return;
-
-  const missingHosts = [
-    ...new Set(
-      state.document.bookmarks.filter((bookmark) => !bookmark.icon).map((bookmark) => bookmark.hostname)
-    )
-  ];
-  if (missingHosts.length === 0) return;
-
-  const tries = readIconTries();
-  const keys = await Promise.all(missingHosts.map((hostname) => hostKey(hostname)));
-  const now = Date.now();
-  const due = missingHosts.filter((hostname, at) => {
-    const triedAt = Number(tries[keys[at]]);
-    return !Number.isFinite(triedAt) || now - triedAt >= ICON_RETRY_AFTER_MS;
-  });
-  if (due.length === 0) return;
-
-  /* After the first paint and the first sync, so the vault is usable before any of this starts. */
-  setTimeout(() => {
-    if (!state.document || state.document.bookmarks.length === 0) return;
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-    fetchMissingIcons({ announceDone: false, onlyHosts: due.slice(0, ICON_TOPUP_HOSTS) });
-  }, 3000);
 }
 
 async function removeAllIcons() {
@@ -3902,12 +3864,11 @@ async function handleImport() {
     `Imported ${parsedDocument.bookmarks.length} bookmarks.${dropped > 0 ? ` ${droppedSentence(dropped)}` : ''}`
   );
 
-  /* An imported file carries no icons of its own — the legacy URLs point at a third party and
-     are deliberately not used — so the same fetch the Settings action runs starts here, without
-     being asked for. */
-  if (state.document.bookmarks.some((bookmark) => !bookmark.icon)) {
-    fetchMissingIcons();
-  }
+  /* An imported file carries no icons of its own, and the rows keep their letters. Asking here
+     would name every host in the file to the server, one request at a time, for a list the person
+     has not looked at yet. An icon is asked for when the person adds that bookmark from this page,
+     or runs the Settings action. Icons already stored are untouched — only rows without one are
+     affected. */
 }
 
 /* ------------------------------------------------------------------ settings */
@@ -4445,10 +4406,10 @@ function openSettings() {
       el('div', { class: 'settings-list' }, [
         item(
           'Fetch missing icons',
-          `${missingIcons} without an icon. This server asks each site for its icon, and asks again in a week if there is none. The image is stored inside the sealed vault.`,
+          `${missingIcons} without an icon. This sends each of those hostnames to this site's own icon route, which asks the site for its icon; the image is stored inside the sealed vault.`,
           async () => {
             modal.close();
-            await fetchMissingIcons();
+            await fetchMissingIcons({ explicit: true });
           }
         ),
         item('Remove icons', 'Delete every stored icon and go back to lettered tiles.', async () => {
@@ -4580,8 +4541,7 @@ function openSettings() {
             danger: true
           });
           if (!sure) return;
-          await store.clear();
-          clearDeviceStorage();
+          await clearDevice({ vault: store });
           /* Another tab still holds the key and would write the vault back to this device. */
           lockSignal.broadcast();
           location.reload();
