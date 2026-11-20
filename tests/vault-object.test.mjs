@@ -2084,6 +2084,90 @@ test('an account is deleted behind a live session and a fresh proof, leaving onl
   assert.deepEqual(harness.released, [ACCOUNT.accountId], 'the slot is released once');
 });
 
+test('deleting an account gives its slot back to the cap, and the id still answers as deleted', async () => {
+  /* A real Registry behind the binding, capped at one. The stub the rest of this file uses can
+     only record that `/release` was called; whether the slot the cap counts is actually free is
+     a question only the Registry can answer. */
+  const registry = new Registry({ storage: storage() }, { MAX_ACCOUNTS: '1' });
+  const binding = {
+    idFromName: () => ({ name: 'registry' }),
+    get: () => ({ fetch: (request) => registry.fetch(request) })
+  };
+
+  const harness = object({ registry: binding });
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+
+  /* A different, well-formed account id: there is nowhere for it to go while the one slot is
+     held, so a reservation is the Registry's own answer that the slot is taken. */
+  const nextId = 'a'.repeat(64);
+  const claim = (accountId) =>
+    new Request('https://registry/reserve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId })
+    });
+
+  const full = await read(await registry.fetch(claim(nextId)));
+  assert.equal(full.status, 429);
+  assert.equal(full.body.error, 'full');
+
+  const proof = await proofFor(harness);
+  const deleted = await read(
+    await harness.vault.fetch(
+      request('/delete', { body: { proof }, headers: withToken(session.body.token) })
+    )
+  );
+  assert.equal(deleted.status, 200);
+
+  /* The slot the deletion owed is back in the cap's count, so the same reservation now lands. */
+  const reclaimed = await read(await registry.fetch(claim(nextId)));
+  assert.equal(reclaimed.status, 200);
+  assert.equal(reclaimed.body.count, 1, 'one account under the cap, and it is the new one');
+
+  /* The deleted id stays remembered, so the edge forwards it to a tombstone instead of a 404 —
+     the answer a client reads as "never created" and acts on by creating the account again. */
+  const remembered = await read(
+    await registry.fetch(new Request(`https://registry/exists?account=${ACCOUNT.accountId}`))
+  );
+  assert.equal(remembered.body.exists, true, 'the released id is not forgotten');
+  assert.equal((await harness.vault.fetch(request('/challenge'))).status, 410);
+});
+
+test('a disabled account refuses deletion and ending a place before either reads a proof', async () => {
+  const harness = object();
+  await provision(harness);
+  const session = await loginAs(harness, 'desktop');
+  const list = await places(harness, session.body.token);
+
+  await harness.vault.fetch(adminRequest('/admin-disable', { reason: 'testing' }));
+
+  for (const [label, response] of [
+    [
+      'delete',
+      await harness.vault.fetch(
+        request('/delete', { body: { proof: 'x'.repeat(43) }, headers: withToken(session.body.token) })
+      )
+    ],
+    [
+      'end one place',
+      await harness.vault.fetch(
+        request(`/sessions/${list.body.sessions[0].id}`, {
+          method: 'DELETE',
+          headers: withToken(session.body.token)
+        })
+      )
+    ]
+  ]) {
+    assert.equal(response.status, 403, label);
+    assert.equal((await response.json()).error, 'account_disabled', label);
+  }
+
+  assert.ok(harness.storage.raw.has('account'), 'the account survives');
+  assert.equal((await places(harness, session.body.token)).status, 403, 'and the place is still signed in');
+  assert.deepEqual(harness.released, [], 'no slot is given back');
+});
+
 test('deletion needs a live session, a live nonce and the right phrase, and writes nothing without all three', async () => {
   const harness = object();
   await provision(harness);
