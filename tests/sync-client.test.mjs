@@ -711,6 +711,58 @@ test('a wait named by the limiter on the delete is a THROTTLED error', async () 
   );
 });
 
+/*
+ * The tombstone is the only reason a device that still holds the phrase cannot bring its account
+ * back by syncing. Two responses carry it to this client, and both have to be read as the deletion
+ * rather than as the refusal their status code also means:
+ *
+ *  - a creation or sign-in, where 410 is also how an expired invite answers. Reading the tombstone
+ *    as an expired code sends the person looking for another one for an account that is gone;
+ *  - the delete itself, where a refusal is DELETE_FAILED and the page leaves the local vault in
+ *    place — a device that deleted from another tab keeps a copy nothing can ever sync.
+ *
+ * Both cases assert the code the page branches on, so removing the mapping in `request()` fails
+ * here rather than at the e2e suite.
+ */
+
+test('a device that still holds the phrase is refused at creation as deleted, not as an expired code', async () => {
+  const server = stub({
+    [`/api/a/${ACCOUNT.accountId}/account`]: [410, { error: 'account_deleted', deletedAt: 9 }]
+  });
+  const client = new SyncClient({ fetch: server.fetch });
+
+  await assert.rejects(
+    () => client.register(ACCOUNT.accountId, ACCOUNT.authSecret),
+    (error) => {
+      assert.equal(error.code, 'ACCOUNT_DELETED');
+      assert.equal(error.status, 410);
+      assert.equal(describeSyncFailure(error).kind, 'deleted');
+      assert.match(describeSyncFailure(error).message, /new invite code/);
+      assert.doesNotMatch(describeSyncFailure(error).message, /expired/i);
+      return true;
+    }
+  );
+});
+
+test('a delete that meets the tombstone is ACCOUNT_DELETED, so the page clears this device', async () => {
+  const server = deletionServer({
+    deleteStatus: 410,
+    deleteBody: { error: 'account_deleted', deletedAt: 5 }
+  });
+  const client = new SyncClient({ fetch: server.fetch });
+  client.token = 'z'.repeat(43);
+  client.accountId = ACCOUNT.accountId;
+
+  await assert.rejects(
+    () => client.deleteAccount(ACCOUNT.accountId, ACCOUNT.authSecret),
+    (error) => {
+      assert.equal(error.code, 'ACCOUNT_DELETED');
+      assert.equal(error.status, 410);
+      return true;
+    }
+  );
+});
+
 /* ------------------------------------------------------------ ending one place */
 
 test('a place is signed out with a DELETE and the current token', async () => {
