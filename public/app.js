@@ -43,10 +43,10 @@ import { createLockSignal } from './lock-signal.js';
 import {
   SIZE_KEY,
   VIEW_KEY,
+  clearDevice,
   clearDeviceStorage,
   deviceId,
   forgetLegacyIconMaps,
-  hostKey,
   pruneIconTries
 } from './device-store.js';
 import { createVault, indexedDbAdapter } from './vault.js';
@@ -69,7 +69,8 @@ import {
   fetchPageTitle,
   isAnswer,
   retryDelayMs,
-  stampAnswers
+  stampAnswers,
+  sweepHosts
 } from './icons.js';
 import { SyncClient, SyncError, describeSyncFailure } from './sync.js';
 import { DEFAULT_VIEW, VIEW_NAMES, isView, nextView, viewToggleState } from './views.js';
@@ -92,13 +93,16 @@ const state = {
      and the phrase's own id is the name used then. */
   serverId: null,
   proofKey: null,
-  /* The public half, kept only until the account is created: the server is given it once and
-     there is no reason to hold it after that. */
+  /* The public half of the signing key, kept only until the account is created: the server is
+     given it once and there is no reason to hold it after that. A vault reopened from a
+     remembered record has `null` here, and that is what asks for the phrase when sync is turned
+     on. */
   proofKeyText: null,
-  /* The signing key, non-extractable; and the base64url secret the server is given at creation,
-     which is dropped as soon as the account exists. */
+  /* The signing key, non-extractable, and the credential a phrase's own id is signed with: the
+     account's base64url secret is the same bytes, so this key proves the same thing and cannot be
+     read back out. The secret itself is never kept — the creation is described by `proofKeyText`
+     and a sign-in by this key, so nothing on the page needs it. */
   authKey: null,
-  authSecret: null,
   /* The code an invite-only server asks for before it will create an account, and whether one is
      owed. Both live in memory for one attempt: a code is spent when it is used, so a copy kept
      anywhere would be a copy left behind. */
@@ -122,13 +126,9 @@ let syncLabel = '';
    Worker's own ceiling — and it is not a reason to think of the run as parallel. */
 const ICON_BATCH = 4;
 const ICON_SAVE_EVERY = 5;
-/* A host that failed is not asked again on every launch: once a week, and only a few at a time.
-   The index of when each host was asked lives in device-store.js, keyed by a digest. */
-const ICON_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 /* A refusal is not a failure of the host, so it is retried rather than stamped — this is how many
-   times, at the pauses icons.js derives (`retryDelayMs`), before the next sweep takes over. */
+   times, at the pauses icons.js derives (`retryDelayMs`), before the run gives up. */
 const ICON_RETRY_ATTEMPTS = 3;
-const ICON_TOPUP_HOSTS = 20;
 let iconsBusy = false;
 /* True once a name has been typed for the bookmark being added, so a suggestion never wins. */
 let nameTouched = false;
@@ -1063,7 +1063,6 @@ async function forgetDeletedVault(message) {
   state.proofKey = null;
   state.proofKeyText = null;
   state.authKey = null;
-  state.authSecret = null;
   forgetInvite();
   state.key = null;
   state.version = 0;
@@ -1188,11 +1187,15 @@ function handleSyncError(error) {
 }
 
 /**
- * What signs a login proof: the non-extractable key when this session has one, and otherwise the
- * base64url secret, which only exists between an unlock and the account's creation.
+ * What signs a login proof for an id a phrase hashed to: the non-extractable HMAC key the phrase
+ * derives. The base64url text behind it is the same bytes, so it signs the same proof
+ * (`crypto.test.mjs` pins that), and unlike the text it cannot be read out of the page.
+ *
+ * `null` means this session holds no credential at all: a record kept from before the key
+ * existed. The routes that need one ask for the phrase rather than guessing.
  */
 function authMaterial() {
-  return state.authKey ?? state.authSecret;
+  return state.authKey;
 }
 
 /* The server's name for an account is 64 lowercase hex characters, and the phrase's own id is 22
@@ -1210,8 +1213,8 @@ function committedName(accountId) {
  *
  * The shape of the name decides it: 64 hex characters is an id a public key committed to, so only
  * the phrase's Ed25519 key can sign for it; 22 characters is the id the phrase itself hashed to,
- * so the HMAC secret or the remembered HMAC key signs. Every call site asks this rather than
- * testing the shape itself, because a credential of the wrong kind is a sign-in that cannot work.
+ * so the HMAC key the phrase derives signs. Every call site asks this rather than testing the
+ * shape itself, because a credential of the wrong kind is a sign-in that cannot work.
  */
 function credentialFor(accountId) {
   return committedName(accountId) ? state.proofKey : authMaterial();
@@ -1375,11 +1378,15 @@ async function reconcile() {
 
       /* First sync on a new phrase: the account is created from the same key the login would have
          used, so there is nothing to provision and no token to hold. A remembered device holds the
-         signing key, not the secret the server is given, so it cannot create the account without
-         the phrase once. The code, when the server wants one, is the third argument and is empty
-         until a refusal asks for it. */
+         signing key but not its public half, so it cannot describe the creation without the phrase
+         once. The code, when the server wants one, is the third argument and is empty until a
+         refusal asks for it. */
       setSyncStatus('Creating the account…');
-      if (typeof state.authSecret !== 'string') {
+      /* The creation is described by the committed name and the public half of the signing key,
+         which are the two things a request sends. A session without them — one reopened from a
+         remembered record — is exactly the case the phrase answers, and nothing about the account's
+         base64url secret is consulted to decide it. */
+      if (!committedName(state.serverId) || !state.proofKey || typeof state.proofKeyText !== 'string') {
         throw new SyncError('NEED_PHRASE', 'This device needs the phrase once to create the account.');
       }
       await sync.register(
@@ -1387,11 +1394,10 @@ async function reconcile() {
         { proofKey: state.proofKey, proofKeyText: state.proofKeyText },
         state.invite
       );
-      /* The server holds the public half now, so the secret it would once have stored is dropped
-         here and never written anywhere. The public text is kept until the session exists: a
-         registration that succeeded and a sign-in that failed on the network is answered by
-         signing in again, and a retried creation has to describe the same one. */
-      state.authSecret = null;
+      /* The server holds the public half now and the session is the only other thing a creation
+         leaves behind. The public text is kept until that session exists: a registration that
+         succeeded and a sign-in that failed on the network is answered by signing in again, and a
+         retried creation has to describe the same one. */
       session = await sync.login(state.serverId, state.proofKey);
       state.proofKeyText = null;
       /* The creation is done, so the code has no further use: it was spent on this account. */
@@ -1529,7 +1535,6 @@ function enter({
   serverId = null,
   proofKey = null,
   proofKeyText = null,
-  authSecret,
   authKey = null,
   key,
   version,
@@ -1544,7 +1549,6 @@ function enter({
   state.proofKey = proofKey;
   state.proofKeyText = proofKeyText;
   state.authKey = authKey ?? null;
-  state.authSecret = authSecret ?? null;
   state.key = key;
   state.version = version;
   state.sealed = sealed;
@@ -1587,9 +1591,6 @@ function enter({
   maybeCollectorSetup();
 
   if (syncEnabled()) syncNow();
-  /* A top-up that cannot read its own index is not an error worth showing: the next launch
-     simply asks again. */
-  scheduleIconTopUp().catch(() => {});
   if (runningVersion === '') loadVersion();
 
   /* The caller says what it was doing; the count of entries the URL rule refused travels back
@@ -1762,7 +1763,6 @@ async function tryRemembered() {
          name. Nothing else differs, which is why an older record still opens here. */
       serverId: remembered.serverId ?? null,
       proofKey: remembered.proofKey ?? null,
-      authSecret: null,
       authKey: remembered.authKey ?? null,
       key,
       version: stored.version,
@@ -1797,7 +1797,7 @@ async function handleUnlock(event) {
   unlockButton.textContent = 'Unlocking…';
 
   try {
-    const { accountId, serverId, vaultKey, authKey, authSecret, proofKey, proofKeyText } =
+    const { accountId, serverId, vaultKey, authKey, proofKey, proofKeyText } =
       await deriveAccount(phrase);
     const stored = await store.load(accountId);
     const vaultDocument = stored.sealed
@@ -1819,7 +1819,6 @@ async function handleUnlock(event) {
       serverId,
       proofKey,
       proofKeyText,
-      authSecret,
       authKey,
       key: vaultKey,
       version: stored.version,
@@ -2124,7 +2123,7 @@ function openCreateModal() {
 }
 
 async function createNewVault(phrase, remember) {
-  const { accountId, serverId, vaultKey, authKey, authSecret, proofKey, proofKeyText } =
+  const { accountId, serverId, vaultKey, authKey, proofKey, proofKeyText } =
     await deriveAccount(phrase);
   const vaultDocument = createDocument();
   const sealed = await sealVault(vaultKey, vaultDocument, accountId, 1);
@@ -2138,7 +2137,6 @@ async function createNewVault(phrase, remember) {
     serverId,
     proofKey,
     proofKeyText,
-    authSecret,
     authKey,
     key: vaultKey,
     version: 1,
@@ -2189,7 +2187,7 @@ async function handleRestore() {
   }
 
   try {
-    const { accountId, serverId, vaultKey, authKey, authSecret, proofKey, proofKeyText } =
+    const { accountId, serverId, vaultKey, authKey, proofKey, proofKeyText } =
       await deriveAccount(phrase);
     const backupDocument = await openVault(vaultKey, sealed, accountId, sealed.at ?? 1, {
       allowLegacy: sealed.at === undefined
@@ -2247,7 +2245,6 @@ async function handleRestore() {
       serverId,
       proofKey,
       proofKeyText,
-      authSecret,
       authKey,
       key: vaultKey,
       version,
@@ -3377,7 +3374,7 @@ function writeIconTries(tries) {
   void saveNow();
 }
 
-async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {}) {
+async function fetchMissingIcons({ announceDone = true, explicit = false } = {}) {
   if (iconsBusy) return 0;
 
   const missing = state.document.bookmarks.filter((bookmark) => !bookmark.icon);
@@ -3395,9 +3392,9 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
     else byHost.set(bookmark.hostname, [bookmark.id]);
   }
 
-  const hosts = onlyHosts
-    ? [...byHost.keys()].filter((hostname) => onlyHosts.includes(hostname))
-    : [...byHost.keys()];
+  /* Every host in this map is a site named to the server, so the list is empty unless the person
+     asked for this run. See `sweepHosts`. */
+  const hosts = sweepHosts(byHost.keys(), { explicit });
   if (hosts.length === 0) return 0;
   const tries = readIconTries();
   let done = 0;
@@ -3453,9 +3450,9 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
             : `Retrying ${pending.length} refused ${pending.length === 1 ? 'host' : 'hosts'}…`
         );
 
-        /* A host that answered — with an icon or with "no icon" — is not worth asking again this
-           week. A refusal is not an answer: it leaves the index alone and comes back scheduled.
-           Written per batch so a closed tab does not lose what it already spent. */
+        /* A host that answered — with an icon or with "no icon" — is stamped, so the document says
+           which sites have been asked. A refusal is not an answer: it leaves the entry alone and
+           comes back scheduled. Written per batch so a closed tab does not lose what it spent. */
         refused.push(...(await stampAnswers(tries, results, Date.now())));
         if (results.some(({ outcome }) => isAnswer(outcome))) writeIconTries(tries);
       }
@@ -3475,38 +3472,6 @@ async function fetchMissingIcons({ announceDone = true, onlyHosts = null } = {})
     iconsBusy = false;
     updateStatusLine();
   }
-}
-
-/**
- * Icons that never arrived — a host with none, a fetch that failed while offline, an import cut
- * short by a closed tab — are topped up when the vault opens: a few hosts at a time, and no host
- * more than once a week. Quiet, because nobody asked for this run.
- */
-async function scheduleIconTopUp() {
-  if (!state.document) return;
-
-  const missingHosts = [
-    ...new Set(
-      state.document.bookmarks.filter((bookmark) => !bookmark.icon).map((bookmark) => bookmark.hostname)
-    )
-  ];
-  if (missingHosts.length === 0) return;
-
-  const tries = readIconTries();
-  const keys = await Promise.all(missingHosts.map((hostname) => hostKey(hostname)));
-  const now = Date.now();
-  const due = missingHosts.filter((hostname, at) => {
-    const triedAt = Number(tries[keys[at]]);
-    return !Number.isFinite(triedAt) || now - triedAt >= ICON_RETRY_AFTER_MS;
-  });
-  if (due.length === 0) return;
-
-  /* After the first paint and the first sync, so the vault is usable before any of this starts. */
-  setTimeout(() => {
-    if (!state.document || state.document.bookmarks.length === 0) return;
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-    fetchMissingIcons({ announceDone: false, onlyHosts: due.slice(0, ICON_TOPUP_HOSTS) });
-  }, 3000);
 }
 
 async function removeAllIcons() {
@@ -3899,21 +3864,24 @@ async function handleImport() {
     `Imported ${parsedDocument.bookmarks.length} bookmarks.${dropped > 0 ? ` ${droppedSentence(dropped)}` : ''}`
   );
 
-  /* An imported file carries no icons of its own — the legacy URLs point at a third party and
-     are deliberately not used — so the same fetch the Settings action runs starts here, without
-     being asked for. */
-  if (state.document.bookmarks.some((bookmark) => !bookmark.icon)) {
-    fetchMissingIcons();
-  }
+  /* An imported file carries no icons of its own, and the rows keep their letters. Asking here
+     would name every host in the file to the server, one request at a time, for a list the person
+     has not looked at yet. An icon is asked for when the person adds that bookmark from this page,
+     or runs the Settings action. Icons already stored are untouched — only rows without one are
+     affected. */
 }
 
 /* ------------------------------------------------------------------ settings */
 
 /**
- * A remembered device can sign in, but the account secret it would send to be registered is
- * only derivable from the phrase. It is asked for once, and the answer is kept the way the keys
- * are kept. The account id is derived from the phrase, so a wrong phrase simply derives another
- * vault.
+ * A device can sign in with the key it remembers, but the account's creation is described by the
+ * signing key's public half, and only the phrase derives that. It is asked for once, when sync is
+ * turned on for a session that does not already hold the material, and the answer is the account
+ * name, the signing key and its public half — not the base64url secret, which no request here
+ * sends and no page state keeps.
+ *
+ * The account id is derived from the phrase, so a wrong phrase simply derives another vault; it is
+ * refused here rather than turning sync on for an account this device cannot open.
  */
 function promptForSyncPhrase() {
   return new Promise((resolve) => {
@@ -3964,13 +3932,12 @@ function promptForSyncPhrase() {
       const typed = phrase.value;
       clearPhraseField(phrase);
       try {
-        const { accountId, serverId, authSecret, authKey, proofKey, proofKeyText } =
-          await deriveAccount(typed);
+        const { accountId, serverId, authKey, proofKey, proofKeyText } = await deriveAccount(typed);
         if (accountId !== state.accountId) {
           throw new Error('That phrase belongs to a different vault.');
         }
         settled = true;
-        resolve({ serverId, authSecret, authKey, proofKey, proofKeyText });
+        resolve({ serverId, authKey, proofKey, proofKeyText });
         modal.close();
       } catch (problem) {
         error.textContent = clean(problem.message);
@@ -4439,10 +4406,10 @@ function openSettings() {
       el('div', { class: 'settings-list' }, [
         item(
           'Fetch missing icons',
-          `${missingIcons} without an icon. This server asks each site for its icon, and asks again in a week if there is none. The image is stored inside the sealed vault.`,
+          `${missingIcons} without an icon. This sends each of those hostnames to this site's own icon route, which asks the site for its icon; the image is stored inside the sealed vault.`,
           async () => {
             modal.close();
-            await fetchMissingIcons();
+            await fetchMissingIcons({ explicit: true });
           }
         ),
         item('Remove icons', 'Delete every stored icon and go back to lettered tiles.', async () => {
@@ -4472,7 +4439,10 @@ function openSettings() {
             const enable = !syncEnabled();
             modal.close();
 
-            if (enable && typeof state.authSecret !== 'string') {
+            /* The creation is described by the committed name and the public half of the signing
+               key, so the phrase is asked for when this page does not hold them: a vault created a
+               moment ago does, and one reopened from a remembered record does not. */
+            if (enable && (typeof state.proofKeyText !== 'string' || !committedName(state.serverId))) {
               const derived = await promptForSyncPhrase();
               if (!derived) return;
 
@@ -4482,10 +4452,9 @@ function openSettings() {
               state.serverId = derived.serverId;
               state.proofKey = derived.proofKey;
               state.proofKeyText = derived.proofKeyText;
-              state.authSecret = derived.authSecret;
               state.authKey = derived.authKey;
-              /* The remembered record takes the signing key: the secret the server is given is
-                 the one value that must not be written to this device. */
+              /* The remembered record takes the signing key: the secret behind it is what the
+                 server would store, and it is neither derived here nor written anywhere. */
               const remembered = await store.readRemembered();
               if (remembered) {
                 await store.remember(state.accountId, remembered.key, derived.authKey, {
@@ -4572,8 +4541,7 @@ function openSettings() {
             danger: true
           });
           if (!sure) return;
-          await store.clear();
-          clearDeviceStorage();
+          await clearDevice({ vault: store });
           /* Another tab still holds the key and would write the vault back to this device. */
           lockSignal.broadcast();
           location.reload();
@@ -4681,7 +4649,6 @@ async function lockVault({ broadcast = true } = {}) {
   state.proofKey = null;
   state.proofKeyText = null;
   state.authKey = null;
-  state.authSecret = null;
   /* A code is a secret like the phrase, so a lock drops it with everything else the page held. */
   forgetInvite();
   state.key = null;
