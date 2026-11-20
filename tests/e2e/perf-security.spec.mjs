@@ -373,8 +373,8 @@ test('an empty vault is opened without asking any site for an icon or a title', 
   await createVault(page);
   await expect(page.locator('#empty')).toContainText(/no bookmarks yet/i);
 
-  /* Entry schedules a top-up of missing icons. A vault with no bookmarks has nothing missing, so the walk ends
-     without a request; a second of quiet is enough for a schedule that would have fired immediately. */
+  /* Nothing sweeps for icons on its own: an unlock names no host, and neither does an import. A
+     second of quiet is kept so a request queued behind the first paint would still be seen. */
   await page.waitForTimeout(1_000);
   expect(asked, `the vault asked a site for an icon or a title with no bookmark to fill: ${asked.join(', ')}`).toEqual(
     []

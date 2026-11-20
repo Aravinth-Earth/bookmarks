@@ -43,6 +43,43 @@ const SECURITY_HEADERS = {
   'strict-transport-security': 'max-age=15552000; includeSubDomains; preload'
 };
 
+/* The cache policy every served asset carries, set here so a rule beside the asset tree cannot make
+   an old page immutable: the browser revalidates, and an `etag` turns that into a 304. */
+const ASSET_CACHE = 'public, max-age=0, must-revalidate';
+
+/* What an asset response may contribute to the response this Worker returns.
+ *
+ * The asset tree can carry a header rule of its own, which adds and replaces headers on every asset
+ * response; those headers would otherwise be copied out as though this file had set them. Only the
+ * representation metadata a browser needs to read and revalidate the bytes is taken, and every
+ * other header is decided below. Nothing here states a policy, a permission or a cache lifetime. */
+const ASSET_HEADERS = [
+  'accept-ranges',
+  'content-encoding',
+  'content-language',
+  'content-length',
+  'content-range',
+  'content-type',
+  'etag',
+  'last-modified',
+  'vary'
+];
+
+function assetHeaders(response) {
+  const headers = new Headers();
+  for (const name of ASSET_HEADERS) {
+    const value = response.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  return headers;
+}
+
+/** The site's security policy, set on a response that is about to reach a browser. */
+function securityHeaders(headers = new Headers()) {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
+  return headers;
+}
+
 function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
@@ -1309,22 +1346,12 @@ async function handleApi(request, env, url) {
       return json({ error: 'unexpected_body' }, 400);
     }
 
-    /* An id that was never reserved has no account behind it, and no object either — asking the
-       runtime for that object by name is what creates it, so the question is put to the Registry
-       first. Creation is the one route allowed to bring an id into existence, and it is also the
-       one route that can be told the cap is full before an object is made to say it. Anything
-       else about an unknown id is a 404, which is what the client already reads as "no account".
-       With no Registry bound, or no usable answer from it, nothing is refused: see the helper. */
-    const known = env.REGISTRY ? await reservedAtRegistry(env, accountId) : null;
-    if (known) {
-      if (!known.exists && forward !== '/account') return json({ error: 'no_account' }, 404);
-      /* The object still holds the authoritative check; this only keeps a full server from paying
-         for an object that would refuse on its first request. Same code it would have answered. */
-      if (!known.exists && !known.room) return json({ error: 'full' }, 429);
-    }
-
-    const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
-    const target = new URL(`https://vault${forward}`, 'https://vault');
+    /* Every route the object answers to this API is in `ROUTE_CLASS`; the operator routes were
+       refused above. A forward path with no class is therefore a path the object would answer 404
+       to, and answering it here is the same 404 without a Registry question and without naming an
+       object: a path that cannot be answered must not be worth asking about. */
+    const className = classOfRoute(forward);
+    if (!className) return json({ error: 'not_found' }, 404);
 
     /* The caller's stream is forwarded untouched, so an upload over the cap is aborted by the
        runtime somewhere in the middle and reaches the caller as a network fault rather than a
@@ -1335,9 +1362,31 @@ async function handleApi(request, env, url) {
     const declared = Number(request.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > cap) return json({ error: 'too_large' }, 413);
 
-    return limited(env, classOfRoute(forward), request, async () =>
-      forwardTo(stub, target, request, await sourceDigest(request, accountId))
-    );
+    /* The counter is spent before the Registry is asked, not after. The Registry is one object for
+       the whole service and every account path is put to it before an object is named, so a
+       question asked first is load a caller over its budget still causes — and a 404 for an id
+       that was never reserved would cost that read every time, with nothing counting how many
+       times. Refused here, the request writes nothing, asks nothing and names nothing. */
+    return limited(env, className, request, async () => {
+      /* An id that was never reserved has no account behind it, and no object either — asking the
+         runtime for that object by name is what creates it, so the question is put to the Registry
+         first. Creation is the one route allowed to bring an id into existence, and it is also the
+         one route that can be told the cap is full before an object is made to say it. Anything
+         else about an unknown id is a 404, which is what the client already reads as "no account".
+         With no Registry bound, or no usable answer from it, nothing is refused: see the helper. */
+      const known = env.REGISTRY ? await reservedAtRegistry(env, accountId) : null;
+      if (known) {
+        if (!known.exists && forward !== '/account') return json({ error: 'no_account' }, 404);
+        /* The object still holds the authoritative check; this only keeps a full server from
+           paying for an object that would refuse on its first request. Same code it would have
+           answered. */
+        if (!known.exists && !known.room) return json({ error: 'full' }, 429);
+      }
+
+      const stub = env.VAULTS.get(env.VAULTS.idFromName(accountId));
+      const target = new URL(`https://vault${forward}`, 'https://vault');
+      return forwardTo(stub, target, request, await sourceDigest(request, accountId));
+    });
   }
 
   return json({ error: 'not_found' }, 404);
@@ -1382,19 +1431,17 @@ export default {
     const pathname = url.pathname === '/index.html' ? '/' : url.pathname;
     const assetUrl = new URL(pathname + url.search, url.origin);
     const response = await env.ASSETS.fetch(new Request(assetUrl, request));
-    const headers = new Headers(response.headers);
 
+    /* The 404 body is this file's document, so the asset response's headers describe bytes that are
+       no longer sent and are not carried over. */
     if (response.status === 404) {
       const page = notFound();
-      for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
-      for (const [name, value] of page.headers) headers.set(name, value);
+      const headers = securityHeaders(new Headers(page.headers));
       return new Response(page.body, { status: 404, headers });
     }
 
-    for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
-    if (!headers.has('cache-control')) {
-      headers.set('cache-control', 'public, max-age=0, must-revalidate');
-    }
+    const headers = securityHeaders(assetHeaders(response));
+    headers.set('cache-control', ASSET_CACHE);
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
