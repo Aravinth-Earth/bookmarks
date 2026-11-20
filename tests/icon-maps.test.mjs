@@ -30,7 +30,14 @@ import {
 } from '../public/bookmarks.js';
 import { mergeInto, sanitizeDocument } from '../public/import-export.js';
 import { openVault, sealVault } from '../public/crypto.js';
-import { COLLECTED_ICON_KEY, ICON_TRIES_KEY, forgetLegacyIconMaps } from '../public/device-store.js';
+import { createVault } from '../public/vault.js';
+import {
+  COLLECTED_ICON_KEY,
+  ICON_TRIES_KEY,
+  VIEW_KEY,
+  clearDevice,
+  forgetLegacyIconMaps
+} from '../public/device-store.js';
 import { tileFor } from '../public/tiles.js';
 
 const T1 = Date.UTC(2026, 0, 1, 10, 0, 0);
@@ -89,6 +96,26 @@ function fakeStorage(initial = {}) {
     setItem: (key, value) => kept.set(key, String(value)),
     removeItem: (key) => {
       kept.delete(key);
+    }
+  };
+}
+
+/* The vault's adapter is four methods, so a Map stands in for IndexedDB here exactly as it does in
+   vault.test.mjs. These cases look at which records exist, never inside a seal. */
+function memoryAdapter() {
+  const map = new Map();
+  return {
+    async get(key) {
+      return map.get(key);
+    },
+    async put(key, value) {
+      map.set(key, structuredClone(value));
+    },
+    async delete(key) {
+      map.delete(key);
+    },
+    async keys() {
+      return [...map.keys()];
     }
   };
 }
@@ -376,4 +403,69 @@ test('the attempts have a count cap and lose the oldest first', () => {
     iconTries: { [digests[0]]: 'yesterday', [digests[1]]: T1 }
   };
   assert.deepEqual(Object.keys(fitIconTries(mixed).iconTries), [digests[1]], 'an unreadable stamp is dropped');
+});
+
+const ACCOUNT = 'A'.repeat(22);
+
+async function key() {
+  return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+test('clearing this device takes the attempt map with the sealed document', async () => {
+  const vaultKey = await key();
+  const document = { ...doc([record()]), iconTries: { [DIGEST]: T1 } };
+  const first = await sealVault(vaultKey, document, ACCOUNT, 1);
+  const second = await sealVault(vaultKey, document, ACCOUNT, 2);
+
+  /* The map is in the document before the clear, so the case is about removal and not about a map
+     that never existed. */
+  assert.deepEqual((await openVault(vaultKey, first, ACCOUNT, 1)).iconTries, { [DIGEST]: T1 });
+
+  const adapter = memoryAdapter();
+  const vault = createVault(adapter);
+  await vault.save(ACCOUNT, first, 1);
+  await vault.save(ACCOUNT, second, 2);
+  assert.deepEqual(await vault.history(), [1], 'a previous version is on the device, and holds the map too');
+
+  /* The two halves the "Clear this device" action runs: the store the vault lives in, and every
+     key this page writes. Both are named in one call so neither can be dropped from the flow. */
+  const storage = fakeStorage({
+    [ICON_TRIES_KEY]: JSON.stringify({ [DIGEST]: T1 }),
+    [VIEW_KEY]: 'list'
+  });
+  await clearDevice({ vault, storage });
+
+  assert.deepEqual(await adapter.keys(), [], 'no record survives, and the attempt map lived in one of them');
+  assert.deepEqual(
+    await vault.load(ACCOUNT),
+    { sealed: null, version: 0, updatedAt: null },
+    'the document is gone, not merely empty'
+  );
+  assert.deepEqual(await vault.history(), [], 'the history that also held the map is gone');
+  assert.equal(storage.getItem(ICON_TRIES_KEY), null, 'the key name an earlier version wrote went too');
+  assert.equal(storage.getItem(VIEW_KEY), null, 'and the settings a clear has always removed');
+});
+
+test('locking keeps the attempt map, because a lock forgets the key and not the vault', async () => {
+  /* The Settings row says what a lock is: "Forget the key on this device until the phrase is
+     entered again." The device keeps its vault, so the map inside it stays — and its hostnames
+     stay sealed, which is what makes keeping it safe. */
+  const vaultKey = await key();
+  const document = { ...doc([record()]), iconTries: { [DIGEST]: T1 } };
+  const sealed = await sealVault(vaultKey, document, ACCOUNT, 1);
+
+  const adapter = memoryAdapter();
+  const vault = createVault(adapter);
+  await vault.save(ACCOUNT, sealed, 1);
+  await vault.remember(ACCOUNT, vaultKey, Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url'));
+  assert.ok(await vault.readRemembered(), 'the device was remembered before the lock');
+
+  /* What lockVault does to this device's storage: drop the session's remembered key, leave the vault. */
+  await vault.forget();
+
+  assert.equal(await vault.readRemembered(), null, 'the key is forgotten');
+  assert.deepEqual(await adapter.keys(), ['document'], 'the sealed vault is still here');
+
+  const reopened = await openVault(vaultKey, (await vault.load(ACCOUNT)).sealed, ACCOUNT, 1);
+  assert.deepEqual(reopened.iconTries, { [DIGEST]: T1 }, 'so the attempt map opens with the vault, still sealed');
 });
