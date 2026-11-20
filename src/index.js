@@ -43,6 +43,43 @@ const SECURITY_HEADERS = {
   'strict-transport-security': 'max-age=15552000; includeSubDomains; preload'
 };
 
+/* The cache policy every served asset carries, set here so a rule beside the asset tree cannot make
+   an old page immutable: the browser revalidates, and an `etag` turns that into a 304. */
+const ASSET_CACHE = 'public, max-age=0, must-revalidate';
+
+/* What an asset response may contribute to the response this Worker returns.
+ *
+ * The asset tree can carry a header rule of its own, which adds and replaces headers on every asset
+ * response; those headers would otherwise be copied out as though this file had set them. Only the
+ * representation metadata a browser needs to read and revalidate the bytes is taken, and every
+ * other header is decided below. Nothing here states a policy, a permission or a cache lifetime. */
+const ASSET_HEADERS = [
+  'accept-ranges',
+  'content-encoding',
+  'content-language',
+  'content-length',
+  'content-range',
+  'content-type',
+  'etag',
+  'last-modified',
+  'vary'
+];
+
+function assetHeaders(response) {
+  const headers = new Headers();
+  for (const name of ASSET_HEADERS) {
+    const value = response.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  return headers;
+}
+
+/** The site's security policy, set on a response that is about to reach a browser. */
+function securityHeaders(headers = new Headers()) {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
+  return headers;
+}
+
 function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
@@ -1388,19 +1425,17 @@ export default {
     const pathname = url.pathname === '/index.html' ? '/' : url.pathname;
     const assetUrl = new URL(pathname + url.search, url.origin);
     const response = await env.ASSETS.fetch(new Request(assetUrl, request));
-    const headers = new Headers(response.headers);
 
+    /* The 404 body is this file's document, so the asset response's headers describe bytes that are
+       no longer sent and are not carried over. */
     if (response.status === 404) {
       const page = notFound();
-      for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
-      for (const [name, value] of page.headers) headers.set(name, value);
+      const headers = securityHeaders(new Headers(page.headers));
       return new Response(page.body, { status: 404, headers });
     }
 
-    for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
-    if (!headers.has('cache-control')) {
-      headers.set('cache-control', 'public, max-age=0, must-revalidate');
-    }
+    const headers = securityHeaders(assetHeaders(response));
+    headers.set('cache-control', ASSET_CACHE);
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
