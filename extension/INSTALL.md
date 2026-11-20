@@ -70,6 +70,10 @@ other code path:
 | `storage` | "Store data locally" | The list itself: one row per address and a count, in this browser profile, as plain text. |
 | `alarms` | — (no warning) | One wake-up every six hours, so the retention and the row limit you chose are actually applied. |
 
+The whole of it, written out for the browser store's privacy-policy field, is one page on the vault's own
+origin: <https://bookmarks.332321.xyz/privacy/>. It names the address, the count and the settings that are kept,
+what is not read, and why `tabs` is the only permission that needs a reason.
+
 Only the address is kept: not the page, not the title, not the text, not the referrer, not what was typed
 before the address bar settled. The `#fragment` is dropped, credentials embedded in the address
 (`user:pass@`) are removed, and query parameters whose name says they are a credential (`token`, `code`,

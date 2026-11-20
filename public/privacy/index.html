@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0a0c10">
+<title>Privacy — collected links</title>
+<meta name="description" content="What the Bookmarks collected links extension keeps, where it keeps it, and why it asks for tabs.">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+<style>
+  :root { color-scheme: dark light; }
+  body { margin: 0; background: #0d1117; color: #e6edf3;
+         font: 16px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 44rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+  h1 { margin: 0 0 0.5rem; font-size: 2rem; line-height: 1.2; }
+  h2 { margin: 2.5rem 0 0.75rem; font-size: 1.25rem; line-height: 1.3; }
+  p, li { color: #c3cad3; }
+  .lede { color: #9198a1; }
+  a { color: #4c8dff; }
+  code { font: 0.9em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: #161b22; border-radius: 4px; padding: 0.1em 0.35em; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; vertical-align: top; padding: 0.6rem 0.75rem;
+           border-bottom: 1px solid #21262d; }
+  th { color: #9198a1; font-weight: 600; }
+  ul { padding-left: 1.25rem; }
+  li { margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>Privacy — collected links</h1>
+<p class="lede">The privacy policy for <strong>Bookmarks — collected links</strong>, the optional companion extension for the vault at <a href="https://bookmarks.332321.xyz/">bookmarks.332321.xyz</a>. It covers version 0.2.5 of the extension and nothing else.</p>
+
+<h2>What the extension touches</h2>
+<ul>
+  <li><strong>The address of a page.</strong> When a tab finishes loading a page served over http or https, the extension reads that tab's address. The <code>#fragment</code> is dropped, credentials embedded in the address (<code>user:pass@</code>) are removed, and query parameters whose name says they are a credential — <code>token</code>, <code>code</code>, <code>signature</code>, <code>session</code>, <code>password</code> and a short list beside them — are stripped before anything is written. That denylist is not complete, so a secret in a parameter nobody would guess is still stored, which is one more reason the rows stay on the device.</li>
+  <li><strong>A row per address.</strong> The address, the host taken from it, how many times it has been opened in this browser profile, when it was first and last opened, and whether the visit came from a private window. Nothing measures how long a page stayed open, and nothing records which tab was in front.</li>
+  <li><strong>The settings the vault sent.</strong> Whether collection is on, how each site is recorded, the exclusions, retention, the row limit, the daily cap, the visit floor and whether private windows count. The extension keeps a copy so it can apply them while no vault tab is open; the original lives in the vault's own sealed document.</li>
+  <li><strong>A daily counter.</strong> The date and how many new addresses were kept that day, which is what the daily cap is applied to.</li>
+</ul>
+<p>Nothing else is read or kept: no page content, no page title, no form input or keystroke, no referrer, no cookie, no download, no bookmark, no tab or window identifier, no open duration, and nothing from before the extension was installed.</p>
+
+<h2>What it is used for</h2>
+<p>One purpose, with nothing beside it: showing you the addresses this browser has opened, so the ones worth keeping are one press away. The rows are not used for advertising, profiling, analytics, creditworthiness or lending, and they are not sold.</p>
+
+<h2>The one permission that needs a reason</h2>
+<p>Chromium shows <code>tabs</code> at install as <strong>"Read your browsing history"</strong>. That warning is broader than what this extension does with it, and it is also the reason the permission is asked for plainly rather than hidden: there is no narrower permission that lets an extension see a tab's address, so the address a tab has committed to is only readable through <code>tabs</code>.</p>
+<p>The extension reads one field of one tab — the address — at the moment that tab reports it has finished loading. It holds no timer, no dwell state and nothing to compare a visit with, and it never asks the browser for history: <code>history</code> is not among the permissions it requests, and there is no call to a history API in its code. A page opened before the install is therefore not here, and neither is a page the browser did not load while the extension was enabled.</p>
+<p>What happens to that address: it is normalised as described above, counted, and written on the device. The list is handed to the vault page when the vault asks for it, and only that page may ask — the extension injects its bridge only into the vault's own pages, and refuses a message from any other origin, extension or frame before a handler runs.</p>
+<p>Private windows are left out unless two things are true: the extension has been allowed in Incognito at the browser's own extensions page, and <strong>Include private windows</strong> is on in the vault's Settings.</p>
+
+<h2>The other two permissions</h2>
+<table>
+  <thead>
+    <tr><th>Permission</th><th>The browser calls it</th><th>What it is for here</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>tabs</code></td><td>"Read your browsing history"</td><td>Seeing the address of the tab that has just finished loading, as described above. There is no narrower permission that serves that purpose.</td></tr>
+    <tr><td><code>storage</code></td><td>"Store data locally"</td><td>The list itself: one row per address and a count, in this browser profile, as plain text.</td></tr>
+    <tr><td><code>alarms</code></td><td>No warning</td><td>One wake-up every six hours, so the retention and the row limit the vault chose are actually applied.</td></tr>
+  </tbody>
+</table>
+
+<h2>Where it is kept</h2>
+<p>In <code>chrome.storage.local</code>, inside the profile of the browser the extension was installed in — on that device, as plain text, unencrypted. It is not in the vault, not in any backup the vault keeps, and it is never synced: the sealed copy the server holds is the vault's document and contains none of these rows. An address reaches the vault only when you add it from the vault's own list, and from that moment it is part of the sealed document and covered by the vault's policy rather than this one.</p>
+<p>The extension makes no network request at all. Its own pages set <code>connect-src 'none'</code>, and the repository's <code>npm run check</code> fails on a <code>fetch</code>, <code>XMLHttpRequest</code>, <code>sendBeacon</code>, <code>WebSocket</code>, <code>EventSource</code>, <code>importScripts</code>, <code>sendNativeMessage</code> or <code>connectNative</code> call appearing anywhere in the extension. Nothing here is sold or shared, and nothing is loaded from anywhere: every byte of the extension ships in the package, its pages set <code>script-src 'self'</code>, and there is no remote script, no evaluation of a string as code, and no update channel but the browser's own store.</p>
+
+<h2>How long it stays, and how to remove it</h2>
+<p>The vault decides how long a row is kept and how many rows there may be; a tidy every six hours applies both, and a row past either bound is deleted. <strong>Settings → Collected links</strong> in the vault has <strong>Clear collected links</strong>, and turning collection off stops new rows without deleting the ones already there. Removing the extension asks the browser to delete what it stored. Disabling it deletes nothing, and a browser profile that is backed up carries its own copy, so removing is a request rather than a shredder. The vault's bookmarks are untouched either way: they are in the sealed document, not in the extension.</p>
+
+<h2>Changes, and how to reach a person</h2>
+<p>This page is written from the code that runs: the permission table is read against the extension's manifest, and a release that keeps more has to change this page first, which is why the version above names the one it describes. A question about this policy, or a request about a copy of the list: <a href="mailto:aravinth@332321.xyz">aravinth@332321.xyz</a>.</p>
+</main>
+</body>
+</html>
