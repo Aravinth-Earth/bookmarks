@@ -125,3 +125,20 @@ export function clearDeviceStorage(storage = globalThis.localStorage) {
     }
   }
 }
+
+/**
+ * Wipe this device: the vault it holds, and every key this page writes.
+ *
+ * Both halves run from one call so a clear cannot take the vault and leave a key behind, or empty
+ * the keys and keep the seal. The icon maps are inside the sealed document, so `vault.clear()` is
+ * what removes them — the document, its history and the remembered key share one store, and it
+ * deletes every record in it. The key names an earlier version wrote are on `DEVICE_KEYS` and go
+ * with the rest.
+ *
+ * `vault` is the store from vault.js. A storage refusal is the caller's to handle: the caller
+ * decides whether a device that could not be wiped may go on being used.
+ */
+export async function clearDevice({ vault, storage = globalThis.localStorage }) {
+  await vault.clear();
+  clearDeviceStorage(storage);
+}
