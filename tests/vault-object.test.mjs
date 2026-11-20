@@ -2669,6 +2669,86 @@ test('a place can be signed out from the list, and its token is refused on the n
   assert.equal(write.status, 200);
 });
 
+test('a token nobody issued opens nothing, because the stored record is the session', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const session = await loginAs(harness, 'desktop');
+  const token = session.body.token;
+  assert.match(token, /^[A-Za-z0-9_-]{43}$/, 'thirty-two random bytes, base64url');
+  assert.equal(token.includes('.'), false, 'no stamp and no signature travel with it');
+
+  /* The record is keyed by the token's digest and holds none of the string itself, so storage that
+     leaks is not a copy of every live sign-in. */
+  const keys = [...harness.storage.raw.keys()].filter((key) => key.startsWith('session:'));
+  assert.equal(keys.length, 1, 'one sign-in, one record');
+  assert.notEqual(keys[0], `session:${token}`, 'the record is not keyed by the token');
+  assert.equal(
+    JSON.stringify([...harness.storage.raw]).includes(token),
+    false,
+    'no record holds the token'
+  );
+
+  /* A string of the right shape that no sign-in made has no record to hash to, so it is refused:
+     the request is admitted by what is stored, not by what the token looks like. */
+  for (const path of ['/vault', '/sessions']) {
+    const refused = await harness.vault.fetch(
+      request(path, { method: 'GET', headers: withToken('A'.repeat(43)) })
+    );
+    assert.equal(refused.status, 401, `${path} admits a token no sign-in made`);
+  }
+
+  /* And the real token stops being a session the moment its record is gone — which is all a
+     sign-out elsewhere leaves behind. */
+  await harness.storage.delete(keys[0]);
+  const dropped = await harness.vault.fetch(
+    request('/vault', { method: 'GET', headers: withToken(token) })
+  );
+  assert.equal(dropped.status, 401, 'a token whose record is gone is refused');
+});
+
+/* A copy of the cookie is the same string, so nothing in the request tells it apart from the place
+   it was copied from. That is why ending a sign-in has to be a server-side act: the record goes,
+   and every copy of the string goes with it. */
+test('a copied token dies with the sign-in it was copied from', async () => {
+  const harness = object();
+  await provision(harness);
+
+  const owner = await loginAs(harness, 'desktop');
+  const copy = owner.body.token;
+
+  const live = await places(harness, copy);
+  assert.equal(live.status, 200, 'the copy is the session while the record exists');
+  assert.equal(live.body.count, 1);
+
+  const out = await read(
+    await harness.vault.fetch(request('/logout', { headers: withToken(copy), body: undefined }))
+  );
+  assert.equal(out.status, 200);
+  assert.equal(
+    [...harness.storage.raw.keys()].some((key) => key.startsWith('session:')),
+    false,
+    'signing out deleted the record, not only the client'
+  );
+
+  for (const [method, path] of [
+    ['GET', '/vault'],
+    ['GET', '/sessions'],
+    ['POST', '/logout']
+  ]) {
+    const refused = await harness.vault.fetch(
+      request(path, { method, headers: withToken(copy), body: undefined })
+    );
+    assert.equal(refused.status, 401, `${method} ${path} still answers the copied token`);
+  }
+
+  /* Signing out ends a session, not the account: the phrase opens it again, on a new string. */
+  const again = await loginAs(harness, 'desktop');
+  assert.equal(again.status, 200);
+  assert.notEqual(again.body.token, copy, 'a new sign-in is a new token');
+  assert.equal((await places(harness, again.body.token)).body.count, 1);
+});
+
 test('the last place, this one included, can be ended without touching the account or vault', async () => {
   const harness = object();
   await provision(harness);
