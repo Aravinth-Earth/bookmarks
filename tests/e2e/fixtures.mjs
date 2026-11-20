@@ -288,8 +288,8 @@ export async function unlockVault(page, phrase) {
 /**
  * Lock through Settings.
  *
- * The toolbar carries a Lock button, but it has no handler bound to it, so clicking it does nothing; the Settings
- * item is the path that actually locks. That defect is logged rather than fixed here.
+ * The toolbar's Lock button is bound to the same close path; this helper presses the Settings item
+ * so the sheet's own control keeps being exercised.
  */
 export async function lockVault(page) {
   const modal = await openSettings(page);
