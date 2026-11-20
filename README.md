@@ -337,9 +337,10 @@ not open the vault it already holds.
 ## Icons
 
 The Worker fetches each icon from the site's own `/favicon.ico`, or from the
-`<link rel="icon">` the page declares. A site that yields neither is asked again a week later;
-the automatic run covers up to twenty hosts per launch. The image is downscaled to 32px in the
-browser and stored inside the sealed vault as a data URI.
+`<link rel="icon">` the page declares. Nothing is fetched on the page's own initiative: an icon
+is asked for when the bookmark's own address is added, or from the Settings action that fills in
+the icons a vault is missing, which sends one request per host. An import asks for none. The
+image is downscaled to 32px in the browser and stored inside the sealed vault as a data URI.
 
 The browser never contacts a bookmarked site; this Worker does, and the site learns only that
 this Worker asked it for an icon, at that moment. The request names the host in a header, and the
